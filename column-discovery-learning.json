@@ -1,0 +1,29 @@
+{
+  "foundColumns": [
+    "id",
+    "student_id",
+    "activity_type",
+    "topic",
+    "timestamp"
+  ],
+  "errors": [
+    {
+      "col": "target_id",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_learning_activities.target_id does not exist"
+      }
+    },
+    {
+      "col": "created_at",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_learning_activities.created_at does not exist"
+      }
+    }
+  ]
+}

@@ -1,7 +1,10 @@
 
 import React, { useEffect, useState, useCallback, Suspense, lazy } from 'react';
+import { Routes, Route, Navigate, useNavigate, useLocation, useParams } from 'react-router-dom';
 import gsap from 'gsap';
 import ScrollTrigger from 'gsap/ScrollTrigger';
+
+import { supabase } from './lib/supabase';
 
 // Lazy load components
 const Navbar = lazy(() => import('./components/Navbar'));
@@ -17,8 +20,9 @@ const Footer = lazy(() => import('./components/Footer'));
 const CustomCursor = lazy(() => import('./components/CustomCursor'));
 const BackgroundParticles = lazy(() => import('./components/BackgroundParticles'));
 const ScrollToTop = lazy(() => import('./components/ScrollToTop'));
-const RoleSelectionModal = lazy(() => import('./components/RoleSelectionModal'));
-const GlobalNotifications = lazy(() => import('./components/GlobalNotifications'));
+import RoleSelectionModal from './components/RoleSelectionModal';
+import GlobalNotifications from './components/GlobalNotifications';
+import StudentAITutor from './components/StudentAITutor';
 
 // Lazy load pages
 const TeacherAuth = lazy(() => import('./pages/TeacherAuth'));
@@ -40,73 +44,101 @@ const NotFound = lazy(() => import('./pages/NotFound'));
 const Laboratory = lazy(() => import('./pages/Laboratory'));
 const PeerReviewHub = lazy(() => import('./pages/PeerReviewHub'));
 const GradePredictor = lazy(() => import('./pages/GradePredictor'));
-
-import { supabase } from './lib/supabase';
+const CourseModules = lazy(() => import('./pages/CourseModules'));
+const StudentAssignments = lazy(() => import('./pages/StudentAssignments'));
 
 gsap.registerPlugin(ScrollTrigger);
 
-export type AppPath = 
-  | 'home' | 'teacher-login' | 'student-login' 
-  | 'teacher-dashboard' | 'teacher-upload' | 'teacher-assignments' | 'teacher-analytics' | 'teacher-persona' | 'teacher-discussions' | 'teacher-grading' | 'teacher-predictor'
-  | 'student-dashboard' | 'student-assignment' | 'student-materials' | 'student-discussion' | 'student-progress' | 'student-lab' | 'student-peer-review'
+export type AppPath =
+  | 'home' | 'teacher-login' | 'student-login'
+  | 'teacher-dashboard' | 'teacher-upload' | 'teacher-assignments' | 'teacher-analytics' | 'teacher-persona' | 'teacher-discussions' | 'teacher-grading' | 'teacher-predictor' | 'teacher-modules'
+  | 'student-dashboard' | 'student-assignment' | 'student-materials' | 'student-discussion' | 'student-progress' | 'student-lab' | 'student-peer-review' | 'student-modules' | 'student-assignments'
   | 'settings' | '404';
+
+const getRole = (u: any): 'teacher' | 'student' | null => {
+  if (!u) return null;
+  const role = u.user_metadata?.role || u.app_metadata?.role;
+  if (role === 'teacher') return 'teacher';
+  if (role === 'student') return 'student';
+  return null;
+};
+
+const LoadingFallback = () => (
+  <div className="h-screen w-full flex flex-col items-center justify-center bg-[#F9F8F3] font-['Plus_Jakarta_Sans']">
+    <div className="w-12 h-12 border-4 border-zinc-200 border-t-zinc-900 rounded-full animate-spin mb-6"></div>
+    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-zinc-400 animate-pulse">Loading Hub Module...</p>
+  </div>
+);
+
+const ProtectedRoute = ({ children, allowedRole, user, isCheckingAuth }: any) => {
+  const location = useLocation();
+
+  if (isCheckingAuth) return <LoadingFallback />;
+  if (!user) return <Navigate to="/" state={{ from: location }} replace />;
+
+  const role = getRole(user);
+  if (allowedRole && role !== allowedRole) {
+    return <Navigate to={role === 'teacher' ? '/teacher/dashboard' : '/student/dashboard'} replace />;
+  }
+
+  return children;
+};
 
 const App: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [currentPath, setCurrentPath] = useState<AppPath>('home');
-  const [history, setHistory] = useState<AppPath[]>([]);
-  const [selectedAssignmentId, setSelectedAssignmentId] = useState<string | null>(null);
   const [user, setUser] = useState<any>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
 
-  const getRole = (u: any): 'teacher' | 'student' | null => {
-    if (!u) return null;
-    const role = u.user_metadata?.role || u.app_metadata?.role;
-    if (role === 'teacher') return 'teacher';
-    if (role === 'student') return 'student';
-    return null;
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Map AppPath to URLs for reverse compatibility if needed
+  const pathToUrl = (path: AppPath, params?: { assignmentId?: string }): string => {
+    switch (path) {
+      case 'home': return '/';
+      case 'teacher-login': return '/teacher/login';
+      case 'student-login': return '/student/login';
+      case 'teacher-dashboard': return '/teacher/dashboard';
+      case 'teacher-upload': return '/teacher/upload';
+      case 'teacher-assignments': return '/teacher/assignments';
+      case 'teacher-analytics': return '/teacher/analytics';
+      case 'teacher-persona': return '/teacher/persona';
+      case 'teacher-discussions': return '/teacher/discussions';
+      case 'teacher-grading': return '/teacher/grading';
+      case 'teacher-predictor': return '/teacher/predictor';
+      case 'student-dashboard': return '/student/dashboard';
+      case 'student-materials': return '/student/materials';
+      case 'student-progress': return '/student/progress';
+      case 'student-lab': return '/student/lab';
+      case 'student-peer-review': return '/student/peer-review';
+      case 'settings': return '/settings';
+      case 'teacher-modules': return '/teacher/modules';
+      case 'student-modules': return '/student/modules';
+      case 'student-assignments': return '/student/assignments';
+      case 'student-assignment': return `/student/assignment/${params?.assignmentId || ''}`;
+      case 'student-discussion': return `/student/discussion/${params?.assignmentId || ''}`;
+      default: return '/404';
+    }
   };
 
-  const navigateTo = useCallback((path: AppPath, params?: { assignmentId?: string }) => {
-    if (params?.assignmentId) setSelectedAssignmentId(params.assignmentId);
-    setHistory(prev => [...prev, currentPath]);
-    setCurrentPath(path);
+  const navigateTo = useCallback((path: AppPath, params?: any) => {
+    navigate(pathToUrl(path, params), { state: params });
     window.scrollTo(0, 0);
     setIsModalOpen(false);
-  }, [currentPath]);
+  }, [navigate]);
 
   const goBack = useCallback(() => {
-    if (history.length > 0) {
-      const newHistory = [...history];
-      const prevPath = newHistory.pop()!;
-      setHistory(newHistory);
-      setCurrentPath(prevPath);
-    } else {
-      const role = getRole(user);
-      if (role === 'teacher') setCurrentPath('teacher-dashboard');
-      else if (role === 'student') setCurrentPath('student-dashboard');
-      else setCurrentPath('home');
-    }
+    navigate(-1);
     window.scrollTo(0, 0);
-  }, [history, user]);
+  }, [navigate]);
 
   useEffect(() => {
     const initSession = async () => {
-      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Auth node timeout')), 3500));
-      
       try {
-        const { data: { session } } = await Promise.race([
-          supabase.auth.getSession(),
-          timeout
-        ]) as any;
-        
+        const { data: { session } } = await supabase.auth.getSession();
         if (session?.user) {
           setUser(session.user);
-          const role = getRole(session.user);
-          if (role && (currentPath === 'home' || currentPath.includes('-login'))) {
-            setCurrentPath(role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard');
-          }
         }
       } catch (error: any) {
         console.warn("Auth initialization deferred. Error:", error?.message);
@@ -120,46 +152,22 @@ const App: React.FC = () => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
         setUser(session.user);
-        if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-          const role = getRole(session.user);
-          if (role && (currentPath === 'home' || currentPath.includes('-login'))) {
-            setCurrentPath(role === 'teacher' ? 'teacher-dashboard' : 'student-dashboard');
-          }
-        }
       } else {
         setUser(null);
         if (event === 'SIGNED_OUT') {
-          setHistory([]);
-          setCurrentPath('home');
+          navigate('/');
         }
       }
     });
 
     return () => subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (user && !isCheckingAuth) {
-      const role = getRole(user);
-      if (!role) return;
-      
-      const isTeacherPath = currentPath.startsWith('teacher-');
-      const isStudentPath = currentPath.startsWith('student-');
-      
-      // Strict role enforcement
-      if (role === 'teacher' && isStudentPath) {
-        setCurrentPath('teacher-dashboard');
-      } else if (role === 'student' && isTeacherPath) {
-        setCurrentPath('student-dashboard');
-      }
-    }
-  }, [currentPath, user, isCheckingAuth]);
+  }, [navigate]);
 
   const commonProps = {
     onBack: goBack,
     onNavigateTo: navigateTo,
-    onLogout: async () => { 
-      try { await supabase.auth.signOut(); } catch (e) { setUser(null); setCurrentPath('home'); }
+    onLogout: async () => {
+      try { await supabase.auth.signOut(); } catch (e) { setUser(null); navigate('/'); }
     },
     onOpenNotifs: () => setIsNotifOpen(true)
   };
@@ -177,46 +185,8 @@ const App: React.FC = () => {
     </div>
   );
 
-  const renderContent = () => {
-    const isPublic = ['home', 'teacher-login', 'student-login', '404'].includes(currentPath);
-    const userRole = user ? getRole(user) : null;
-
-    if (!user && !isPublic) {
-      return <main><Hero onGetStarted={() => setIsModalOpen(true)} /><SocialProof /><Features /><InteractiveDemo /><AITutorSection onGetStarted={() => setIsModalOpen(true)} /><Stats /><Testimonials /><CTA onGetStarted={() => setIsModalOpen(true)} /></main>;
-    }
-
-    switch(currentPath) {
-      case 'home': return <main><Hero onGetStarted={() => setIsModalOpen(true)} /><SocialProof /><Features /><InteractiveDemo /><AITutorSection onGetStarted={() => setIsModalOpen(true)} /><Stats /><Testimonials /><CTA onGetStarted={() => setIsModalOpen(true)} /></main>;
-      case 'teacher-login': return <TeacherAuth onBack={goBack} onSuccess={() => navigateTo('teacher-dashboard')} />;
-      case 'student-login': return <StudentAuth onBack={goBack} onSuccess={() => navigateTo('student-dashboard')} />;
-      case 'teacher-dashboard': return userRole === 'teacher' ? <TeacherDashboard {...commonProps} currentPath={currentPath} /> : null;
-      case 'teacher-upload': return userRole === 'teacher' ? <UploadMaterials {...commonProps} currentPath={currentPath} /> : null;
-      case 'teacher-assignments': return userRole === 'teacher' ? <CreateAssignment {...commonProps} /> : null;
-      case 'teacher-analytics': return userRole === 'teacher' ? <StudentsAnalytics {...commonProps} /> : null;
-      case 'teacher-grading': return userRole === 'teacher' ? <GradingHub {...commonProps} currentPath={currentPath} /> : null;
-      case 'teacher-persona': return userRole === 'teacher' ? <PersonaSetup {...commonProps} currentPath={currentPath} /> : null;
-      case 'teacher-discussions': return userRole === 'teacher' ? <DiscussionsManagement {...commonProps} currentPath={currentPath} /> : null;
-      case 'teacher-predictor': return userRole === 'teacher' ? <GradePredictor {...commonProps} currentPath={currentPath} /> : null;
-      case 'student-dashboard': return userRole === 'student' ? <StudentDashboard {...commonProps} currentPath={currentPath} onSelectAssignment={(id, type) => navigateTo(type === 'discussion' ? 'student-discussion' : 'student-assignment', { assignmentId: id })} onNavigateMaterials={() => navigateTo('student-materials')} onNavigateProgress={() => navigateTo('student-progress')} onNavigateDashboard={() => navigateTo('student-dashboard')} onNavigateSettings={() => navigateTo('settings')} onNavigateLab={() => navigateTo('student-lab')} onNavigatePeerReview={() => navigateTo('student-peer-review')} /> : null;
-      case 'student-materials': return userRole === 'student' ? <CourseMaterials {...commonProps} {...studentNavProps} /> : null;
-      case 'student-assignment': return userRole === 'student' ? <AssignmentWork assignmentId={selectedAssignmentId || ''} {...commonProps} currentPath={currentPath} /> : null;
-      case 'student-discussion': return userRole === 'student' ? <StudentDiscussion assignmentId={selectedAssignmentId || ''} {...commonProps} {...studentNavProps} /> : null;
-      case 'student-progress': return userRole === 'student' ? <StudentProgress {...commonProps} {...studentNavProps} /> : null;
-      case 'student-lab': return userRole === 'student' ? <Laboratory {...commonProps} currentPath={currentPath} /> : null;
-      case 'student-peer-review': return userRole === 'student' ? <PeerReviewHub {...commonProps} currentPath={currentPath} /> : null;
-      case 'settings': return userRole ? <Settings {...commonProps} /> : null;
-      default: return <NotFound onBack={() => navigateTo(user ? (getRole(user) === 'teacher' ? 'teacher-dashboard' : 'student-dashboard') : 'home')} />;
-    }
-  };
-
-  const isAuthPage = currentPath === 'teacher-login' || currentPath === 'student-login';
-
-  const LoadingFallback = () => (
-    <div className="h-screen w-full flex flex-col items-center justify-center bg-[#F9F8F3] font-['Plus_Jakarta_Sans']">
-      <div className="w-12 h-12 border-4 border-zinc-200 border-t-zinc-900 rounded-full animate-spin mb-6"></div>
-      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-zinc-400 animate-pulse">Loading Hub Module...</p>
-    </div>
-  );
+  const isAuthPage = location.pathname.includes('/login');
+  const isHomePage = location.pathname === '/';
 
   return (
     <div className="relative w-full min-h-full">
@@ -224,14 +194,81 @@ const App: React.FC = () => {
         <BackgroundParticles />
         {!isAuthPage && <CustomCursor />}
         {!isAuthPage && <ScrollToTop />}
-        {!isAuthPage && currentPath === 'home' && <Navbar onGetStarted={() => setIsModalOpen(true)} />}
-        {renderContent()}
-        {!isAuthPage && currentPath === 'home' && <Footer />}
+        {!isAuthPage && isHomePage && <Navbar onGetStarted={() => setIsModalOpen(true)} />}
+
+        <Routes>
+          <Route path="/" element={
+            user ? (
+              <Navigate to={getRole(user) === 'teacher' ? '/teacher/dashboard' : '/student/dashboard'} replace />
+            ) : (
+              <main>
+                <Hero onGetStarted={() => setIsModalOpen(true)} />
+                <SocialProof />
+                <Features />
+                <InteractiveDemo />
+                <AITutorSection onGetStarted={() => setIsModalOpen(true)} />
+                <Stats />
+                <Testimonials />
+                <CTA onGetStarted={() => setIsModalOpen(true)} />
+              </main>
+            )
+          } />
+
+          <Route path="/teacher/login" element={<TeacherAuth onBack={goBack} onSuccess={() => navigateTo('teacher-dashboard')} />} />
+          <Route path="/student/login" element={<StudentAuth onBack={goBack} onSuccess={() => navigateTo('student-dashboard')} />} />
+
+          {/* Teacher Routes */}
+          <Route path="/teacher/dashboard" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><TeacherDashboard {...commonProps} currentPath="teacher-dashboard" /></ProtectedRoute>} />
+          <Route path="/teacher/upload" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><UploadMaterials {...commonProps} currentPath="teacher-upload" /></ProtectedRoute>} />
+          <Route path="/teacher/assignments" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><CreateAssignment {...commonProps} /></ProtectedRoute>} />
+          <Route path="/teacher/analytics" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><StudentsAnalytics {...commonProps} /></ProtectedRoute>} />
+          <Route path="/teacher/grading" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><GradingHub {...commonProps} currentPath="teacher-grading" /></ProtectedRoute>} />
+          <Route path="/teacher/persona" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><PersonaSetup {...commonProps} currentPath="teacher-persona" /></ProtectedRoute>} />
+          <Route path="/teacher/discussions" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><DiscussionsManagement {...commonProps} currentPath="teacher-discussions" /></ProtectedRoute>} />
+          <Route path="/teacher/modules" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><CourseModules {...commonProps} currentPath="teacher-modules" role="teacher" /></ProtectedRoute>} />
+
+          {/* Student Routes */}
+          <Route path="/student/dashboard" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}>
+            <StudentDashboard {...commonProps} currentPath="student-dashboard"
+              onSelectAssignment={(id, type) => navigateTo(type === 'discussion' ? 'student-discussion' : 'student-assignment', { assignmentId: id })}
+              onNavigateMaterials={() => navigateTo('student-materials')}
+              onNavigateProgress={() => navigateTo('student-progress')}
+              onNavigateDashboard={() => navigateTo('student-dashboard')}
+              onNavigateSettings={() => navigateTo('settings')}
+              onNavigateLab={() => navigateTo('student-lab')}
+              onNavigatePeerReview={() => navigateTo('student-peer-review')}
+            />
+          </ProtectedRoute>} />
+          <Route path="/student/materials" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><CourseMaterials {...commonProps} {...studentNavProps} currentPath="student-materials" user={user} /></ProtectedRoute>} />
+          <Route path="/student/assignments" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><StudentAssignments {...commonProps} currentPath="student-assignments" user={user} /></ProtectedRoute>} />
+          <Route path="/student/assignment/:assignmentId" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><AssignmentWrapper {...commonProps} type="assignment" /></ProtectedRoute>} />
+          <Route path="/student/discussion/:assignmentId" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><AssignmentWrapper {...commonProps} type="discussion" /></ProtectedRoute>} />
+          <Route path="/student/progress" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><StudentProgress {...commonProps} {...studentNavProps} /></ProtectedRoute>} />
+          <Route path="/student/lab" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><Laboratory {...commonProps} currentPath="student-lab" /></ProtectedRoute>} />
+          <Route path="/student/peer-review" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><PeerReviewHub {...commonProps} currentPath="student-peer-review" /></ProtectedRoute>} />
+          <Route path="/student/modules" element={<ProtectedRoute allowedRole="student" user={user} isCheckingAuth={isCheckingAuth}><CourseModules {...commonProps} currentPath="student-modules" role="student" /></ProtectedRoute>} />
+
+          <Route path="/settings" element={<ProtectedRoute user={user} isCheckingAuth={isCheckingAuth}><Settings {...commonProps} /></ProtectedRoute>} />
+          <Route path="*" element={<NotFound onBack={() => navigate('/')} />} />
+        </Routes>
+
+        {!isAuthPage && isHomePage && <Footer />}
         <RoleSelectionModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onNavigate={(path) => navigateTo(path as AppPath)} />
         <GlobalNotifications isOpen={isNotifOpen} onClose={() => setIsNotifOpen(false)} />
+
+        {/* Global Student AI Tutor */}
+        {user && location.pathname.startsWith('/student') && (
+          <StudentAITutor studentName={user.user_metadata?.full_name?.split(' ')[0] || 'Student'} />
+        )}
       </Suspense>
     </div>
   );
+};
+
+const AssignmentWrapper = (props: any) => {
+  const { assignmentId } = useParams();
+  const Component = props.type === 'discussion' ? StudentDiscussion : AssignmentWork;
+  return <Component assignmentId={assignmentId || ''} {...props} currentPath={props.type === 'discussion' ? 'student-discussion' : 'student-assignment'} />;
 };
 
 export default App;

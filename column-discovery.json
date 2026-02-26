@@ -1,0 +1,58 @@
+{
+  "foundColumns": [
+    "id",
+    "student_id",
+    "assignment_id",
+    "interaction_type",
+    "timestamp",
+    "grade",
+    "feedback"
+  ],
+  "errors": [
+    {
+      "col": "content",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_assignment_logs.content does not exist"
+      }
+    },
+    {
+      "col": "metadata",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_assignment_logs.metadata does not exist"
+      }
+    },
+    {
+      "col": "created_at",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_assignment_logs.created_at does not exist"
+      }
+    },
+    {
+      "col": "updated_at",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_assignment_logs.updated_at does not exist"
+      }
+    },
+    {
+      "col": "score",
+      "error": {
+        "code": "42703",
+        "details": null,
+        "hint": null,
+        "message": "column student_assignment_logs.score does not exist"
+      }
+    }
+  ]
+}

@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { supabase } from '../lib/supabase';
-import StudentAITutor from '../components/StudentAITutor';
 import AppSidebar from '../components/AppSidebar';
 import { DashboardSkeleton } from '../components/Skeleton';
 import { AppPath } from '../App';
@@ -41,13 +40,13 @@ const StudentDashboard: React.FC<StudentDashboardProps> = (props) => {
       const { data: allMaterials } = await supabase.from('instructional_materials').select('*');
       const { data: viewedLogs } = await supabase.from('student_learning_activities').select('target_id, topic').eq('student_id', session.user.id);
       const { data: allAssignments } = await supabase.from('assignments').select('*').order('due_date', { ascending: true });
-      const { data: submissionLogs } = await supabase.from('student_assignment_logs').select('assignment_id, metadata').eq('student_id', session.user.id);
-      
+      const { data: submissionLogs } = await supabase.from('student_assignment_logs').select('assignment_id').eq('student_id', session.user.id);
+
       const viewedSet = new Set(viewedLogs?.map(l => l.target_id) || []);
-      const submittedSet = new Set(submissionLogs?.filter(l => !l.metadata?.parent_id).map(l => l.assignment_id) || []);
+      const submittedSet = new Set(submissionLogs?.map(l => l.assignment_id) || []);
 
       setAssignments(allAssignments?.map(a => ({ ...a, isSubmitted: submittedSet.has(a.id) })) || []);
-      
+
       const totalItems = (allMaterials?.length || 0) + (allAssignments?.length || 0);
       const doneItems = viewedSet.size + submittedSet.size;
 
@@ -110,20 +109,20 @@ const StudentDashboard: React.FC<StudentDashboardProps> = (props) => {
   }, [loading]);
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] overflow-hidden relative font-['Plus_Jakarta_Sans']">
-      <StudentAITutor studentName={userProfile?.user_metadata?.full_name?.split(' ')[0] || 'Student'} />
-      
-      <AppSidebar 
-        role="student" 
-        currentPath="student-dashboard" 
-        onNavigateTo={props.onNavigateTo} 
-        collapsed={sidebarCollapsed} 
-        setCollapsed={setSidebarCollapsed} 
+    <div className="flex h-screen bg-[var(--bg-main)] overflow-hidden relative font-['Plus_Jakarta_Sans'] transition-colors duration-500">
+      <div className="absolute inset-0 bg-gradient-to-br from-[var(--brand-primary)]/5 via-transparent to-[var(--brand-secondary)]/5 pointer-events-none"></div>
+
+      <AppSidebar
+        role="student"
+        currentPath="student-dashboard"
+        onNavigateTo={props.onNavigateTo}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
         onLogout={props.onLogout}
       />
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
-        <header className="h-20 bg-white border-b border-zinc-100 flex items-center justify-between px-12 shrink-0 z-40">
+        <header className="h-20 bg-[var(--bg-card)] border-b-2 border-[var(--border-primary)] flex items-center justify-between px-12 shrink-0 z-40 shadow-sm">
           <div className="flex items-center space-x-6">
             <button onClick={props.onBack} className="w-10 h-10 rounded-full hover:bg-zinc-50 flex items-center justify-center text-zinc-400 transition-colors">←</button>
             <div className="hidden md:flex items-center px-6 h-12 bg-zinc-50 rounded-2xl border border-zinc-100 w-80">
@@ -136,9 +135,9 @@ const StudentDashboard: React.FC<StudentDashboardProps> = (props) => {
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
               <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-cyan-500 rounded-full border-2 border-white animate-pulse"></span>
             </button>
-            <button onClick={() => setProfileOpen(!profileOpen)} className="w-12 h-12 bg-cyan-600 rounded-2xl flex items-center justify-center font-black text-white shadow-xl hover:scale-105 transition-all">{userProfile?.user_metadata?.full_name?.charAt(0) || 'S'}</button>
+            <button onClick={() => setProfileOpen(!profileOpen)} className="w-13 h-13 bg-[var(--text-primary)] rounded-2xl flex items-center justify-center font-black text-white shadow-xl hover:scale-105 transition-all">{userProfile?.user_metadata?.full_name?.charAt(0) || 'S'}</button>
             {profileOpen && (
-              <div className="absolute right-12 top-20 w-56 bg-white rounded-2xl shadow-2xl border border-zinc-50 p-2 z-50 animate-pop-in">
+              <div className="absolute right-12 top-20 w-64 bg-[var(--bg-card)] rounded-[2rem] shadow-[var(--shadow-xl)] border-2 border-[var(--border-primary)] p-3 z-50 animate-pop-in">
                 <button onClick={() => props.onNavigateTo('settings')} className="w-full px-4 py-3 text-left text-[11px] font-bold text-zinc-600 hover:bg-zinc-50 rounded-xl flex items-center space-x-3"><Icons.IconSettings className="w-4 h-4" /> <span>Account Settings</span></button>
                 <button onClick={props.onLogout} className="w-full px-4 py-3 text-left text-[11px] font-bold text-red-600 hover:bg-red-50 rounded-xl flex items-center space-x-3 mt-1"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg><span>Sign Out</span></button>
               </div>
@@ -158,33 +157,35 @@ const StudentDashboard: React.FC<StudentDashboardProps> = (props) => {
                 </div>
 
                 <div className="stagger-item grid grid-cols-1 md:grid-cols-2 gap-8">
-                  <button onClick={props.onNavigatePeerReview} className="bg-white p-10 rounded-[3rem] border border-zinc-100 shadow-xl group hover:border-cyan-400 transition-all text-left">
-                    <div className="w-14 h-14 bg-cyan-50 rounded-2xl flex items-center justify-center mb-8 group-hover:scale-110 transition-transform"><Icons.IconUsers className="w-8 h-8 text-cyan-600" /></div>
-                    <h3 className="text-2xl font-black text-zinc-900 mb-2 tracking-tight">Peer Review Hub</h3>
-                    <p className="text-zinc-500 font-medium leading-relaxed">Collaborate and critique peer visualizations to earn points.</p>
+                  <button onClick={props.onNavigatePeerReview} className="ui-card p-10 group hover:border-[var(--brand-primary)] text-left flex flex-col">
+                    <div className="w-16 h-16 bg-[var(--brand-primary)]/10 rounded-2.5xl flex items-center justify-center mb-10 group-hover:scale-110 transition-transform"><Icons.IconUsers className="w-10 h-10 text-[var(--brand-primary)]" /></div>
+                    <h3 className="text-3xl font-black text-[var(--text-primary)] mb-3 tracking-tight font-['Space_Grotesk'] uppercase leading-none">Peer Review</h3>
+                    <p className="text-[var(--text-muted)] font-bold leading-relaxed">Collaborate and critique peer visualizations to earn Hub points.</p>
                   </button>
-                  <button onClick={props.onNavigateLab} className="bg-[#18181B] p-10 rounded-[3rem] shadow-2xl group text-left">
-                    <div className="w-14 h-14 bg-white/10 rounded-2xl flex items-center justify-center mb-8 group-hover:scale-110 transition-transform"><Icons.IconLab className="w-8 h-8 text-cyan-400" /></div>
-                    <h3 className="text-2xl font-black text-white mb-2 tracking-tight">Data Sandbox</h3>
-                    <p className="text-zinc-400 font-medium leading-relaxed">Test your JSON/CSV schema with AI-driven insights.</p>
+                  <button onClick={props.onNavigateLab} className="bg-[#0F172A] p-10 rounded-[2.5rem] shadow-2xl group text-left border-4 border-white/5">
+                    <div className="w-16 h-16 bg-white/10 rounded-2.5xl flex items-center justify-center mb-10 group-hover:scale-110 transition-transform"><Icons.IconLab className="w-10 h-10 text-cyan-400" /></div>
+                    <h3 className="text-3xl font-black text-white mb-3 tracking-tight font-['Space_Grotesk'] uppercase leading-none">Data Sandbox</h3>
+                    <p className="text-zinc-400 font-bold leading-relaxed">Test your JSON/CSV schema with AI-driven insights.</p>
                   </button>
                 </div>
 
                 <div className="stagger-item">
                   <h2 className="text-3xl font-black text-zinc-900 tracking-tight mb-8 font-['Space_Grotesk'] uppercase">Active Labs</h2>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     {assignments.length > 0 ? assignments.map((a) => (
-                      <div key={a.id} onClick={() => props.onSelectAssignment(a.id, a.assignment_type)} className="bg-white p-8 rounded-[2.5rem] border border-zinc-100 shadow-xl hover:shadow-2xl hover:translate-y-[-4px] transition-all cursor-pointer group">
-                         <div className="flex justify-between items-start mb-6">
-                            <div className="p-3 bg-zinc-50 rounded-2xl">{a.assignment_type === 'discussion' ? <Icons.IconChat className="w-6 h-6 text-zinc-600" /> : <Icons.IconDraft className="w-6 h-6 text-zinc-600" />}</div>
-                            <span className={`px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest ${a.isSubmitted ? 'bg-green-50 text-green-600' : 'bg-yellow-50 text-yellow-600'}`}>{a.isSubmitted ? 'Synchronized' : 'Action Required'}</span>
-                         </div>
-                         <h3 className="text-xl font-bold text-zinc-900 mb-2 leading-tight group-hover:text-cyan-600 transition-colors">{a.assignment_name}</h3>
-                         <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-6">Topic: {a.topic}</p>
-                         <div className="pt-6 border-t border-zinc-50 flex items-center justify-between">
-                            <span className="text-[10px] font-bold text-zinc-400 uppercase">Due {a.due_date ? new Date(a.due_date).toLocaleDateString() : 'TBD'}</span>
-                            <span className="text-cyan-600 font-black text-xs uppercase tracking-widest">Open Hub →</span>
-                         </div>
+                      <div key={a.id} onClick={() => props.onSelectAssignment(a.id, a.assignment_type)} className="ui-card p-8 hover:shadow-[var(--shadow-xl)] hover:-translate-y-1 transition-all cursor-pointer group flex flex-col justify-between h-72">
+                        <div className="flex justify-between items-start">
+                          <div className="p-4 bg-[var(--bg-nested)] border border-[var(--border-primary)] rounded-2xl">{a.assignment_type === 'discussion' ? <Icons.IconChat className="w-7 h-7 text-[var(--text-secondary)]" /> : <Icons.IconDraft className="w-7 h-7 text-[var(--text-secondary)]" />}</div>
+                          <span className={`px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-[0.15em] border-2 ${a.isSubmitted ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-amber-50 text-amber-600 border-amber-200'}`}>{a.isSubmitted ? 'Synchronized' : 'Required'}</span>
+                        </div>
+                        <div>
+                          <h3 className="text-2xl font-black text-[var(--text-primary)] mb-2 tracking-tight font-['Space_Grotesk'] leading-none group-hover:text-[var(--brand-primary)] transition-colors line-clamp-2">{a.assignment_name}</h3>
+                          <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Topic: {a.topic}</p>
+                        </div>
+                        <div className="pt-6 border-t-2 border-[var(--bg-nested)] flex items-center justify-between">
+                          <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Due {a.due_date ? new Date(a.due_date).toLocaleDateString() : 'TBD'}</span>
+                          <span className="text-[var(--brand-primary)] font-black text-[10px] uppercase tracking-widest">Open Hub →</span>
+                        </div>
                       </div>
                     )) : (
                       <div className="col-span-full py-16 text-center bg-white rounded-[3rem] border border-dashed border-zinc-200"><p className="text-xs font-bold text-zinc-400 uppercase tracking-[0.2em]">No assignments detected in ledger</p></div>

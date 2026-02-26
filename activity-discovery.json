@@ -1,0 +1,65 @@
+{
+  "activity_logs": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": null,
+      "message": "Could not find the table 'public.activity_logs' in the schema cache"
+    }
+  },
+  "logs": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": null,
+      "message": "Could not find the table 'public.logs' in the schema cache"
+    }
+  },
+  "audit_logs": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": "Perhaps you meant the table 'public.student_assignment_logs'",
+      "message": "Could not find the table 'public.audit_logs' in the schema cache"
+    }
+  },
+  "user_activities": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": "Perhaps you meant the table 'public.student_learning_activities'",
+      "message": "Could not find the table 'public.user_activities' in the schema cache"
+    }
+  },
+  "activity": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": null,
+      "message": "Could not find the table 'public.activity' in the schema cache"
+    }
+  },
+  "system_logs": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": "Perhaps you meant the table 'public.student_assignment_logs'",
+      "message": "Could not find the table 'public.system_logs' in the schema cache"
+    }
+  },
+  "platform_logs": {
+    "exists": false,
+    "error": {
+      "code": "PGRST205",
+      "details": null,
+      "hint": null,
+      "message": "Could not find the table 'public.platform_logs' in the schema cache"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 
 import { supabase } from './supabase';
 
-export type LogAction = 'UPLOAD' | 'DELETE' | 'AI_QUERY' | 'LOGIN_EVENT' | 'DATABASE_UPDATE' | 'GRADE_ASSIGNMENT';
+export type LogAction = 'UPLOAD' | 'DELETE' | 'AI_QUERY' | 'LOGIN_EVENT' | 'DATABASE_UPDATE' | 'GRADE_ASSIGNMENT' | 'BULK_GRADE_PUBLISH';
 
 export const logActivity = async (action: LogAction, details: string, metadata: any = {}) => {
   // Fire and forget logging to avoid blocking UI.
@@ -9,7 +9,7 @@ export const logActivity = async (action: LogAction, details: string, metadata: 
   (async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      
+
       const sanitizedMetadata = { ...metadata };
       delete sanitizedMetadata.password;
       delete sanitizedMetadata.token;

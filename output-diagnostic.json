@@ -1,0 +1,23 @@
+{
+  "signUpErr": null,
+  "sessionExists": true,
+  "insertErr": {
+    "code": "42501",
+    "details": null,
+    "hint": null,
+    "message": "new row violates row-level security policy for table \"students\""
+  },
+  "afterStudents": [
+    {
+      "id": "25adaf17-c1d5-405b-bd78-b758b27818c7",
+      "student_email": "test.student@usf.edu",
+      "student_name": "Test Student",
+      "introduction": null,
+      "enrolled_courses": [
+        "BIG_DATA_2026"
+      ],
+      "created_at": "2026-02-05T18:21:58.575899+00:00",
+      "updated_at": "2026-02-05T18:21:58.575899+00:00"
+    }
+  ]
+}

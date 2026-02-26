@@ -8,6 +8,7 @@ import AppSidebar from '../components/AppSidebar';
 import { AppPath } from '../App';
 import * as Icons from '../components/Icons';
 import { GoogleGenAI, Type } from "@google/genai";
+import ThemeToggle from '../components/ThemeToggle';
 
 interface CreateAssignmentProps {
   onBack: () => void;
@@ -142,6 +143,13 @@ const CreateAssignment: React.FC<CreateAssignmentProps> = ({ onBack, onNavigateT
     // 1. Determine Final Topic
     const finalTopic = formData.topic === 'Custom' ? formData.customTopic : formData.topic;
 
+    // Extract chapter number from predefined topics like "Chapter 1: Intro to Big Data"
+    let chapterNumber = null;
+    const chapterMatch = finalTopic.match(/^Chapter (\d+):/i);
+    if (chapterMatch && chapterMatch[1]) {
+      chapterNumber = parseInt(chapterMatch[1], 10);
+    }
+
     // 2. Validation
     if (!formData.title) {
       setToast({ message: "Asset Title is required.", type: 'error' });
@@ -178,7 +186,7 @@ const CreateAssignment: React.FC<CreateAssignmentProps> = ({ onBack, onNavigateT
     try {
       // 3. Construct Payload
       let finalContent = formData.content;
-      
+
       // If quiz, we serialize the questions and time limit into the content field (or a separate jsonb field if schema allows, assuming content text for now)
       if (formData.type === 'quiz') {
         finalContent = JSON.stringify({
@@ -188,37 +196,38 @@ const CreateAssignment: React.FC<CreateAssignmentProps> = ({ onBack, onNavigateT
         });
       }
 
-      const { error } = await supabase.from('assignments').insert({ 
-        course_id: 'BIG_DATA_2026', 
-        assignment_name: formData.title, 
-        assignment_type: formData.type, 
-        topic: finalTopic, 
-        content: finalContent, 
-        grading_criteria: formData.rubric, 
-        points_possible: formData.points, 
-        due_date: formData.dueDate 
+      const { error } = await supabase.from('assignments').insert({
+        course_id: 'BIG_DATA_2026',
+        assignment_name: formData.title,
+        assignment_type: formData.type,
+        topic: finalTopic,
+        chapter_number: chapterNumber,
+        content: finalContent,
+        grading_criteria: formData.rubric,
+        points_possible: formData.points,
+        due_date: formData.dueDate
       });
       if (error) throw error;
-      
+
       await logActivity('DATABASE_UPDATE', `Published new assignment: ${formData.title}`);
       localStorage.removeItem(DRAFT_KEY);
       setLastSaved(null);
       fetchInitialData();
-      
+
       // Reset Form
-      setFormData({ 
-        type: 'discussion', 
-        topic: '', 
-        customTopic: '', 
-        title: '', 
-        content: '', 
-        rubric: '', 
-        points: 100, 
-        dueDate: '', 
-        timeLimit: 60, 
-        questions: [] 
+      setFormData({
+        type: 'discussion',
+        topic: '',
+        customTopic: '',
+        title: '',
+        content: '',
+        rubric: '',
+        points: 100,
+        dueDate: '',
+        timeLimit: 60,
+        questions: []
       });
-      
+
       setToast({ message: "Assignment Published Successfully!", type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message, type: 'error' });
@@ -259,7 +268,7 @@ const CreateAssignment: React.FC<CreateAssignmentProps> = ({ onBack, onNavigateT
     setAiLoading(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
+
       let prompt = "";
       let responseSchema: any = null;
 
@@ -338,327 +347,331 @@ const CreateAssignment: React.FC<CreateAssignmentProps> = ({ onBack, onNavigateT
   };
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] overflow-hidden font-['Plus_Jakarta_Sans']">
-      <AppSidebar 
-        role="teacher" 
-        currentPath={currentPath} 
-        onNavigateTo={onNavigateTo} 
-        collapsed={sidebarCollapsed} 
-        setCollapsed={setSidebarCollapsed} 
-        onLogout={onLogout} 
+    <div className="flex h-screen bg-[#F8FAFC] dark:bg-[#020617] overflow-hidden font-['Plus_Jakarta_Sans'] transition-colors">
+      <AppSidebar
+        role="teacher"
+        currentPath={currentPath}
+        onNavigateTo={onNavigateTo}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
+        onLogout={onLogout}
       />
 
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Header matched to Asset Hub */}
-        <header className="h-20 bg-white border-b border-zinc-200 flex items-center justify-between px-8 shrink-0 z-20">
+        <header className="h-20 bg-[var(--bg-card)] border-b-2 border-[var(--border-primary)] flex items-center justify-between px-8 shrink-0 z-20 shadow-sm">
           <div className="flex items-center space-x-4">
-             <h1 className="text-2xl font-black text-zinc-900 tracking-tighter uppercase font-['Space_Grotesk']">Architect</h1>
-             <div className="h-6 w-px bg-zinc-200"></div>
-             <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Lab Builder</span>
+            <h1 className="text-2xl font-black text-zinc-900 dark:text-white tracking-tighter uppercase font-['Space_Grotesk']">Architect</h1>
+            <div className="h-6 w-px bg-zinc-200 dark:bg-white/10"></div>
+            <span className="text-xs font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">Lab Builder</span>
           </div>
           <div className="flex items-center space-x-4">
-             <button onClick={onBack} className="w-10 h-10 rounded-full hover:bg-zinc-50 flex items-center justify-center text-zinc-400 transition-colors">✕</button>
+            <ThemeToggle />
+            <button onClick={onBack} className="w-10 h-10 rounded-full hover:bg-zinc-50 dark:hover:bg-white/5 flex items-center justify-center text-zinc-400 dark:text-zinc-500 transition-colors">✕</button>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-8 lg:p-12 scroll-smooth bg-[#F8FAFC]">
+        <div className="flex-1 overflow-y-auto p-8 lg:p-12 scroll-smooth bg-[var(--bg-main)]">
           <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-10 h-full">
-            
+
             {/* Left Column: Builder Form */}
             <div className="lg:col-span-7 space-y-8 animate-in pb-20">
-               {/* Banner */}
-               <div className="bg-gradient-to-r from-blue-600 to-cyan-500 rounded-[2rem] p-8 shadow-lg shadow-blue-900/10 text-white relative overflow-hidden">
-                  <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
-                  <button onClick={onBack} className="flex items-center space-x-2 text-white/80 hover:text-white transition-colors mb-4 text-xs font-bold uppercase tracking-widest">
-                     <span>← Go Back</span>
-                  </button>
-                  <h2 className="text-3xl font-black tracking-tight relative z-10">Design and publish course-specific data labs.</h2>
-               </div>
+              {/* Banner */}
+              <div className="bg-gradient-to-r from-blue-700 to-cyan-600 rounded-[2.5rem] p-10 shadow-xl text-white relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-white/20 rounded-full blur-[100px] -translate-y-1/2 translate-x-1/2"></div>
+                <button onClick={onBack} className="flex items-center space-x-2 text-white font-black mb-6 text-[10px] uppercase tracking-[0.2em] hover:opacity-80 transition-all">
+                  <span>← ARCHIVE HUB</span>
+                </button>
+                <h2 className="text-4xl font-black tracking-tighter leading-[1.1] relative z-10 max-w-md">Design and publish course-specific data labs.</h2>
+              </div>
 
-               {/* Form Card */}
-               <div className="bg-white rounded-[3rem] p-10 shadow-xl border border-zinc-100 relative">
-                  <div className="flex items-center justify-between mb-10">
-                     <div className="flex items-center space-x-4">
-                        <div className="w-14 h-14 bg-purple-50 rounded-2xl flex items-center justify-center text-2xl shadow-sm">📐</div>
-                        <h3 className="text-2xl font-black text-zinc-900 tracking-tight">Build New Lab</h3>
-                     </div>
-                     {lastSaved && (
-                        <div className="flex items-center space-x-3">
-                           <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Saved at {lastSaved}</span>
-                           <button onClick={discardDraft} className="text-[10px] font-black text-rose-500 uppercase tracking-widest hover:underline">Discard</button>
-                        </div>
-                     )}
+              {/* Form Card */}
+              <div className="ui-card p-10 relative">
+                <div className="flex items-center justify-between mb-10 border-b border-[var(--border-primary)] pb-8">
+                  <div className="flex items-center space-x-5">
+                    <div className="w-16 h-16 bg-[var(--bg-nested)] rounded-2xl flex items-center justify-center text-3xl shadow-inner border border-[var(--border-strong)]">📐</div>
+                    <div>
+                      <h3 className="text-2xl font-black text-[var(--text-primary)] tracking-tighter mb-1">Build New Lab</h3>
+                      <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Section Ledger Configuration</p>
+                    </div>
+                  </div>
+                  {lastSaved && (
+                    <div className="flex flex-col items-end">
+                      <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">Autosaved</span>
+                      <span className="text-xs font-black text-[var(--brand-primary)]">{lastSaved}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-10">
+                  {/* AI Assistant Section */}
+                  <div className="p-8 bg-blue-50/50 dark:bg-blue-900/10 rounded-[2rem] border-2 border-blue-100 dark:border-blue-500/20 space-y-4 shadow-inner">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-8 h-8 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg text-sm">✨</div>
+                      <h4 className="text-[10px] font-black text-blue-900 dark:text-blue-300 uppercase tracking-widest">AI Content Architect</h4>
+                    </div>
+                    <p className="text-xs font-bold text-blue-700/80 dark:text-blue-400">Provide a topic or learning objective, and I'll draft the {formData.type === 'quiz' ? 'questions' : 'instructions and rubric'} for you.</p>
+                    <div className="flex gap-3">
+                      <input
+                        value={aiTopic}
+                        onChange={e => setAiTopic(e.target.value)}
+                        placeholder="e.g., MapReduce Shuffle Phase..."
+                        className="flex-1 h-14 px-6 bg-white dark:bg-white/5 border-2 border-blue-200 dark:border-blue-500/20 rounded-2xl text-sm font-bold text-[var(--text-primary)] focus:border-blue-500 transition-all shadow-sm"
+                      />
+                      <button
+                        onClick={generateAssignmentContent}
+                        disabled={aiLoading}
+                        className="h-14 px-8 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all disabled:opacity-50 shadow-lg shadow-blue-500/20"
+                      >
+                        {aiLoading ? "Working..." : "Draft Content"}
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="space-y-8">
-                     {/* AI Assistant Section */}
-                     <div className="p-6 bg-purple-50 rounded-3xl border-2 border-purple-100 space-y-4">
-                        <div className="flex items-center space-x-3">
-                           <div className="w-8 h-8 bg-purple-600 rounded-xl flex items-center justify-center text-white shadow-lg">✨</div>
-                           <h4 className="text-sm font-black text-purple-900 uppercase tracking-widest">AI Content Architect</h4>
+                  {/* Row 1: Type & Topic */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Modality</label>
+                      <div className="relative">
+                        <select
+                          value={formData.type}
+                          onChange={e => setFormData({ ...formData, type: e.target.value })}
+                          className="w-full h-16 px-6 rounded-2xl appearance-none"
+                        >
+                          <option value="discussion">Discussion Thread</option>
+                          <option value="lab">Technical Lab</option>
+                          <option value="quiz">Data Quiz</option>
+                        </select>
+                        <div className="absolute right-6 top-1/2 -translate-y-1/2 pointer-events-none">
+                          <svg className="w-4 h-4 text-[var(--brand-primary)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
                         </div>
-                        <p className="text-xs font-medium text-purple-700 leading-relaxed">Provide a topic or learning objective, and I'll draft the {formData.type === 'quiz' ? 'questions' : 'instructions and rubric'} for you.</p>
-                        <div className="flex gap-3">
-                           <input 
-                              value={aiTopic}
-                              onChange={e => setAiTopic(e.target.value)}
-                              placeholder="e.g., MapReduce Shuffle Phase or D3.js Scales"
-                              className="flex-1 h-12 px-5 bg-white border-2 border-purple-200 rounded-xl text-xs font-bold text-zinc-900 focus:border-purple-500 focus:outline-none transition-all"
-                           />
-                           <button 
-                              onClick={generateAssignmentContent}
-                              disabled={aiLoading}
-                              className="h-12 px-6 bg-purple-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all disabled:opacity-50 flex items-center space-x-2"
-                           >
-                              {aiLoading ? (
-                                 <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
-                              ) : (
-                                 <><span>Draft Content</span></>
-                              )}
-                           </button>
+                      </div>
+                    </div>
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Topic Group</label>
+                      <div className="relative">
+                        <select
+                          value={formData.topic}
+                          onChange={e => setFormData({ ...formData, topic: e.target.value })}
+                          className="w-full h-16 px-6 rounded-2xl appearance-none"
+                        >
+                          <option value="">Select Category</option>
+                          {predefinedTopics.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                        <div className="absolute right-6 top-1/2 -translate-y-1/2 pointer-events-none">
+                          <svg className="w-4 h-4 text-[var(--text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
                         </div>
-                     </div>
-
-                     {/* Row 1: Type & Topic */}
-                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Modality</label>
-                           <div className="relative">
-                             <select 
-                               value={formData.type} 
-                               onChange={e => setFormData({...formData, type: e.target.value})} 
-                               className="w-full h-16 px-6 bg-white border-2 border-purple-500/30 rounded-2xl font-bold text-sm focus:border-purple-500 focus:outline-none focus:ring-4 focus:ring-purple-500/10 transition-all text-zinc-900 appearance-none"
-                             >
-                                <option value="discussion">Discussion Thread</option>
-                                <option value="lab">Technical Lab</option>
-                                <option value="quiz">Data Quiz</option>
-                             </select>
-                             <div className="absolute right-6 top-1/2 -translate-y-1/2 pointer-events-none">
-                                <svg className="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
-                             </div>
-                           </div>
-                        </div>
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Topic Group</label>
-                           <div className="relative">
-                             <select 
-                               value={formData.topic} 
-                               onChange={e => setFormData({...formData, topic: e.target.value})} 
-                               className="w-full h-16 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all appearance-none"
-                             >
-                                <option value="">Select Category</option>
-                                {predefinedTopics.map(t => <option key={t} value={t}>{t}</option>)}
-                             </select>
-                             <div className="absolute right-6 top-1/2 -translate-y-1/2 pointer-events-none">
-                                <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" /></svg>
-                             </div>
-                           </div>
-                           {formData.topic === 'Custom' && (
-                             <input 
-                               value={formData.customTopic}
-                               onChange={e => setFormData({...formData, customTopic: e.target.value})}
-                               placeholder="Enter custom topic name"
-                               className="w-full h-14 px-6 mt-2 bg-white border-2 border-zinc-200 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all"
-                             />
-                           )}
-                        </div>
-                     </div>
-
-                     {/* Row 2: Title */}
-                     <div className="space-y-3">
-                        <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Asset Title</label>
-                        <input 
-                          value={formData.title} 
-                          onChange={e => setFormData({...formData, title: e.target.value})} 
-                          placeholder="e.g., Module 4: JSON Parsing Structures" 
-                          className="w-full h-16 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all placeholder:text-zinc-300" 
+                      </div>
+                      {formData.topic === 'Custom' && (
+                        <input
+                          value={formData.customTopic}
+                          onChange={e => setFormData({ ...formData, customTopic: e.target.value })}
+                          placeholder="Enter custom topic name"
+                          className="w-full h-14 px-6 mt-2 rounded-2xl"
                         />
-                     </div>
-
-                     {/* Row 3: Meta Data */}
-                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Due Date</label>
-                           <input 
-                             type="datetime-local"
-                             value={formData.dueDate} 
-                             onChange={e => setFormData({...formData, dueDate: e.target.value})} 
-                             className="w-full h-14 px-4 bg-zinc-50 border-2 border-zinc-100 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all" 
-                           />
-                        </div>
-                        <div className="space-y-3">
-                           <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Points</label>
-                           <input 
-                             type="number"
-                             value={formData.points} 
-                             onChange={e => setFormData({...formData, points: parseInt(e.target.value)})} 
-                             className="w-full h-14 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all" 
-                           />
-                        </div>
-                        {formData.type === 'quiz' && (
-                          <div className="space-y-3">
-                             <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Time Limit (Min)</label>
-                             <input 
-                               type="number"
-                               value={formData.timeLimit} 
-                               onChange={e => setFormData({...formData, timeLimit: parseInt(e.target.value)})} 
-                               className="w-full h-14 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl font-bold text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all" 
-                             />
-                          </div>
-                        )}
-                     </div>
-
-                     {/* Conditional: Quiz Editor vs Text Editor */}
-                     {formData.type === 'quiz' ? (
-                        <div className="space-y-6 pt-6 border-t border-zinc-100">
-                           <div className="flex items-center justify-between">
-                              <h4 className="font-black text-lg text-zinc-900">Quiz Questions</h4>
-                              <button onClick={addQuestion} className="px-4 py-2 bg-zinc-900 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:scale-105 transition-transform">+ Add Question</button>
-                           </div>
-                           
-                           {formData.questions.length === 0 ? (
-                             <div className="p-8 border-2 border-dashed border-zinc-200 rounded-2xl text-center text-zinc-400 font-bold text-xs">
-                               No questions added yet.
-                             </div>
-                           ) : (
-                             <div className="space-y-4">
-                               {formData.questions.map((q, idx) => (
-                                 <div key={q.id} className="p-6 bg-zinc-50 rounded-2xl border border-zinc-100 relative group">
-                                    <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
-                                       <button onClick={() => removeQuestion(q.id)} className="text-red-400 hover:text-red-600 font-bold text-xs">Remove</button>
-                                    </div>
-                                    <div className="space-y-4">
-                                       <div className="flex items-center space-x-3">
-                                          <span className="w-6 h-6 rounded-full bg-zinc-200 flex items-center justify-center text-xs font-black text-zinc-600">{idx + 1}</span>
-                                          <input 
-                                            value={q.question} 
-                                            onChange={e => updateQuestion(q.id, 'question', e.target.value)} 
-                                            placeholder="Question text..." 
-                                            className="flex-1 bg-transparent border-b-2 border-zinc-200 focus:border-purple-500 outline-none font-bold text-sm py-1 text-zinc-900"
-                                          />
-                                       </div>
-                                       <div className="pl-9">
-                                          <input 
-                                            value={q.answer} 
-                                            onChange={e => updateQuestion(q.id, 'answer', e.target.value)} 
-                                            placeholder="Correct Answer / Key..." 
-                                            className="w-full bg-white px-4 py-2 rounded-lg border border-zinc-200 focus:border-purple-500 outline-none text-xs font-medium text-zinc-900"
-                                          />
-                                       </div>
-                                    </div>
-                                 </div>
-                               ))}
-                             </div>
-                           )}
-                        </div>
-                     ) : (
-                        <>
-                          <div className="space-y-3">
-                             <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Instructions / Content</label>
-                             <textarea 
-                               value={formData.content} 
-                               onChange={e => setFormData({...formData, content: e.target.value})} 
-                               rows={8} 
-                               placeholder="Define objectives and methodology..." 
-                               className="w-full p-6 bg-zinc-50 border-2 border-zinc-100 rounded-[2rem] font-medium text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all resize-none leading-relaxed placeholder:text-zinc-300" 
-                             />
-                          </div>
-                          
-                          <div className="space-y-3">
-                             <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Grading Rubric</label>
-                             <textarea 
-                               value={formData.rubric} 
-                               onChange={e => setFormData({...formData, rubric: e.target.value})} 
-                               rows={4} 
-                               placeholder="Outline criteria for full points..." 
-                               className="w-full p-6 bg-zinc-50 border-2 border-zinc-100 rounded-[2rem] font-medium text-sm text-zinc-900 focus:border-purple-500 focus:outline-none transition-all resize-none leading-relaxed placeholder:text-zinc-300" 
-                             />
-                          </div>
-                        </>
-                     )}
-
-                     <div className="pt-8 flex flex-col md:flex-row gap-4">
-                        <button 
-                          onClick={handleManualSave}
-                          className="flex-1 h-20 bg-white border-2 border-zinc-100 text-zinc-500 rounded-[2rem] font-black text-xs uppercase tracking-widest hover:bg-zinc-50 hover:border-zinc-200 transition-all"
-                        >
-                           Save Draft
-                        </button>
-                        <button 
-                          onClick={handlePublish} 
-                          disabled={loading} 
-                          className="flex-[2] h-20 bg-[#18181B] text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.25em] shadow-2xl hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center space-x-4 group"
-                        >
-                           {loading ? (
-                             <div className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
-                           ) : (
-                             <>
-                               <span>Publish to Section Ledger</span>
-                               <span className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center group-hover:bg-white/20 transition-colors">→</span>
-                             </>
-                           )}
-                        </button>
-                     </div>
+                      )}
+                    </div>
                   </div>
-               </div>
+
+                  {/* Row 2: Title */}
+                  <div className="space-y-3">
+                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Asset Title</label>
+                    <input
+                      value={formData.title}
+                      onChange={e => setFormData({ ...formData, title: e.target.value })}
+                      placeholder="e.g., Module 4: JSON Parsing Structures"
+                      className="w-full h-16 px-6 rounded-2xl"
+                    />
+                  </div>
+
+                  {/* Row 3: Meta Data */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Due Date</label>
+                      <input
+                        type="datetime-local"
+                        value={formData.dueDate}
+                        onChange={e => setFormData({ ...formData, dueDate: e.target.value })}
+                        className="w-full h-14 px-4 rounded-2xl"
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Points</label>
+                      <input
+                        type="number"
+                        value={formData.points}
+                        onChange={e => setFormData({ ...formData, points: parseInt(e.target.value) })}
+                        className="w-full h-14 px-6 rounded-2xl"
+                      />
+                    </div>
+                    {formData.type === 'quiz' && (
+                      <div className="space-y-3">
+                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest ml-1">Time Limit (Min)</label>
+                        <input
+                          type="number"
+                          value={formData.timeLimit}
+                          onChange={e => setFormData({ ...formData, timeLimit: parseInt(e.target.value) })}
+                          className="w-full h-14 px-6 rounded-2xl"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Conditional: Quiz Editor vs Text Editor */}
+                  {formData.type === 'quiz' ? (
+                    <div className="space-y-6 pt-10 border-t border-[var(--border-primary)]">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-black text-xl text-[var(--text-primary)] tracking-tight">Quiz Questions</h4>
+                        <button onClick={addQuestion} className="px-6 py-2.5 bg-[var(--text-primary)] text-white dark:bg-white dark:text-black rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 transition-all shadow-lg">+ Add Question</button>
+                      </div>
+
+                      {formData.questions.length === 0 ? (
+                        <div className="py-20 bg-[var(--bg-nested)] border-2 border-dashed border-[var(--border-strong)] rounded-[2rem] text-center text-[var(--text-muted)] font-black text-[10px] uppercase tracking-widest">
+                          No questions added yet. Use AI drafting above or add manually.
+                        </div>
+                      ) : (
+                        <div className="space-y-6">
+                          {formData.questions.map((q, idx) => (
+                            <div key={q.id} className="ui-nested-block relative group border-2 border-transparent hover:border-[var(--brand-primary)]">
+                              <div className="absolute top-6 right-6 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button onClick={() => removeQuestion(q.id)} className="text-rose-500 font-black text-[9px] uppercase tracking-widest hover:underline">Delete</button>
+                              </div>
+                              <div className="space-y-4">
+                                <div className="flex items-center space-x-4">
+                                  <span className="w-8 h-8 rounded-full bg-[var(--text-primary)] text-white dark:bg-white dark:text-black flex items-center justify-center text-[10px] font-black">{idx + 1}</span>
+                                  <input
+                                    value={q.question}
+                                    onChange={e => updateQuestion(q.id, 'question', e.target.value)}
+                                    placeholder="Question text..."
+                                    className="flex-1 bg-transparent border-b-2 border-[var(--border-strong)] focus:border-[var(--brand-primary)] outline-none font-bold text-[var(--text-primary)] py-2"
+                                  />
+                                </div>
+                                <div className="pl-12">
+                                  <input
+                                    value={q.answer}
+                                    onChange={e => updateQuestion(q.id, 'answer', e.target.value)}
+                                    placeholder="Answer Key..."
+                                    className="w-full bg-[var(--bg-card)] px-6 py-3 rounded-xl border border-[var(--border-primary)] text-xs font-bold"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-6">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-black text-[var(--text-primary)] bg-[var(--bg-nested)] px-4 py-1.5 rounded-full border-2 border-[var(--border-primary)] uppercase tracking-[0.2em]">Instructions / Content</label>
+                        </div>
+                        <textarea
+                          value={formData.content}
+                          onChange={e => setFormData({ ...formData, content: e.target.value })}
+                          rows={12}
+                          placeholder="Define objectives and methodology..."
+                          className="w-full p-10 rounded-[2.5rem] bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] shadow-inner text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] font-bold focus:ring-8 focus:ring-[var(--brand-primary)]/5"
+                        />
+                      </div>
+
+                      <div className="space-y-6 pt-12 border-t-4 border-[var(--bg-nested)]">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-black text-[var(--text-primary)] bg-[var(--bg-nested)] px-4 py-1.5 rounded-full border-2 border-[var(--border-primary)] uppercase tracking-[0.2em]">Grading Rubric</label>
+                        </div>
+                        <textarea
+                          value={formData.rubric}
+                          onChange={e => setFormData({ ...formData, rubric: e.target.value })}
+                          rows={8}
+                          placeholder="Outline criteria for full points..."
+                          className="w-full p-10 rounded-[2.5rem] bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] shadow-inner text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] font-bold focus:ring-8 focus:ring-[var(--brand-primary)]/5"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <div className="pt-8 flex flex-col md:flex-row gap-4">
+                    <button
+                      onClick={handleManualSave}
+                      className="flex-1 h-20 bg-white border-2 border-zinc-100 text-zinc-500 rounded-[2rem] font-black text-xs uppercase tracking-widest hover:bg-zinc-50 hover:border-zinc-200 transition-all"
+                    >
+                      Save Draft
+                    </button>
+                    <button
+                      onClick={handlePublish}
+                      disabled={loading}
+                      className="flex-[2] h-20 bg-[#18181B] text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.25em] shadow-2xl hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center space-x-4 group"
+                    >
+                      {loading ? (
+                        <div className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full animate-spin"></div>
+                      ) : (
+                        <>
+                          <span>Publish to Section Ledger</span>
+                          <span className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center group-hover:bg-white/20 transition-colors">→</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Right Column: Published History (Sticky Hub) */}
             <div className="lg:col-span-5 relative animate-in" style={{ animationDelay: '0.1s' }}>
-                <div className="sticky top-0 space-y-8">
-                    <div className="bg-[#18181B] rounded-[3.5rem] p-10 shadow-2xl text-white relative overflow-hidden min-h-[600px] flex flex-col">
-                        {/* Decorative Background Element */}
-                        <div className="absolute -top-20 -right-20 w-80 h-80 bg-purple-500 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
-                        
-                        <div className="flex items-center justify-between mb-10 relative z-10">
-                           <div className="flex items-center space-x-4">
-                              <Icons.IconBook className="w-6 h-6 text-purple-400" />
-                              <h3 className="text-xl font-bold tracking-tight">Published History</h3>
-                           </div>
-                           <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center border border-white/10">
-                              <span className="text-xs font-bold text-purple-400">{assignments.length}</span>
-                           </div>
-                        </div>
+              <div className="sticky top-0 space-y-8">
+                <div className="bg-[#18181B] rounded-[3.5rem] p-10 shadow-2xl text-white relative overflow-hidden min-h-[600px] flex flex-col">
+                  {/* Decorative Background Element */}
+                  <div className="absolute -top-20 -right-20 w-80 h-80 bg-purple-500 rounded-full blur-[100px] opacity-20 pointer-events-none"></div>
 
-                        <div className="flex-1 overflow-y-auto space-y-4 scrollbar-hide pr-2 relative z-10 max-h-[calc(100vh-300px)]">
-                           {initialLoading ? (
-                             [1, 2, 3].map(i => (
-                               <div key={i} className="p-6 bg-white/5 rounded-[2rem] border border-white/5 space-y-3">
-                                  <Skeleton className="h-4 w-32 bg-white/10" />
-                                  <Skeleton className="h-2 w-20 bg-white/5" />
-                               </div>
-                             ))
-                           ) : assignments.length > 0 ? assignments.map((a) => (
-                             <div key={a.id} className="p-6 bg-white/5 rounded-[2rem] border border-white/5 hover:bg-white/10 transition-all group cursor-default relative overflow-hidden">
-                                <div className="absolute right-0 top-0 p-6 opacity-0 group-hover:opacity-100 transition-opacity">
-                                   <span className="text-[10px] font-black uppercase text-white/50 tracking-widest">Edit</span>
-                                </div>
-                                <div className="flex justify-between items-start mb-2 pr-8">
-                                   <h4 className="font-bold text-sm tracking-tight leading-snug">{a.assignment_name}</h4>
-                                </div>
-                                <div className="flex items-center space-x-3 mb-4">
-                                   <span className="text-[8px] font-black uppercase bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-lg border border-purple-500/20">{a.assignment_type}</span>
-                                   <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest truncate max-w-[120px]">{a.topic}</span>
-                                </div>
-                                <div className="pt-4 border-t border-white/5 flex justify-between items-center">
-                                   <span className="text-[8px] text-zinc-500 font-bold">SYNCED {new Date(a.created_at).toLocaleDateString()}</span>
-                                   <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-[10px] group-hover:bg-purple-500 group-hover:text-white transition-colors">→</div>
-                                </div>
-                             </div>
-                           )) : (
-                             <div className="py-20 text-center border-2 border-dashed border-white/10 rounded-[2.5rem]">
-                                <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Repository Empty</p>
-                             </div>
-                           )}
-                        </div>
-                        
-                        <div className="mt-8 pt-8 border-t border-white/10 relative z-10">
-                           <button className="w-full py-4 rounded-2xl border border-white/10 hover:bg-white/5 text-[10px] font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center space-x-3">
-                              <span>View Full Ledger</span>
-                           </button>
-                        </div>
+                  <div className="flex items-center justify-between mb-10 relative z-10">
+                    <div className="flex items-center space-x-4">
+                      <Icons.IconBook className="w-6 h-6 text-purple-400" />
+                      <h3 className="text-xl font-bold tracking-tight">Published History</h3>
                     </div>
+                    <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center border border-white/10">
+                      <span className="text-xs font-bold text-purple-400">{assignments.length}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto space-y-4 scrollbar-hide pr-2 relative z-10 max-h-[calc(100vh-300px)]">
+                    {initialLoading ? (
+                      [1, 2, 3].map(i => (
+                        <div key={i} className="p-6 bg-white/5 rounded-[2rem] border border-white/5 space-y-3">
+                          <Skeleton className="h-4 w-32 bg-white/10" />
+                          <Skeleton className="h-2 w-20 bg-white/5" />
+                        </div>
+                      ))
+                    ) : assignments.length > 0 ? assignments.map((a) => (
+                      <div key={a.id} className="p-6 bg-white/5 rounded-[2rem] border border-white/5 hover:bg-white/10 transition-all group cursor-default relative overflow-hidden">
+                        <div className="absolute right-0 top-0 p-6 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <span className="text-[10px] font-black uppercase text-white/50 tracking-widest">Edit</span>
+                        </div>
+                        <div className="flex justify-between items-start mb-2 pr-8">
+                          <h4 className="font-bold text-sm tracking-tight leading-snug">{a.assignment_name}</h4>
+                        </div>
+                        <div className="flex items-center space-x-3 mb-4">
+                          <span className="text-[8px] font-black uppercase bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-lg border border-purple-500/20">{a.assignment_type}</span>
+                          <span className="text-[9px] font-black text-zinc-500 uppercase tracking-widest truncate max-w-[120px]">{a.topic}</span>
+                        </div>
+                        <div className="pt-4 border-t border-white/5 flex justify-between items-center">
+                          <span className="text-[8px] text-zinc-500 font-bold">SYNCED {new Date(a.created_at).toLocaleDateString()}</span>
+                          <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-[10px] group-hover:bg-purple-500 group-hover:text-white transition-colors">→</div>
+                        </div>
+                      </div>
+                    )) : (
+                      <div className="py-20 text-center border-2 border-dashed border-white/10 rounded-[2.5rem]">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Repository Empty</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-8 pt-8 border-t border-white/10 relative z-10">
+                    <button className="w-full py-4 rounded-2xl border border-white/10 hover:bg-white/5 text-[10px] font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center space-x-3">
+                      <span>View Full Ledger</span>
+                    </button>
+                  </div>
                 </div>
+              </div>
             </div>
 
           </div>

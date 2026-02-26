@@ -1,0 +1,22 @@
+components/StudentDashboard.tsx(118,9): error TS2322: Type '{ role: "student"; currentPath: string; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+components/TeacherDashboard.tsx(128,9): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/AssignmentWork.tsx(99,34): error TS2322: Type '{ role: "student"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/CreateAssignment.tsx(344,9): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/DiscussionsManagement.tsx(183,9): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath, params?: any) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/GradePredictor.tsx(261,17): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath, params?: any) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/GradingHub.tsx(226,9): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/Laboratory.tsx(59,9): error TS2322: Type '{ role: "student"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/PeerReviewHub.tsx(51,9): error TS2322: Type '{ role: "student"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/PersonaSetup.tsx(218,9): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.
+pages/UploadMaterials.tsx(296,40): error TS2322: Type '{ role: "teacher"; currentPath: AppPath; onNavigateTo: (path: AppPath) => void; collapsed: boolean; setCollapsed: Dispatch<SetStateAction<boolean>>; onLogout: () => void; }' is not assignable to type 'IntrinsicAttributes & AppSidebarProps'.
+  Property 'currentPath' does not exist on type 'IntrinsicAttributes & AppSidebarProps'.

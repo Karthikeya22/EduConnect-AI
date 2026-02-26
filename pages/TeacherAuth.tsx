@@ -32,7 +32,7 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
         setEmail(savedEmail);
         setRememberMe(true);
       }
-    } catch (e) {}
+    } catch (e) { }
 
     const ctx = gsap.context(() => {
       if (leftSideRef.current) gsap.from(leftSideRef.current, { xPercent: -100, duration: 0.8, ease: "power4.out" });
@@ -58,7 +58,7 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
       if (isLogin) {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        
+
         // Ensure user is marked as teacher if logging in here
         if (data.user && data.user.user_metadata?.role !== 'teacher') {
           await supabase.auth.updateUser({
@@ -67,39 +67,48 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
         }
 
         if (rememberMe) {
-          try { localStorage.setItem('remembered_teacher_email', email); } catch (e) {}
+          try { localStorage.setItem('remembered_teacher_email', email); } catch (e) { }
         } else {
-          try { localStorage.removeItem('remembered_teacher_email'); } catch (e) {}
+          try { localStorage.removeItem('remembered_teacher_email'); } catch (e) { }
         }
 
         onSuccess?.();
       } else {
         if (password !== confirmPassword) throw new Error("Passwords do not match");
         if (!agreeTerms) throw new Error("Accept instructor terms to proceed");
-        
-        const { error } = await supabase.auth.signUp({
+
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
-            data: { 
+            data: {
               full_name: fullName,
               role: 'teacher'
             }
           }
         });
         if (error) throw error;
-        setToast({ message: "Faculty identity record created. Please verify your email.", type: 'success' });
+
+        if (!data.session) {
+          setToast({ message: "Faculty identity record created! Check your email to verify.", type: 'success' });
+          setPassword('');
+          setConfirmPassword('');
+          setIsLogin(true);
+        } else {
+          setToast({ message: "Faculty identity record created.", type: 'success' });
+          setTimeout(() => onSuccess?.(), 400);
+        }
       }
     } catch (error: any) {
       console.error("Auth Exception:", error);
       let errorMsg = error.message || "Credential verification error";
-      
+
       if (errorMsg.includes("Failed to fetch") || error.name === 'TypeError') {
         errorMsg = "Network Connectivity Error: The login server is unreachable. Please verify your internet connection.";
       } else if (errorMsg.includes("Invalid login credentials")) {
         errorMsg = "Identity Mismatch: These credentials do not correspond with our faculty ledger.";
       }
-      
+
       setToast({ message: errorMsg, type: 'error' });
     } finally {
       setLoading(false);
@@ -137,16 +146,16 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
               <span className="font-bold text-zinc-900 tracking-tight font-['Space_Grotesk'] uppercase text-xs">Instructor Auth</span>
             </div>
           </div>
-          
+
           <div className="bg-zinc-100 p-1.5 rounded-[1.5rem] flex mb-12 relative overflow-hidden">
             <div className="absolute h-[calc(100%-12px)] top-1.5 w-[calc(50%-9px)] bg-white rounded-xl transition-transform duration-500 shadow-sm" style={{ transform: `translateX(${isLogin ? '3px' : 'calc(100% + 3px)'})` }}></div>
             <button onClick={() => setIsLogin(true)} className={`relative z-10 w-1/2 py-3 text-[10px] font-black uppercase tracking-widest ${isLogin ? 'text-zinc-900' : 'text-zinc-400'}`}>Course Access</button>
             <button onClick={() => setIsLogin(false)} className={`relative z-10 w-1/2 py-3 text-[10px] font-black uppercase tracking-widest ${!isLogin ? 'text-zinc-900' : 'text-zinc-400'}`}>New Instructor</button>
           </div>
-          
+
           <h2 className="text-4xl font-black text-zinc-900 mb-2 tracking-tighter font-['Space_Grotesk'] leading-none">{isLogin ? 'Synchronize' : 'Register'}</h2>
           <p className="text-zinc-500 font-bold text-sm mb-10">{isLogin ? 'Establish a secure session for course management.' : 'Initialize your official faculty credentials.'}</p>
-          
+
           <form onSubmit={handleAuth} className="space-y-5">
             {!isLogin && (
               <div className="space-y-2">
@@ -166,13 +175,13 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
               </div>
             </div>
             {isLogin && (
-               <label className="flex items-center space-x-3 cursor-pointer group mt-2">
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${rememberMe ? 'bg-zinc-900 border-zinc-900' : 'bg-white border-zinc-200 group-hover:border-zinc-400'}`}>
-                    {rememberMe && <span className="text-white text-[10px] font-black">✓</span>}
-                    <input type="checkbox" className="hidden" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} />
-                  </div>
-                  <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Persist Academic Session</span>
-                </label>
+              <label className="flex items-center space-x-3 cursor-pointer group mt-2">
+                <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${rememberMe ? 'bg-zinc-900 border-zinc-900' : 'bg-white border-zinc-200 group-hover:border-zinc-400'}`}>
+                  {rememberMe && <span className="text-white text-[10px] font-black">✓</span>}
+                  <input type="checkbox" className="hidden" checked={rememberMe} onChange={e => setRememberMe(e.target.checked)} />
+                </div>
+                <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Persist Academic Session</span>
+              </label>
             )}
             {!isLogin && (
               <>

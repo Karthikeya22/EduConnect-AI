@@ -1,0 +1,7 @@
+{
+  "authErr": {
+    "name": "AuthApiError",
+    "message": "Invalid login credentials",
+    "status": 400
+  }
+}

@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import { GoogleGenAI } from "@google/genai";
 import AppSidebar from '../components/AppSidebar';
 import { AppPath } from '../App';
+import ThemeToggle from '../components/ThemeToggle';
 
 interface LaboratoryProps {
   onBack: () => void;
@@ -33,7 +34,7 @@ const Laboratory: React.FC<LaboratoryProps> = (props) => {
         Data: ${dataInput.substring(0, 2000)}`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-3-flash-preview',
         contents: [{ role: 'user', parts: [{ text: prompt }] }]
       });
       setInsight(response.text || "Could not generate technical insights.");
@@ -53,25 +54,28 @@ const Laboratory: React.FC<LaboratoryProps> = (props) => {
   const parsedData = parseData();
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] overflow-hidden font-['Plus_Jakarta_Sans']">
-      <AppSidebar 
-        role="student" 
-        currentPath={props.currentPath} 
-        onNavigateTo={props.onNavigateTo} 
-        collapsed={sidebarCollapsed} 
-        setCollapsed={setSidebarCollapsed} 
-        onLogout={props.onLogout} 
+    <div className="flex h-screen bg-[#F8FAFC] dark:bg-[#020617] overflow-hidden font-['Plus_Jakarta_Sans'] transition-colors">
+      <AppSidebar
+        role="student"
+        currentPath={props.currentPath}
+        onNavigateTo={props.onNavigateTo}
+        collapsed={sidebarCollapsed}
+        setCollapsed={setSidebarCollapsed}
+        onLogout={props.onLogout}
       />
-      
+
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-20 bg-white border-b border-zinc-200 flex items-center justify-between px-12 shrink-0">
+        <header className="h-20 bg-white dark:bg-[#0B1120] border-b border-zinc-200 dark:border-white/5 flex items-center justify-between px-12 shrink-0 transition-colors">
           <div className="flex items-center space-x-6">
-            <button onClick={props.onBack} className="w-10 h-10 rounded-full hover:bg-zinc-50 flex items-center justify-center text-zinc-400 transition-colors">←</button>
-            <h1 className="text-2xl font-black text-zinc-900 tracking-tighter uppercase font-['Space_Grotesk']">Laboratory</h1>
+            <button onClick={props.onBack} className="w-10 h-10 rounded-full hover:bg-zinc-50 dark:hover:bg-white/5 flex items-center justify-center text-zinc-400 dark:text-zinc-500 transition-colors">←</button>
+            <h1 className="text-2xl font-black text-zinc-900 dark:text-white tracking-tighter uppercase font-['Space_Grotesk']">Laboratory</h1>
           </div>
-          <div className="flex bg-zinc-100 p-1.5 rounded-2xl border border-zinc-200 space-x-1">
-            <button onClick={() => setVisualizationType('table')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${visualizationType === 'table' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-400 hover:text-zinc-600'}`}>Table</button>
-            <button onClick={() => setVisualizationType('json')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${visualizationType === 'json' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-400 hover:text-zinc-600'}`}>JSON</button>
+          <div className="flex items-center space-x-6">
+            <ThemeToggle />
+            <div className="flex bg-zinc-100 dark:bg-white/5 p-1.5 rounded-2xl border border-zinc-200 dark:border-white/10 space-x-1">
+              <button onClick={() => setVisualizationType('table')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${visualizationType === 'table' ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm' : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-400'}`}>Table</button>
+              <button onClick={() => setVisualizationType('json')} className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${visualizationType === 'json' ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm' : 'text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-400'}`}>JSON</button>
+            </div>
           </div>
         </header>
 
@@ -81,13 +85,13 @@ const Laboratory: React.FC<LaboratoryProps> = (props) => {
               <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-[0.2em]">Input Raw Big Data</h3>
               <button onClick={() => setDataInput('[\n  {"name": "Cluster A", "load": 85, "active": true},\n  {"name": "Cluster B", "load": 12, "active": true},\n  {"name": "Cluster C", "load": 45, "active": false}\n]')} className="text-[10px] font-black text-cyan-600 uppercase hover:underline">Insert Sample JSON</button>
             </div>
-            <textarea 
-              value={dataInput} 
+            <textarea
+              value={dataInput}
               onChange={(e) => setDataInput(e.target.value)}
               placeholder="Paste JSON or CSV data here..."
               className="flex-1 w-full p-8 bg-[#0F172A] text-cyan-400 font-mono text-sm rounded-[2.5rem] border-none focus:ring-8 focus:ring-cyan-500/5 resize-none shadow-2xl transition-all"
             />
-            <button 
+            <button
               onClick={handleAnalyze}
               disabled={analyzing || !dataInput.trim()}
               className="mt-8 h-16 bg-[#18181B] text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center justify-center disabled:opacity-50 shadow-2xl shadow-black/20"
@@ -115,33 +119,33 @@ const Laboratory: React.FC<LaboratoryProps> = (props) => {
               </div>
 
               <div className="bg-white p-10 rounded-[3rem] border border-zinc-100 shadow-xl">
-                 <h4 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-8">Data Explorer Preview</h4>
-                 {parsedData ? (
-                   visualizationType === 'table' ? (
-                     <div className="overflow-x-auto max-h-[400px]">
-                       <table className="w-full text-[10px]">
-                         <thead className="bg-zinc-50 text-zinc-400 font-black uppercase">
-                           <tr>{Object.keys(Array.isArray(parsedData) ? parsedData[0] || {} : parsedData).map(k => <th key={k} className="p-3 text-left">{k}</th>)}</tr>
-                         </thead>
-                         <tbody className="divide-y divide-zinc-50">
-                           {(Array.isArray(parsedData) ? parsedData : [parsedData]).slice(0, 15).map((row, i) => (
-                             <tr key={i} className="hover:bg-zinc-50 transition-colors">
-                               {Object.values(row).map((v: any, j) => <td key={j} className="p-3 font-bold text-zinc-600 truncate max-w-[120px]">{JSON.stringify(v)}</td>)}
-                             </tr>
-                           ))}
-                         </tbody>
-                       </table>
-                     </div>
-                   ) : (
-                     <div className="bg-zinc-50 p-6 rounded-2xl font-mono text-[11px] overflow-auto max-h-[400px] border border-zinc-100 shadow-inner">
-                        <pre className="text-zinc-600">{JSON.stringify(parsedData, null, 2)}</pre>
-                     </div>
-                   )
-                 ) : (
-                   <div className="py-20 text-center border-4 border-dashed border-zinc-50 rounded-[2.5rem]">
-                     <p className="text-[10px] font-black text-zinc-200 uppercase tracking-widest leading-relaxed">System awaiting data input</p>
-                   </div>
-                 )}
+                <h4 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-8">Data Explorer Preview</h4>
+                {parsedData ? (
+                  visualizationType === 'table' ? (
+                    <div className="overflow-x-auto max-h-[400px]">
+                      <table className="w-full text-[10px]">
+                        <thead className="bg-zinc-50 text-zinc-400 font-black uppercase">
+                          <tr>{Object.keys(Array.isArray(parsedData) ? parsedData[0] || {} : parsedData).map(k => <th key={k} className="p-3 text-left">{k}</th>)}</tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-50">
+                          {(Array.isArray(parsedData) ? parsedData : [parsedData]).slice(0, 15).map((row, i) => (
+                            <tr key={i} className="hover:bg-zinc-50 transition-colors">
+                              {Object.values(row).map((v: any, j) => <td key={j} className="p-3 font-bold text-zinc-600 truncate max-w-[120px]">{JSON.stringify(v)}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="bg-zinc-50 p-6 rounded-2xl font-mono text-[11px] overflow-auto max-h-[400px] border border-zinc-100 shadow-inner">
+                      <pre className="text-zinc-600">{JSON.stringify(parsedData, null, 2)}</pre>
+                    </div>
+                  )
+                ) : (
+                  <div className="py-20 text-center border-4 border-dashed border-zinc-50 rounded-[2.5rem]">
+                    <p className="text-[10px] font-black text-zinc-200 uppercase tracking-widest leading-relaxed">System awaiting data input</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -1,0 +1,7 @@
+pages/GradePredictor.tsx(124,5): error TS2322: Type '{ id: string; name: string; email: string; riskScore: number; attendance: number; lastActive: string; predictedGrade: string; trend: string; riskFactors: any[]; sentiment: number; interventionCount: number; }[]' is not assignable to type 'StudentRiskProfile[]'.
+  Type '{ id: string; name: string; email: string; riskScore: number; attendance: number; lastActive: string; predictedGrade: string; trend: string; riskFactors: any[]; sentiment: number; interventionCount: number; }' is not assignable to type 'StudentRiskProfile'.
+    Types of property 'trend' are incompatible.
+      Type 'string' is not assignable to type '"up" | "down" | "stable"'.
+pages/StudentAuth.tsx(115,11): error TS2353: Object literal may only specify known properties, and 'data' does not exist in type '{ redirectTo?: string; scopes?: string; queryParams?: { [key: string]: string; }; skipBrowserRedirect?: boolean; }'.
+pages/UploadMaterials.tsx(102,9): error TS2322: Type 'unknown[]' is not assignable to type 'string[]'.
+  Type 'unknown' is not assignable to type 'string'.

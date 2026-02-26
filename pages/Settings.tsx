@@ -4,6 +4,7 @@ import { gsap } from 'gsap';
 import { supabase } from '../lib/supabase';
 import AppSidebar from '../components/AppSidebar';
 import { AppPath } from '../App';
+import ThemeToggle from '../components/ThemeToggle';
 
 interface SettingsProps {
   onBack: () => void;
@@ -17,7 +18,7 @@ const Settings: React.FC<SettingsProps> = (props) => {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+  const [toast, setToast] = useState<{ msg: string, type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -29,7 +30,7 @@ const Settings: React.FC<SettingsProps> = (props) => {
       }
     };
     fetchUser();
-    
+
     gsap.from(".settings-card", {
       opacity: 0,
       y: 20,
@@ -59,13 +60,12 @@ const Settings: React.FC<SettingsProps> = (props) => {
   const role = user?.user_metadata?.role || 'student';
 
   return (
-    <div className={`flex h-screen overflow-hidden font-['Plus_Jakarta_Sans'] ${role === 'teacher' ? 'bg-[#F9F8F3]' : 'bg-[#F8FAFC]'}`}>
-      <AppSidebar 
-        role={role} 
-        currentPath="settings" 
-        onNavigateTo={props.onNavigateTo} 
-        collapsed={collapsed} 
-        setCollapsed={setCollapsed} 
+    <div className={`flex h-screen overflow-hidden font-['Plus_Jakarta_Sans'] transition-colors ${role === 'teacher' ? 'bg-[#F9F8F3] dark:bg-[#020617]' : 'bg-[#F8FAFC] dark:bg-[#020617]'}`}>
+      <AppSidebar
+        role={role}
+        onNavigateTo={props.onNavigateTo}
+        collapsed={collapsed}
+        setCollapsed={setCollapsed}
         onLogout={props.onLogout}
       />
 
@@ -77,14 +77,19 @@ const Settings: React.FC<SettingsProps> = (props) => {
         )}
 
         <div className="max-w-4xl mx-auto">
-          <header className="mb-12">
-            <button onClick={props.onBack} className="text-zinc-400 font-bold hover:text-zinc-900 mb-4 flex items-center transition-colors group">
-              <span className="mr-2 group-hover:-translate-x-1 transition-transform">←</span> Back to Hub
-            </button>
-            <h1 className={`text-4xl md:text-5xl font-black mb-2 tracking-tighter font-['Space_Grotesk'] bg-clip-text text-transparent ${role === 'teacher' ? 'bg-gradient-to-r from-zinc-900 to-zinc-500' : 'bg-gradient-to-r from-cyan-600 to-purple-600'}`}>
-              Account Settings
-            </h1>
-            <p className="text-zinc-500 font-bold">Manage your academic identity and portal preferences.</p>
+          <header className="mb-12 flex justify-between items-start">
+            <div>
+              <button onClick={props.onBack} className="text-zinc-400 dark:text-zinc-500 font-bold hover:text-zinc-900 dark:hover:text-white mb-4 flex items-center transition-colors group">
+                <span className="mr-2 group-hover:-translate-x-1 transition-transform">←</span> Back to Hub
+              </button>
+              <h1 className={`text-4xl md:text-5xl font-black mb-2 tracking-tighter font-['Space_Grotesk'] bg-clip-text text-transparent ${role === 'teacher' ? 'bg-gradient-to-r from-zinc-900 to-zinc-500 dark:from-white dark:to-zinc-500' : 'bg-gradient-to-r from-cyan-600 to-purple-600'}`}>
+                Account Settings
+              </h1>
+              <p className="text-zinc-500 dark:text-zinc-400 font-bold">Manage your academic identity and portal preferences.</p>
+            </div>
+            <div className="mt-4">
+              <ThemeToggle />
+            </div>
           </header>
 
           <div className="space-y-8">
@@ -96,23 +101,23 @@ const Settings: React.FC<SettingsProps> = (props) => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Full Display Name</label>
-                    <input 
-                      value={fullName} 
+                    <input
+                      value={fullName}
                       onChange={e => setFullName(e.target.value)}
-                      className={`w-full h-14 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl focus:outline-none transition-all font-bold text-sm ${role === 'teacher' ? 'focus:border-zinc-900' : 'focus:border-cyan-500'}`} 
+                      className={`w-full h-14 px-6 bg-zinc-50 border-2 border-zinc-100 rounded-2xl focus:outline-none transition-all font-bold text-sm ${role === 'teacher' ? 'focus:border-zinc-900' : 'focus:border-cyan-500'}`}
                     />
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Email Address (Read Only)</label>
-                    <input 
-                      value={email} 
+                    <input
+                      value={email}
                       disabled
-                      className="w-full h-14 px-6 bg-zinc-100 border-2 border-zinc-200 rounded-2xl text-zinc-400 font-bold text-sm cursor-not-allowed" 
+                      className="w-full h-14 px-6 bg-zinc-100 border-2 border-zinc-200 rounded-2xl text-zinc-400 font-bold text-sm cursor-not-allowed"
                     />
                   </div>
                 </div>
                 <div className="flex justify-end pt-4">
-                  <button 
+                  <button
                     disabled={loading}
                     type="submit"
                     className={`px-10 h-14 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl ${role === 'teacher' ? 'bg-zinc-900' : 'bg-cyan-600'}`}

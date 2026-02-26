@@ -1,0 +1,8 @@
+{
+  "error": {
+    "name": "AuthApiError",
+    "message": "Email not confirmed",
+    "status": 400
+  },
+  "user_exists": false
+}
