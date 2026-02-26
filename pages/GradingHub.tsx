@@ -60,6 +60,8 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
   const [statusFilter, setStatusFilter] = useState<'all' | 'graded' | 'pending' | 'struggling'>(
     (location.state?.filter as any) || 'all'
   );
+  const [allAssignments, setAllAssignments] = useState<any[]>([]);
+  const [expandedAssignments, setExpandedAssignments] = useState<Set<string>>(new Set());
 
   const [gradingLoading, setGradingLoading] = useState<string | null>(null);
   const [interventionLoading, setInterventionLoading] = useState(false);
@@ -120,6 +122,12 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
       (assignmentsRaw || []).forEach((a: any) => {
         assignmentsMap.set(a.id, a);
       });
+      setAllAssignments(assignmentsRaw || []);
+
+      // Auto-expand the first assignment
+      if (assignmentsRaw && assignmentsRaw.length > 0) {
+        setExpandedAssignments(new Set([assignmentsRaw[0].id]));
+      }
 
       // Extract Risk Profiles
       const studentMap = new Map();
@@ -376,44 +384,70 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
             <div className="flex-1 overflow-y-auto scrollbar-hide">
               {loading ? (
                 <div className="p-10 text-center"><div className="w-8 h-8 border-4 border-zinc-100 dark:border-white/10 border-t-indigo-600 rounded-full animate-spin mx-auto"></div></div>
-              ) : submissions
-                .filter(s => {
-                  if (statusFilter === 'all') return true;
-                  if (statusFilter === 'graded') return s.grade !== null && s.grade !== undefined;
-                  if (statusFilter === 'pending') return s.grade === null || s.grade === undefined;
-                  return true;
-                })
-                .filter(s => typeFilter === 'all' ? true : s.assignment_type?.toLowerCase() === typeFilter.toLowerCase())
-                .filter(s => s.student_name?.toLowerCase().includes(searchQuery.toLowerCase()) || s.assignment_name?.toLowerCase().includes(searchQuery.toLowerCase()))
-                .map(sub => (
-                  <button key={sub.id} onClick={() => { setSelectedSubmission(sub); setAiInterventionDraft(null); }} className={`w-full p-6 text-left transition-all border-b border-zinc-50 dark:border-white/5 hover:bg-zinc-50 dark:hover:bg-white/5 flex flex-col space-y-3 ${selectedSubmission?.id === sub.id ? 'bg-indigo-50/50 dark:bg-indigo-500/10 border-l-4 border-l-indigo-600' : 'border-l-4 border-l-transparent'}`}>
-                    <div className="flex justify-between items-start">
-                      <div className="flex flex-col">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest truncate max-w-[150px]">{sub.assignment_name}</span>
-                          {!sub.isRead && sub.assignment_type === 'discussion' && (
-                            <span className="w-1.5 h-1.5 bg-indigo-600 rounded-full animate-pulse shadow-[0_0_8px_rgba(79,70,229,0.5)]"></span>
-                          )}
+              ) : allAssignments
+                .filter(a => typeFilter === 'all' ? true : a.assignment_type?.toLowerCase() === typeFilter.toLowerCase())
+                .filter(a => a.assignment_name?.toLowerCase().includes(searchQuery.toLowerCase()))
+                .map(assignment => {
+                  const assignmentSubs = submissions.filter(s => s.assignment_id === assignment.id)
+                    .filter(s => {
+                      if (statusFilter === 'all') return true;
+                      if (statusFilter === 'graded') return s.grade !== null && s.grade !== undefined;
+                      if (statusFilter === 'pending') return s.grade === null || s.grade === undefined;
+                      return true;
+                    })
+                    .filter(s => s.student_name?.toLowerCase().includes(searchQuery.toLowerCase()) || assignment.assignment_name?.toLowerCase().includes(searchQuery.toLowerCase()));
+
+                  const isExpanded = expandedAssignments.has(assignment.id);
+
+                  return (
+                    <div key={assignment.id} className="border-b border-zinc-200 dark:border-white/5 flex flex-col">
+                      <button
+                        onClick={() => {
+                          setExpandedAssignments(prev => {
+                            const next = new Set(prev);
+                            if (next.has(assignment.id)) next.delete(assignment.id); else next.add(assignment.id);
+                            return next;
+                          });
+                        }}
+                        className="w-full p-5 flex justify-between items-center hover:bg-zinc-50 dark:hover:bg-white/5 transition-all text-left group"
+                      >
+                        <div className="flex flex-col">
+                          <span className="text-[11px] font-black text-zinc-900 dark:text-white uppercase tracking-widest leading-snug">{assignment.assignment_name}</span>
+                          <div className="flex items-center space-x-2 mt-1.5">
+                            <span className="text-[8px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">{assignment.assignment_type === 'assignment' ? 'Lab' : assignment.assignment_type}</span>
+                            <span className="text-[8px] font-bold text-zinc-300 dark:text-zinc-600">•</span>
+                            <span className="text-[8px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded-sm">{assignmentSubs.length} Submissions</span>
+                          </div>
                         </div>
-                        <span className="text-[7px] font-black text-zinc-400 uppercase tracking-widest mt-1">{sub.assignment_type}</span>
-                      </div>
-                      <span className="text-[8px] font-bold text-zinc-400 dark:text-zinc-500">{new Date(sub.timestamp).toLocaleDateString()}</span>
-                    </div>
-                    <div className="flex justify-between items-center w-full">
-                      <h4 className="font-black text-zinc-900 dark:text-white tracking-tight">{sub.student_name}</h4>
-                      {riskProfiles.get(sub.student_id) && (
-                        <div className={`w-2 h-2 rounded-full ${riskProfiles.get(sub.student_id)!.riskScore > 60 ? 'bg-red-500' : 'bg-emerald-500'}`}></div>
+                        <span className={`text-zinc-400 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}><Icons.IconChevronDown className="w-4 h-4" /></span>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="bg-zinc-50/50 dark:bg-black/20 flex flex-col border-t border-zinc-100 dark:border-white/5">
+                          {assignmentSubs.length === 0 ? (
+                            <div className="p-6 text-[10px] text-zinc-400 dark:text-zinc-600 text-center font-bold uppercase tracking-widest italic flex items-center justify-center space-x-2">
+                              <span>No matching submissions</span>
+                            </div>
+                          ) : assignmentSubs.map(sub => (
+                            <button key={sub.id} onClick={() => { setSelectedSubmission(sub); setAiInterventionDraft(null); }} className={`w-full p-4 pl-6 text-left transition-all border-b border-zinc-100 dark:border-white/5 hover:bg-white dark:hover:bg-white/5 flex flex-col space-y-3 ${selectedSubmission?.id === sub.id ? 'bg-white dark:bg-[#0F172A] border-l-4 border-l-indigo-600 shadow-sm' : 'border-l-4 border-l-transparent'}`}>
+                              <div className="flex justify-between items-center w-full">
+                                <h4 className="text-[11px] font-black text-zinc-800 dark:text-zinc-200 tracking-tight">{sub.student_name}</h4>
+                                <span className="text-[8px] font-bold text-zinc-400 dark:text-zinc-500">{new Date(sub.timestamp).toLocaleDateString()}</span>
+                              </div>
+                              <div className="flex items-center space-x-3">
+                                {sub.grade !== undefined
+                                  ? <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded text-[9px] font-black uppercase">Graded: {sub.grade}</span>
+                                  : sub.ai_suggested_grade !== undefined
+                                    ? <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 rounded text-[9px] font-black uppercase">AI Draft Ready</span>
+                                    : <div className="flex space-x-2 items-center"><span className="px-2 py-0.5 bg-zinc-200 dark:bg-white/10 text-zinc-600 dark:text-zinc-400 rounded text-[9px] font-black uppercase tracking-widest">Pending</span>{!sub.isRead && sub.assignment_type === 'discussion' && <span className="w-1.5 h-1.5 bg-indigo-600 rounded-full animate-pulse shadow-[0_0_8px_rgba(79,70,229,0.5)]"></span>}</div>}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    <div className="flex items-center space-x-3">
-                      {sub.grade !== undefined
-                        ? <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded text-[9px] font-black uppercase">Graded: {sub.grade}</span>
-                        : sub.ai_suggested_grade !== undefined
-                          ? <span className="px-2 py-0.5 bg-amber-100 dark:bg-amber-500/20 text-amber-600 dark:text-amber-400 rounded text-[9px] font-black uppercase">AI Draft Ready</span>
-                          : <span className="px-2 py-0.5 bg-zinc-100 dark:bg-white/10 text-zinc-500 dark:text-zinc-400 rounded text-[9px] font-black uppercase tracking-widest">Pending</span>}
-                    </div>
-                  </button>
-                ))}
+                  );
+                })}
             </div>
           </div>
 

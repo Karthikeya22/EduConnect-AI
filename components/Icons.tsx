@@ -193,3 +193,9 @@ export const IconList: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
     <line x1="3" y1="18" x2="3.01" y2="18" />
   </svg>
 );
+
+export const IconChevronDown: React.FC<IconProps> = ({ className = "w-6 h-6", style }) => (
+  <svg className={className} style={style} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="6 9 12 15 18 9" />
+  </svg>
+);
