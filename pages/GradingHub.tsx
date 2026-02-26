@@ -56,7 +56,7 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
   const [riskProfiles, setRiskProfiles] = useState<Map<string, StudentRiskProfile>>(new Map());
   const [selectedSubmission, setSelectedSubmission] = useState<Submission | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<'all' | 'assignment' | 'quiz' | 'discussion'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'lab' | 'quiz' | 'discussion'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'graded' | 'pending' | 'struggling'>(
     (location.state?.filter as any) || 'all'
   );
@@ -367,8 +367,8 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
                 </div>
               </div>
               <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-100 dark:bg-white/5 rounded-xl">
-                {(['all', 'assignment', 'quiz', 'discussion'] as const).map(t => (
-                  <button key={t} onClick={() => setTypeFilter(t)} className={`py-2 rounded-lg text-[7px] font-black uppercase tracking-widest text-center transition-all ${typeFilter === t ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-white shadow-sm' : 'text-zinc-400'}`}>{t === 'assignment' ? 'Lab' : t}</button>
+                {(['all', 'lab', 'quiz', 'discussion'] as const).map(t => (
+                  <button key={t} onClick={() => setTypeFilter(t)} className={`py-2 rounded-lg text-[7px] font-black uppercase tracking-widest text-center transition-all ${typeFilter === t ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-white shadow-sm' : 'text-zinc-400'}`}>{t}</button>
                 ))}
               </div>
               <div className="relative">
@@ -414,7 +414,7 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
                         <div className="flex flex-col">
                           <span className="text-[11px] font-black text-zinc-900 dark:text-white uppercase tracking-widest leading-snug">{assignment.assignment_name}</span>
                           <div className="flex items-center space-x-2 mt-1.5">
-                            <span className="text-[8px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">{assignment.assignment_type === 'assignment' ? 'Lab' : assignment.assignment_type}</span>
+                            <span className="text-[8px] font-bold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest">{assignment.assignment_type}</span>
                             <span className="text-[8px] font-bold text-zinc-300 dark:text-zinc-600">•</span>
                             <span className="text-[8px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded-sm">{assignmentSubs.length} Submissions</span>
                           </div>
@@ -467,21 +467,21 @@ const GradingHub: React.FC<GradingHubProps> = ({ onBack, onNavigateTo, onLogout,
                   </div>
                 </div>
 
-                {/* 2 Column Layout */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Top-Bottom Layout */}
+                <div className="space-y-6">
 
-                  {/* Left Col: Submission Content */}
-                  <div className="bg-white dark:bg-[#0B1120] rounded-[2rem] p-8 border border-zinc-200 dark:border-white/5 shadow-sm flex flex-col h-[700px] lg:col-span-1">
-                    <h3 className="text-[10px] font-black text-zinc-400 dark:text-zinc-500 uppercase tracking-widest mb-6">Original Submission</h3>
-                    <div className="flex-1 overflow-y-auto scrollbar-hide pr-2 prose prose-sm dark:prose-invert max-w-none text-zinc-700 dark:text-zinc-300 font-medium leading-relaxed">
+                  {/* Top Block: Submission Content */}
+                  <div className="bg-white dark:bg-[#0B1120] rounded-[2rem] p-8 border border-zinc-200 dark:border-white/5 shadow-sm flex flex-col max-h-[600px]">
+                    <h3 className="text-[10px] font-black text-zinc-400 dark:text-zinc-500 uppercase tracking-widest mb-6 border-b border-zinc-100 dark:border-white/5 pb-4">Original Submission</h3>
+                    <div className="flex-1 overflow-y-auto scrollbar-hide pr-4 prose prose-sm dark:prose-invert max-w-none text-zinc-700 dark:text-zinc-300 font-medium leading-relaxed">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {selectedSubmission.content || ''}
                       </ReactMarkdown>
                     </div>
                   </div>
 
-                  {/* Right Col: Grading Action */}
-                  <div className="space-y-6 flex flex-col lg:col-span-1 min-h-[700px]">
+                  {/* Bottom Block: Grading Action */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[400px]">
                     <div className="bg-[#0F172A] dark:bg-white/5 rounded-[2rem] p-8 text-white shadow-2xl dark:shadow-none dark:border dark:border-white/10 relative overflow-hidden flex-shrink-0">
                       <div className="absolute top-0 right-0 p-8 opacity-5 dark:opacity-10 pointer-events-none"><Icons.IconBot className="w-32 h-32" /></div>
                       <h3 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-6 relative z-10">AI Evaluation Engine</h3>
