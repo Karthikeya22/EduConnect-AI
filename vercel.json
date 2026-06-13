@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/canvas-api/:path*",
+      "destination": "https://usflearn.instructure.com/:path*"
+    },
+    {
+      "source": "/((?!assets/|favicon.ico|.*\\.png|.*\\.js|.*\\.css|.*\\.svg).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

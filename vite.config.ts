@@ -8,6 +8,13 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        proxy: {
+          '/canvas-api': {
+            target: 'https://usflearn.instructure.com',
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/canvas-api/, '')
+          }
+        }
       },
       plugins: [react()],
       define: {

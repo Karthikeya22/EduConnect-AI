@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-06T15:45:00Z",
+  "title": "Design System: EduConnect AI",
+  "extensions": {
+    "colorMeta": {
+      "brand-primary": { "role": "primary", "displayName": "Indigo 600", "canonical": "#4F46E5", "tonalRamp": ["#312E81", "#3730A3", "#4338CA", "#4F46E5", "#6366F1", "#818CF8", "#A5B4FC", "#C7D2FE", "#E0E7FF"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Space Grotesk", "purpose": "Headers and data points" }
+    },
+    "shadows": [
+      { "name": "shadow-xl", "value": "0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)", "purpose": "Aggressive shadow for primary cards" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Command Card",
+      "kind": "card",
+      "refersTo": "ui-card",
+      "description": "Tactile and chunky container for core workflows.",
+      "html": "<div class=\"ds-ui-card\"><div class=\"ds-nested\"><h3>Course Hub</h3><p>Select an assignment to grade.</p><button class=\"ds-btn\">START GRADING</button></div></div>",
+      "css": ".ds-ui-card { background: #FFFFFF; border: 2px solid #E2E8F0; border-radius: 2.5rem; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); overflow: hidden; padding: 2rem; font-family: 'Plus Jakarta Sans', sans-serif; } .ds-nested { background: #FDFEFE; border: 2px solid #E2E8F0; border-radius: 1rem; padding: 1.5rem; } .ds-nested h3 { font-family: 'Space Grotesk', sans-serif; font-weight: 900; margin: 0 0 1rem 0; font-size: 1.5rem; color: #0F172A; letter-spacing: -0.05em; } .ds-nested p { margin: 0 0 1.5rem 0; color: #334155; } .ds-btn { background: #4F46E5; color: #fff; padding: 0.75rem 1.5rem; border-radius: 0.5rem; font-weight: bold; border: none; cursor: pointer; transition: background 0.2s; } .ds-btn:hover { background: #4338CA; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Vibrant Command Center",
+    "overview": "This product is an instructional work surface, not a playful learning toy. The metaphor is structured, decisive, and productivity-oriented rather than flashy or decorative. Teachers using grading flows need confidence and speed, so the interface must feel precise and calm under load, never overly energetic or experimental.",
+    "keyCharacteristics": ["Decisive and Productivity-Oriented", "Precise and Calm Under Load", "Tactile and Chunky"],
+    "rules": [
+      { "name": "The Controlled Pop Rule", "body": "The bold accents are used deliberately as utility signals, not background decorations.", "section": "colors" },
+      { "name": "The Utilitarian Label Rule", "body": "All labels and muted text must be highly tracked, uppercase, and structurally distinct.", "section": "typography" },
+      { "name": "The Floating Work-Surface Rule", "body": "Core structural blocks float above the base layer with pronounced shadow, clarifying what is active content.", "section": "elevation" }
+    ],
+    "dos": ["Do use the .ui-card with its chunky 2.5rem border radius to group large, independent workflows.", "Do keep animations smooth, quick, and purposeful (like slideUp), enforcing a premium feel."],
+    "donts": ["Don't use overly saturated gradients or glassmorphism as a default background treatment.", "Don't use identical, endless card grids if the information hierarchy demands varied sizing and emphasis.", "Don't let vibrant accents bleed into the body text or large background areas."]
+  }
+}

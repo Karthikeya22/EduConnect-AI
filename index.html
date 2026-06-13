@@ -8,7 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
@@ -16,6 +16,10 @@
         darkMode: 'class',
         theme: {
           extend: {
+            fontFamily: {
+              sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+              display: ['"Space Grotesk"', 'sans-serif'],
+            },
             colors: {
               navy: {
                 800: '#1E293B',
@@ -28,23 +32,6 @@
       }
     </script>
     <style>
-        :root {
-            --bg-primary: #FDFCF8;
-            --bg-secondary: #F8F7F2;
-            --text-main: #18181B;
-            --accent-orange: #FFF7ED;
-            --accent-blue: #EFF6FF;
-            --accent-green: #F0FDF4;
-            --accent-pink: #FDF2F8;
-            --accent-purple: #F5F3FF;
-        }
-        
-        .dark {
-            --bg-primary: #020617;
-            --bg-secondary: #0F172A;
-            --text-main: #F8FAFC;
-        }
-
         html {
             scroll-behavior: smooth;
             height: 100%;
@@ -52,13 +39,11 @@
 
         body {
             font-family: 'Plus Jakarta Sans', sans-serif;
-            background-color: var(--bg-primary);
-            color: var(--text-main);
+            background-color: var(--bg-main);
+            color: var(--text-primary);
             margin: 0;
             padding: 0;
             min-height: 100%;
-            overflow-x: hidden;
-            overflow-y: visible;
             -webkit-font-smoothing: antialiased;
             transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1), color 0.4s ease;
         }
@@ -85,7 +70,7 @@
         }
 
         .glass-nav {
-            background: rgba(253, 252, 248, 0.8);
+            background: rgba(244, 247, 250, 0.8);
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
             border-bottom: 1px solid rgba(0, 0, 0, 0.04);
@@ -93,18 +78,6 @@
         .dark .glass-nav {
             background: rgba(15, 23, 42, 0.8);
             border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-        }
-
-        .card-macaron-orange { background-color: #FFF7ED; border-color: #FFEDD5; color: #9A3412; }
-        .card-macaron-blue { background-color: #EFF6FF; border-color: #DBEAFE; color: #1E40AF; }
-        .card-macaron-green { background-color: #F0FDF4; border-color: #DCFCE7; color: #166534; }
-        .card-macaron-pink { background-color: #FDF2F8; border-color: #FCE7F3; color: #9D174D; }
-        .card-macaron-purple { background-color: #F5F3FF; border-color: #EDE9FE; color: #5B21B6; }
-
-        .dark .card-macaron-orange, .dark .card-macaron-blue, .dark .card-macaron-green, .dark .card-macaron-pink, .dark .card-macaron-purple {
-            background-color: rgba(255, 255, 255, 0.03);
-            border-color: rgba(255, 255, 255, 0.05);
-            color: #F8FAFC;
         }
 
         ::-webkit-scrollbar { width: 6px; }
@@ -119,10 +92,10 @@
             opacity: 0.05;
         }
     </style>
-<link rel="stylesheet" href="/index.css">
+<link rel="stylesheet" href="/src/index.css">
 </head>
 <body class="premium-grain">
     <div id="root"></div>
-<script type="module" src="/index.tsx"></script>
+<script type="module" src="/src/index.tsx"></script>
 </body>
 </html>

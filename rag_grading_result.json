@@ -1,0 +1,294 @@
+{
+  "_pipeline_duration_seconds": 35.8,
+  "assignment_id": "18597059",
+  "content_max": 150,
+  "content_score": 119,
+  "critiques": [
+    {
+      "confidence": 0.9,
+      "criterion_id": "_5562",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 0.95,
+      "criterion_id": "_6757",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 1.0,
+      "criterion_id": "_1484",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 0.9,
+      "criterion_id": "_2042",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": false
+    },
+    {
+      "confidence": 1.0,
+      "criterion_id": "_5222",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 1.0,
+      "criterion_id": "_219",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 1.0,
+      "criterion_id": "_9569",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 1.0,
+      "criterion_id": "_9454",
+      "flag_for_human": false,
+      "is_justified": true,
+      "is_supported": true
+    },
+    {
+      "confidence": 0.9,
+      "criterion_id": "overall_quality_coherence",
+      "flag_for_human": false,
+      "is_justified": false,
+      "is_supported": true
+    },
+    {
+      "confidence": 0.9,
+      "criterion_id": "citation_attribution_integrity",
+      "flag_for_human": false,
+      "is_justified": false,
+      "is_supported": true
+    }
+  ],
+  "flag_for_human": true,
+  "misconception_hint": "The submission may be missing key concepts: educational problem, frames the educational challenge, data collection process, software used, ethical dilemmas, significant obstacles, implications for education.",
+  "overall_confidence": 0.96,
+  "rag_coverage_count": 5,
+  "rag_coverage_level": "high",
+  "referenced_materials": [
+    "Course Material"
+  ],
+  "rubric_missing": false,
+  "rubric_walkthrough": [
+    {
+      "ai_generated": false,
+      "criterion_id": "_5562",
+      "dimension": "content",
+      "evidence_anchor": "The healthcare industry is facing unprecedented challenges with increasing patient loads and diagnostic errors. This paper proposes an AI solution to assist radiologists in diagnosing lung cancer from X-ray imaging.",
+      "justification": "The student's introduction effectively provides an overview of a problem (increasing patient loads and diagnostic errors in healthcare), explains its significance (unprecedented challenges), and proposes an AI solution (assisting radiologists in diagnosing lung cancer). This fulfills the structural requirements of an introduction. However, the rubric specifically asks for an 'educational problem,' and the student has presented a healthcare problem. While the components of an introduction are present, the core domain of the problem does not align with the explicit requirement for an 'educational problem' as outlined in the course material.",
+      "max_score": 10,
+      "missing_keywords": [
+        "educational problem"
+      ],
+      "score": 6,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material (Chunk 2)",
+        "Course Material (Chunk 1)"
+      ],
+      "title": "Introduction"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_6757",
+      "dimension": "content",
+      "evidence_anchor": "Previous studies have shown that Convolutional Neural Networks (CNNs) achieve high accuracy in image recognition. Smith et al. (2022) demonstrated an 85% accuracy rate using ResNet-50. However, most models struggle with rare anomalies.",
+      "justification": "The student briefly reviews relevant literature by mentioning Convolutional Neural Networks (CNNs) and a specific study (Smith et al., 2022) as previous attempts at solutions in image recognition, which is a similar context to the problem. This addresses the 'previous attempts at solutions' and 'existing AI applications' aspects. However, the review is very concise and does not explicitly use literature to frame the educational challenge (e.g., by citing sources on the prevalence or impact of diagnostic errors or patient loads), focusing more on the technical aspects of previous AI solutions and their limitations.",
+      "max_score": 20,
+      "missing_keywords": [
+        "frames the educational challenge"
+      ],
+      "score": 12,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Literature Review"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_1484",
+      "dimension": "content",
+      "evidence_anchor": "We propose a hybrid model combining CNNs with a Vision Transformer (ViT) architecture. This approach captures both local features (like small nodules) and global context (the overall lung structure). The model is trained on a dataset of 50,000 labeled chest X-rays.",
+      "justification": "The student fully addresses the 'AI Solution' criterion by clearly describing the proposed AI tool as a hybrid model combining CNNs and Vision Transformers. They detail the technology by specifying the architectures and the training dataset. Crucially, they also provide a strong rationale for choosing this specific approach, explaining its ability to capture both local features and global context, which is highly relevant for the problem of lung cancer diagnosis from X-rays.",
+      "max_score": 20,
+      "missing_keywords": [],
+      "score": 20,
+      "status": "full",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "AI Solution"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_2042",
+      "dimension": "content",
+      "evidence_anchor": "## Methodology\nThe dataset is split into 70% training, 15% validation, and 15% testing. We preprocess images using CLAHE for contrast enhancement. The model uses a learning rate of 0.001 with Adam optimizer. Performance is measured using F1-score and AUC-ROC.",
+      "justification": "The student provided a clear outline of the methods used for data splitting, preprocessing, model optimization (Adam optimizer, learning rate), and performance evaluation (F1-score, AUC-ROC). They also mentioned the algorithms used (CNN, ViT, CLAHE). However, the submission lacked specific details on the data collection *process* (beyond describing the dataset's size and type in the 'AI Solution' section) and did not mention any specific software or programming frameworks used for implementation.",
+      "max_score": 20,
+      "missing_keywords": [
+        "data collection process",
+        "software used"
+      ],
+      "score": 16,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Methodology"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_5222",
+      "dimension": "content",
+      "evidence_anchor": "Ethical Considerations",
+      "justification": "The student thoroughly discussed key ethical considerations relevant to their AI solution, including patient data privacy, algorithmic bias, and the role of AI as a decision-support tool. They clearly articulated how these considerations influenced the design and implementation, such as anonymizing X-rays, ensuring dataset diversity, and positioning the AI as a tool to assist, not replace, human doctors.",
+      "max_score": 20,
+      "missing_keywords": [],
+      "score": 20,
+      "status": "full",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Ethical Considerations"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_219",
+      "dimension": "content",
+      "evidence_anchor": "Expected Outcomes/Results",
+      "justification": "The student clearly presents specific expected outcomes, including quantitative metrics (AUC-ROC of at least 0.92, 15% reduction in false negative rates) and a comparative statement (outperforming existing CNN-only models). The mention of \"preliminary testing\" indicates these expectations are grounded in some initial work, aligning with the rubric's requirement to describe outcomes based on research and preliminary work.",
+      "max_score": 20,
+      "missing_keywords": [],
+      "score": 20,
+      "status": "full",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Expected Outcomes/Results"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_9569",
+      "dimension": "content",
+      "evidence_anchor": "A major challenge is data scarcity for specific lung conditions. To solve this, we employ data augmentation techniques such as rotation, zooming, and Generative Adversarial Networks (GANs) to synthesize rare cases.",
+      "justification": "The student successfully identified a technical challenge related to their AI solution (data scarcity for specific lung conditions) and proposed a clear solution using data augmentation techniques (rotation, zooming, GANs). This directly addresses the core requirement of the rubric. However, the response could have been more comprehensive by discussing additional types of challenges, such as ethical dilemmas or other significant obstacles, as suggested by the rubric description.",
+      "max_score": 20,
+      "missing_keywords": [
+        "ethical dilemmas",
+        "significant obstacles"
+      ],
+      "score": 15,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Challenges and Solutions"
+    },
+    {
+      "ai_generated": false,
+      "criterion_id": "_9454",
+      "dimension": "content",
+      "evidence_anchor": "This hybrid AI approach offers a promising way to improve lung cancer detection. Future work will involve clinical trials in real hospital environments and expanding the model to other imaging modalities like MRI.",
+      "justification": "The student provides a brief summary of their findings and clearly outlines future work for the project. However, the conclusion completely omits any discussion of the implications of their project for education, which is a required component of the rubric criterion as per the course material. The project itself is framed around healthcare diagnostics rather than an educational problem, and the conclusion does not attempt to bridge this gap.",
+      "max_score": 20,
+      "missing_keywords": [
+        "implications for education"
+      ],
+      "score": 10,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material"
+      ],
+      "title": "Conclusion and Future Work"
+    },
+    {
+      "ai_generated": true,
+      "criterion_id": "overall_quality_coherence",
+      "dimension": "structure",
+      "evidence_anchor": "The entire submission, as it consistently adheres to the structural requirements and maintains a clear, logical flow across all sections.",
+      "justification": "The submission demonstrates excellent overall quality and coherence. It meticulously follows the prescribed paper structure from the course material, including all required sections: Introduction, Literature Review, AI Solution, Methodology, Ethical Considerations, Expected Outcomes/Results, Challenges and Solutions, and Conclusion and Future Work. The logical flow between sections is seamless, with each part building coherently on the last. The writing is clear, concise, and maintains a professional academic tone throughout, demonstrating a high standard of academic writing and thought.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+      "max_score": 10,
+      "missing_keywords": [],
+      "score": 10,
+      "status": "partial",
+      "supporting_materials": [
+        "Chunk 2",
+        "Chunk 3",
+        "Chunk 4",
+        "Chunk 5",
+        "Chunk 6"
+      ],
+      "title": "Overall Quality and Coherence (AI-Generated)"
+    },
+    {
+      "ai_generated": true,
+      "criterion_id": "citation_attribution_integrity",
+      "dimension": "content",
+      "evidence_anchor": "Smith et al. (2022) demonstrated an 85% accuracy rate using ResNet-50.",
+      "justification": "The student's submission includes a clear citation for external information ('Smith et al. (2022)'). There are no instances of blatant, verbatim plagiarism or unacknowledged material within the provided text, adhering to the criterion's focus on direct unacknowledged material.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+      "max_score": 10,
+      "missing_keywords": [],
+      "score": 10,
+      "status": "partial",
+      "supporting_materials": [
+        "Course Material (Chunk 7)"
+      ],
+      "title": "Citation and Attribution Integrity (AI-Generated)"
+    }
+  ],
+  "structure_max": 0,
+  "structure_score": 0,
+  "student_id": "stu_ai_grader_test",
+  "submission_concepts": [
+    "AI Solution",
+    "Healthcare Diagnostics",
+    "Lung Cancer Detection",
+    "X-ray Imaging",
+    "Convolutional Neural Networks (CNNs)",
+    "Vision Transformer (ViT)",
+    "Hybrid AI Model",
+    "Image Recognition",
+    "Dataset Training",
+    "Image Preprocessing",
+    "Contrast Enhancement",
+    "Machine Learning Metrics",
+    "Ethical Considerations",
+    "Patient Data Privacy",
+    "Algorithmic Bias",
+    "Decision-support Tool",
+    "Data Augmentation",
+    "Generative Adversarial Networks (GANs)",
+    "Clinical Trials"
+  ],
+  "topic_mastery_radar": {
+    "AI Solution": 1.0,
+    "Challenges and Solutions": 0.75,
+    "Citation and Attribution Integrity (AI-Generated)": 1.0,
+    "Conclusion and Future Work": 0.5,
+    "Ethical Considerations": 1.0,
+    "Expected Outcomes/Results": 1.0,
+    "Introduction": 0.6,
+    "Literature Review": 0.6,
+    "Methodology": 0.8,
+    "Overall Quality and Coherence (AI-Generated)": 1.0
+  },
+  "total": 119,
+  "total_max": 150
+}

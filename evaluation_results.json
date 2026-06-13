@@ -1,0 +1,849 @@
+{
+  "Research Paper": {
+    "Method_A": {
+      "_pipeline_duration_seconds": 29.0,
+      "assignment_id": "ai-ed-101",
+      "content_max": 80,
+      "content_score": 70,
+      "critiques": [
+        {
+          "confidence": 0.9,
+          "criterion_id": "content_mastery",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "evidence_usage",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "organization",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "quality_coherence",
+          "flag_for_human": false,
+          "is_justified": false,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "academic_integrity_lenient",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        }
+      ],
+      "flag_for_human": true,
+      "misconception_hint": "The submission may be missing key concepts: working memory is limited, Cognitive Load Theory, attribution, citation, plagiarism.",
+      "overall_confidence": 0.92,
+      "rag_coverage_count": 1,
+      "rag_coverage_level": "low",
+      "referenced_materials": [
+        "Course Material"
+      ],
+      "rubric_missing": false,
+      "rubric_walkthrough": [
+        {
+          "ai_generated": false,
+          "criterion_id": "content_mastery",
+          "dimension": "content",
+          "evidence_anchor": "Students using ITS showed a 30% reduction in extraneous cognitive load. They also scored 15% higher on post-tests. ITS is effective because it sequences information properly.",
+          "justification": "The student effectively demonstrates content mastery by accurately identifying that Intelligent Tutoring Systems (ITS) reduce cognitive load, specifically mentioning a \"30% reduction in extraneous cognitive load,\" which directly aligns with the provided course material. The submission also implicitly refers to the mechanism of reduction by stating ITS \"sequences information properly,\" consistent with scaffolding and step-by-step problem-solving. However, the submission does not explicitly state that Cognitive Load Theory posits working memory is limited, which is a foundational aspect mentioned in the ground truth.",
+          "max_score": 40,
+          "missing_keywords": [
+            "working memory is limited"
+          ],
+          "score": 35,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 0"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "evidence_usage",
+          "dimension": "content",
+          "evidence_anchor": "Students using ITS showed a 30% reduction in extraneous cognitive load.",
+          "justification": "The student effectively incorporated the key quantitative evidence regarding the 30% reduction in extraneous cognitive load, directly aligning with the provided course material. They also implicitly referenced the mechanism by which ITS reduces load (sequencing information properly, akin to scaffolding). However, the submission did not explicitly mention \"Cognitive Load Theory\" or the concept of \"working memory is limited\" as the foundational theory, which was also present in the ground truth.",
+          "max_score": 40,
+          "missing_keywords": [
+            "Cognitive Load Theory",
+            "working memory is limited"
+          ],
+          "score": 35,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 1"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "organization",
+          "dimension": "structure",
+          "evidence_anchor": "The entire document, specifically the clear headings and logical progression of content from \"Introduction\" to \"Conclusion\".",
+          "justification": "The submission demonstrates excellent organization and clarity. It follows a standard academic structure with clear, well-defined sections (Introduction, Method, Results, Conclusion) that flow logically from one to the next. The content within each section is concise and directly addresses its purpose, contributing to overall readability and coherence. There are no issues with logical flow or structural integrity.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+          "max_score": 20,
+          "missing_keywords": [],
+          "score": 20,
+          "status": "partial",
+          "supporting_materials": [],
+          "title": "Criterion 2"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "quality_coherence",
+          "dimension": "structure",
+          "evidence_anchor": "The clear headings for 'Introduction', 'Method', 'Results', and 'Conclusion' establish a strong, logical structure. The content within each section directly addresses its purpose, such as the 'Results' section stating 'Students using ITS showed a 30% reduction in extraneous cognitive load', which is a clear and coherent finding.",
+          "justification": "The submission demonstrates excellent overall quality and coherence. It is exceptionally well-structured with clear, logical sections (Introduction, Method, Results, Conclusion) that follow a standard academic format. The flow of information is easy to follow, and each section effectively contributes to the paper's core argument regarding the impact of Intelligent Tutoring Systems on cognitive load. The language is clear and concise, making the submission very easy to comprehend.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+          "max_score": 10,
+          "missing_keywords": [],
+          "score": 9,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material (Chunk 0)"
+          ],
+          "title": "Overall Quality and Coherence (AI-Generated)"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "academic_integrity_lenient",
+          "dimension": "content",
+          "evidence_anchor": "Students using ITS showed a 30% reduction in extraneous cognitive load.",
+          "justification": "The student's submission directly copies a specific statistic and phrasing from the provided course material ('30% reduction in extraneous cognitive load') without any attribution. This constitutes a genuine and obvious instance of direct blatant plagiarism, which is explicitly flagged by this criterion.",
+          "max_score": 10,
+          "missing_keywords": [
+            "attribution",
+            "citation",
+            "plagiarism"
+          ],
+          "score": 0,
+          "status": "missing",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Originality and Proper Attribution (AI-Generated)"
+        }
+      ],
+      "structure_max": 20,
+      "structure_score": 20,
+      "student_id": "stu_experiment",
+      "submission_concepts": [
+        "Intelligent Tutoring Systems (ITS)",
+        "Cognitive Load",
+        "Student learning paces",
+        "Traditional learning",
+        "Self-reporting",
+        "Pupil dilation",
+        "Extraneous cognitive load",
+        "Post-tests",
+        "Sequencing information"
+      ],
+      "topic_mastery_radar": {
+        "Criterion 0": 0.88,
+        "Criterion 1": 0.88,
+        "Criterion 2": 1.0,
+        "Originality and Proper Attribution (AI-Generated)": 0.0,
+        "Overall Quality and Coherence (AI-Generated)": 0.9
+      },
+      "total": 90,
+      "total_max": 100
+    },
+    "Method_B": {
+      "total": 65,
+      "content_score": 10,
+      "structure_score": 20,
+      "confidence": 0.9,
+      "misconception_hint": null,
+      "flag_for_human": false,
+      "rubric_walkthrough": [
+        {
+          "criterion_id": "content_mastery",
+          "score": 10,
+          "status": "partial",
+          "justification": "The submission identifies Intelligent Tutoring Systems (ITS) and Cognitive Load Theory, and mentions 'extraneous cognitive load.' However, it lacks depth in explaining *how* ITS reduces cognitive load, offering only a superficial statement about 'sequencing information properly' without elaborating on specific ITS mechanisms or deeper aspects of Cognitive Load Theory (e.g., intrinsic, germane load, working memory limitations).",
+          "evidence_anchor": "Intelligent Tutoring Systems (ITS) adapt to student learning paces. This paper explores how ITS reduces cognitive load.\nStudents using ITS showed a 30% reduction in extraneous cognitive load.\nITS is effective because it sequences information properly.",
+          "missing_keywords": [
+            "intrinsic load",
+            "germane load",
+            "working memory",
+            "scaffolding",
+            "adaptive feedback",
+            "personalization"
+          ]
+        },
+        {
+          "criterion_id": "evidence_usage",
+          "score": 35,
+          "status": "full",
+          "justification": "The student effectively supports claims with specific numerical data and measurement methods, including the number of students ('500 students'), methods for measuring cognitive load ('self-reporting and pupil dilation'), and quantified reductions in cognitive load ('30% reduction') and improvements in test scores ('15% higher'), directly aligning with the rubric's example of '30% reduction.'",
+          "evidence_anchor": "We analyzed 500 students using an ITS compared to traditional learning. Cognitive load was measured via self-reporting and pupil dilation.\nStudents using ITS showed a 30% reduction in extraneous cognitive load. They also scored 15% higher on post-tests.",
+          "missing_keywords": []
+        },
+        {
+          "criterion_id": "organization",
+          "score": 20,
+          "status": "full",
+          "justification": "The response is exceptionally well-structured with clear, standard headings (Introduction, Method, Results, Conclusion) and presents information in a logical, concise, and easy-to-follow manner.",
+          "evidence_anchor": "## Introduction\n## Method\n## Results\n## Conclusion",
+          "missing_keywords": []
+        }
+      ]
+    }
+  },
+  "Poster": {
+    "Method_A": {
+      "_pipeline_duration_seconds": 38.32,
+      "assignment_id": "ai-ed-101",
+      "content_max": 80,
+      "content_score": 60,
+      "critiques": [
+        {
+          "confidence": 0.95,
+          "criterion_id": "content_mastery",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.8,
+          "criterion_id": "evidence_usage",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "organization",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "quality_coherence",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "academic_integrity_originality",
+          "flag_for_human": false,
+          "is_justified": false,
+          "is_supported": true
+        }
+      ],
+      "flag_for_human": true,
+      "misconception_hint": "The submission may be missing key concepts: 30% reduction in extraneous load, Introduction, Methods, Discussion, Conclusion, Paragraphs, Transitions, Cognitive Load Theory, extraneous load.",
+      "overall_confidence": 0.93,
+      "rag_coverage_count": 1,
+      "rag_coverage_level": "low",
+      "referenced_materials": [
+        "Course Material"
+      ],
+      "rubric_missing": false,
+      "rubric_walkthrough": [
+        {
+          "ai_generated": false,
+          "criterion_id": "content_mastery",
+          "dimension": "content",
+          "evidence_anchor": "The student's points \"Intelligent Tutors adapt step-by-step\" and \"Reduces working memory strain\" align with the course material's description of ITS reducing extraneous load and addressing working memory limitations. The \"Key finding: 15% higher post-test scores\" is a factual error compared to the ground truth's \"30% reduction in extraneous load.\"",
+          "justification": "The student correctly identifies that Intelligent Tutors adapt step-by-step and reduce working memory strain, which aligns with the principles of Cognitive Load Theory and its application in ITS. However, the submission incorrectly states a key finding as \"15% higher post-test scores\" instead of the \"30% reduction in extraneous load\" as detailed in the course material.",
+          "max_score": 40,
+          "missing_keywords": [
+            "30% reduction in extraneous load"
+          ],
+          "score": 30,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 0"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "evidence_usage",
+          "dimension": "content",
+          "evidence_anchor": "[IMAGE: Bar chart showing 30% drop in load], - Intelligent Tutors adapt step-by-step, - Reduces working memory strain, - Key finding: 15% higher post-test scores",
+          "justification": "The student effectively uses several pieces of evidence from the course material. They correctly identify that Intelligent Tutors adapt step-by-step and reduce working memory strain, aligning with the concepts of 'step-by-step problem solving' and 'working memory is limited' from Cognitive Load Theory. Crucially, the student includes an image showing a '30% drop in load', which directly corresponds to the '30% reduction in extraneous load' mentioned in the course material. However, the submission also includes a 'Key finding: 15% higher post-test scores' which is not supported by the provided course material. While the student demonstrates a good understanding and application of evidence, the inclusion of an unsupported claim detracts from a perfect score.",
+          "max_score": 40,
+          "missing_keywords": [],
+          "score": 30,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 1"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "organization",
+          "dimension": "structure",
+          "evidence_anchor": "The entire student submission, specifically its bullet-point format and absence of structured sections.",
+          "justification": "The submission is presented as a brief list of bullet points, completely lacking the organizational structure expected in an academic submission. It does not include an introduction, distinct sections for methods, results, or discussion, nor a conclusion. There are no paragraphs or transitions to create flow and cohesion between ideas. While individual statements are clear, the overall organization is severely underdeveloped.",
+          "max_score": 20,
+          "missing_keywords": [
+            "Introduction",
+            "Methods",
+            "Discussion",
+            "Conclusion",
+            "Paragraphs",
+            "Transitions"
+          ],
+          "score": 4,
+          "status": "missing",
+          "supporting_materials": [],
+          "title": "Criterion 2"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "quality_coherence",
+          "dimension": "content",
+          "evidence_anchor": "Intelligent Tutors adapt step-by-step; Reduces working memory strain; IMAGE: Bar chart showing 30% drop in load; Key finding: 15% higher post-test scores",
+          "justification": "The submission demonstrates good clarity and logical coherence in connecting Intelligent Tutors to cognitive load reduction, correctly identifying step-by-step adaptation and the 30% reduction in load (via the image). However, the overall quality is significantly impacted by the inclusion of an unsupported \"key finding\" about \"15% higher post-test scores,\" which is not present in the provided course material. Additionally, the depth of analysis is limited, and specific terminology like \"Cognitive Load Theory\" and \"extraneous load\" from the ground truth are not explicitly used, affecting the precision of communication.",
+          "max_score": 10,
+          "missing_keywords": [
+            "Cognitive Load Theory",
+            "extraneous load"
+          ],
+          "score": 6,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Overall Quality and Coherence (AI-Generated)"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "academic_integrity_originality",
+          "dimension": "content",
+          "evidence_anchor": "The entire student submission.",
+          "justification": "The student's submission does not contain any direct, blatant plagiarism or clear, undeniable evidence of unauthorized collaboration. The phrasing is original, and while it discusses similar concepts, there is no verbatim copying from the provided course material.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+          "max_score": 10,
+          "missing_keywords": [],
+          "score": 10,
+          "status": "partial",
+          "supporting_materials": [],
+          "title": "Academic Integrity and Originality (AI-Generated)"
+        }
+      ],
+      "structure_max": 20,
+      "structure_score": 4,
+      "student_id": "stu_experiment",
+      "submission_concepts": [
+        "ITS (Intelligent Tutoring Systems)",
+        "Cognitive Load",
+        "Step-by-step adaptation",
+        "Working memory strain reduction",
+        "Post-test scores improvement",
+        "Physiological markers",
+        "Pupil dilation",
+        "Real-time analysis"
+      ],
+      "topic_mastery_radar": {
+        "Academic Integrity and Originality (AI-Generated)": 1.0,
+        "Criterion 0": 0.75,
+        "Criterion 1": 0.75,
+        "Criterion 2": 0.2,
+        "Overall Quality and Coherence (AI-Generated)": 0.6
+      },
+      "total": 64,
+      "total_max": 100
+    },
+    "Method_B": {
+      "total": 86,
+      "content_score": 28,
+      "structure_score": 20,
+      "confidence": 0.9,
+      "misconception_hint": null,
+      "flag_for_human": false,
+      "rubric_walkthrough": [
+        {
+          "criterion_id": "content_mastery",
+          "score": 28,
+          "status": "partial",
+          "justification": "The submission demonstrates a foundational understanding of Intelligent Tutoring Systems (ITS) by noting their adaptive nature and their role in reducing \"working memory strain,\" a key aspect of Cognitive Load Theory. However, it lacks deeper exploration of the theoretical framework of Cognitive Load Theory itself or the detailed mechanisms by which ITS achieves these effects, indicating a good but not comprehensive depth of understanding.",
+          "evidence_anchor": "Intelligent Tutors adapt step-by-step\n- Reduces working memory strain",
+          "missing_keywords": [
+            "Cognitive Load Theory"
+          ]
+        },
+        {
+          "criterion_id": "evidence_usage",
+          "score": 38,
+          "status": "full",
+          "justification": "The student provides strong, specific evidence by citing \"15% higher post-test scores\" and referencing an image that shows a \"30% drop in load.\" This directly aligns with the rubric's expectation for supporting claims with specific data.",
+          "evidence_anchor": "Key finding: 15% higher post-test scores\n[IMAGE: Bar chart showing 30% drop in load]",
+          "missing_keywords": []
+        },
+        {
+          "criterion_id": "organization",
+          "score": 20,
+          "status": "full",
+          "justification": "The response is presented as a clear, concise bulleted list with a header, making it very easy to read and follow. The structure is well-organized and contributes to overall clarity.",
+          "evidence_anchor": "[HEADER: ITS and Cognitive Load]\n[IMAGE: Bar chart showing 30% drop in load]\n- Intelligent Tutors adapt step-by-step\n- Reduces working memory strain\n- Key finding: 15% higher post-test scores\n- Future work: Analyze physiological markers like pupil dilation in real-time.",
+          "missing_keywords": []
+        }
+      ]
+    }
+  },
+  "PowerPoint Presentation": {
+    "Method_A": {
+      "_pipeline_duration_seconds": 24.82,
+      "assignment_id": "ai-ed-101",
+      "content_max": 80,
+      "content_score": 80,
+      "critiques": [
+        {
+          "confidence": 1.0,
+          "criterion_id": "content_mastery",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "evidence_usage",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.95,
+          "criterion_id": "organization",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "quality_coherence",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "academic_integrity",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": false
+        }
+      ],
+      "flag_for_human": false,
+      "misconception_hint": "The submission may be missing key concepts: Conclusion.",
+      "overall_confidence": 0.97,
+      "rag_coverage_count": 1,
+      "rag_coverage_level": "low",
+      "referenced_materials": [
+        "Course Material"
+      ],
+      "rubric_missing": false,
+      "rubric_walkthrough": [
+        {
+          "ai_generated": false,
+          "criterion_id": "content_mastery",
+          "dimension": "content",
+          "evidence_anchor": "ITS provides scaffolding, step-by-step reveals, reduced strain on working memory, and 30% less cognitive load reported.",
+          "justification": "The student's submission accurately describes how Intelligent Tutoring Systems (ITS) address high extraneous cognitive load by providing scaffolding and step-by-step problem-solving, which reduces strain on working memory. The submission also correctly cites the 30% reduction in cognitive load, aligning perfectly with all key points in the provided course material.",
+          "max_score": 40,
+          "missing_keywords": [],
+          "score": 40,
+          "status": "full",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 0"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "evidence_usage",
+          "dimension": "content",
+          "evidence_anchor": "30% less cognitive load reported",
+          "justification": "The student effectively used evidence from the course material. They accurately referenced the 30% reduction in cognitive load, the role of ITS in providing scaffolding and step-by-step problem solving, and the concept of reduced strain on working memory, all of which directly align with the provided ground truth.",
+          "max_score": 40,
+          "missing_keywords": [],
+          "score": 40,
+          "status": "full",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 1"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "organization",
+          "dimension": "structure",
+          "evidence_anchor": "Slide 1: Intelligent Tutoring Systems A Cognitive Load Perspective, Slide 2: The Problem, Slide 3: The Solution, Slide 4: Results",
+          "justification": "The submission demonstrates good organization and clarity, with a logical flow from identifying a problem to proposing a solution and presenting results. The use of clear slide titles and concise bullet points enhances readability. However, the presentation lacks a dedicated conclusion section, which is a standard component for academic presentations to summarize findings and offer final thoughts, thus slightly impacting overall cohesion.",
+          "max_score": 20,
+          "missing_keywords": [
+            "Conclusion"
+          ],
+          "score": 17,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material (Chunk 0)"
+          ],
+          "title": "Criterion 2"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "quality_coherence",
+          "dimension": "content",
+          "evidence_anchor": "The entire submission, particularly the clear progression from \"The Problem\" (Slide 2) to \"The Solution\" (Slide 3) and \"Results\" (Slide 4), demonstrates strong coherence and clarity.",
+          "justification": "The submission demonstrates excellent overall quality, clarity, and logical flow. It is well-presented, easy to understand, and effectively communicates its purpose by clearly outlining the problem, the ITS solution, and its positive results, all from a Cognitive Load Perspective. The content is concise and follows a coherent narrative.",
+          "max_score": 10,
+          "missing_keywords": [],
+          "score": 10,
+          "status": "full",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Overall Quality and Coherence (AI-Generated)"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "academic_integrity",
+          "dimension": "content",
+          "evidence_anchor": "",
+          "justification": "The student's submission does not contain clear and undeniable instances of direct, blatant plagiarism or unauthorized collaboration. While some phrases and a specific numerical fact ('30% less cognitive load reported' vs '30% reduction in extraneous load') are similar to the course material, they are not direct, verbatim copies of unique phrasing or extensive text. The student has paraphrased and used key concepts, which is acceptable under the strict interpretation of this criterion, giving the student the benefit of the doubt in ambiguous cases.",
+          "max_score": 5,
+          "missing_keywords": [],
+          "score": 5,
+          "status": "full",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Academic Integrity and Originality (AI-Generated)"
+        }
+      ],
+      "structure_max": 20,
+      "structure_score": 17,
+      "student_id": "stu_experiment",
+      "submission_concepts": [
+        "Intelligent Tutoring Systems (ITS)",
+        "Cognitive Load Perspective",
+        "Traditional Classrooms",
+        "Extraneous Cognitive Load",
+        "Scaffolding",
+        "Step-by-step Reveals",
+        "Working Memory Strain",
+        "Cognitive Load Reduction",
+        "Improved Academic Scores"
+      ],
+      "topic_mastery_radar": {
+        "Academic Integrity and Originality (AI-Generated)": 1.0,
+        "Criterion 0": 1.0,
+        "Criterion 1": 1.0,
+        "Criterion 2": 0.85,
+        "Overall Quality and Coherence (AI-Generated)": 1.0
+      },
+      "total": 97,
+      "total_max": 100
+    },
+    "Method_B": {
+      "total": 75,
+      "content_score": 55,
+      "structure_score": 20,
+      "confidence": 0.9,
+      "misconception_hint": "Consider elaborating on the different types of cognitive load (intrinsic, germane, extraneous) and the specific intelligent features of ITS (e.g., student modeling, adaptive feedback) that contribute to reducing extraneous load and fostering germane load.",
+      "flag_for_human": false,
+      "rubric_walkthrough": [
+        {
+          "criterion_id": "content_mastery",
+          "score": 20,
+          "status": "partial",
+          "justification": "The submission identifies ITS as a solution for high extraneous cognitive load by providing scaffolding and reducing working memory strain. However, it lacks depth in explaining the mechanisms of ITS beyond basic scaffolding or a comprehensive understanding of Cognitive Load Theory (e.g., different types of load, detailed ITS components).",
+          "evidence_anchor": "ITS provides scaffolding\nReduced strain on working memory\nExtraneous cognitive load is high",
+          "missing_keywords": [
+            "intrinsic cognitive load",
+            "germane cognitive load",
+            "student modeling",
+            "adaptive feedback",
+            "individualized learning"
+          ]
+        },
+        {
+          "criterion_id": "evidence_usage",
+          "score": 35,
+          "status": "full",
+          "justification": "The submission effectively uses specific concepts like 'scaffolding' and 'step-by-step reveals' to explain how ITS addresses cognitive load. It also provides specific quantitative data ('30% less cognitive load reported', '15% improvement in scores') to support the claims about ITS effectiveness, directly aligning with the examples provided in the rubric.",
+          "evidence_anchor": "ITS provides scaffolding\nStep-by-step reveals\n30% less cognitive load reported\n15% improvement in scores",
+          "missing_keywords": []
+        },
+        {
+          "criterion_id": "organization",
+          "score": 20,
+          "status": "full",
+          "justification": "The submission is exceptionally well-structured, using a clear slide format that logically progresses from problem to solution to results. Each slide has a concise title and bullet points, making it very easy to follow and understand.",
+          "evidence_anchor": "=== Slide 1 ===\n=== Slide 2 ===\n=== Slide 3 ===\n=== Slide 4 ===",
+          "missing_keywords": []
+        }
+      ]
+    }
+  },
+  "Regular Assignment": {
+    "Method_A": {
+      "details": "cannot schedule new futures after shutdown",
+      "error": "Internal computation error"
+    },
+    "Method_B": {
+      "total": 100,
+      "content_score": 80,
+      "structure_score": 20,
+      "confidence": 0.95,
+      "misconception_hint": null,
+      "flag_for_human": false,
+      "rubric_walkthrough": [
+        {
+          "criterion_id": "content_mastery",
+          "score": 40,
+          "status": "full",
+          "justification": "The student accurately identifies the primary benefit of ITS according to CLT (reducing extraneous cognitive load) and explains the mechanisms by which ITS achieves this, demonstrating a clear understanding of both concepts.",
+          "evidence_anchor": "An ITS primarily helps by reducing extraneous cognitive load. It does this by breaking down complex problems into smaller, manageable steps, providing scaffolding, and adapting to the learner's current knowledge level so their working memory isn't overwhelmed.",
+          "missing_keywords": []
+        },
+        {
+          "criterion_id": "evidence_usage",
+          "score": 40,
+          "status": "full",
+          "justification": "The student supports their claim by detailing specific ITS mechanisms (breaking down problems, scaffolding, adapting to knowledge level) that directly contribute to reducing extraneous cognitive load, effectively using relevant concepts as evidence.",
+          "evidence_anchor": "breaking down complex problems into smaller, manageable steps, providing scaffolding, and adapting to the learner's current knowledge level",
+          "missing_keywords": []
+        },
+        {
+          "criterion_id": "organization",
+          "score": 20,
+          "status": "full",
+          "justification": "The response is well-structured, directly answers the question, and presents information clearly and concisely, making it easy to understand.",
+          "evidence_anchor": "An ITS primarily helps by reducing extraneous cognitive load. It does this by breaking down complex problems into smaller, manageable steps, providing scaffolding, and adapting to the learner's current knowledge level so their working memory isn't overwhelmed.",
+          "missing_keywords": []
+        }
+      ]
+    }
+  },
+  "Discussion Post": {
+    "Method_A": {
+      "_pipeline_duration_seconds": 24.21,
+      "assignment_id": "ai-ed-101",
+      "content_max": 80,
+      "content_score": 50,
+      "critiques": [
+        {
+          "confidence": 0.9,
+          "criterion_id": "content_mastery",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "evidence_usage",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "organization",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 0.9,
+          "criterion_id": "quality_assessment",
+          "flag_for_human": false,
+          "is_justified": true,
+          "is_supported": true
+        },
+        {
+          "confidence": 1.0,
+          "criterion_id": "academic_integrity",
+          "flag_for_human": false,
+          "is_justified": false,
+          "is_supported": true
+        }
+      ],
+      "flag_for_human": true,
+      "misconception_hint": "The submission may be missing key concepts: 30% reduction, Cognitive Load Theory, extraneous load, key study, introduction, body paragraphs, conclusion, clear sections, transitions, logical flow.",
+      "overall_confidence": 0.94,
+      "rag_coverage_count": 1,
+      "rag_coverage_level": "low",
+      "referenced_materials": [
+        "Course Material"
+      ],
+      "rubric_missing": false,
+      "rubric_walkthrough": [
+        {
+          "ai_generated": false,
+          "criterion_id": "content_mastery",
+          "dimension": "content",
+          "evidence_anchor": "The student's statements 'manages cognitive load', 'working memory gets flooded', and 'stops and waits for you to master the current step' directly relate to the ground truth regarding ITS, cognitive load, and step-by-step problem solving.",
+          "justification": "The student correctly identifies that ITS manages cognitive load and explains how it does so through step-by-step mastery, which aligns with the concept of reducing extraneous load and scaffolding. They also implicitly acknowledge the limitation of working memory. However, the submission did not include the specific statistic regarding the 30% reduction in extraneous load mentioned in the course material.",
+          "max_score": 40,
+          "missing_keywords": [
+            "30% reduction"
+          ],
+          "score": 35,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 0"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "evidence_usage",
+          "dimension": "content",
+          "evidence_anchor": "I think the biggest advantage is definitely how it manages cognitive load. In a regular class, if you miss a step, you're lost and your working memory gets flooded trying to catch up. But with an ITS, it literally stops and waits for you to master the current step.",
+          "justification": "The student correctly identifies that ITS manages cognitive load and describes how it helps prevent working memory overload through step-by-step mastery, aligning with the concepts of scaffolding and reducing extraneous load. However, the submission lacks explicit reference to 'Cognitive Load Theory' by name, the specific finding of a '30% reduction in extraneous load' from a key study, or any direct citation of the course material as evidence. The discussion is more conceptual and reflective rather than an explicit use of the provided evidence.",
+          "max_score": 40,
+          "missing_keywords": [
+            "Cognitive Load Theory",
+            "extraneous load",
+            "30% reduction",
+            "key study"
+          ],
+          "score": 15,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Criterion 1"
+        },
+        {
+          "ai_generated": false,
+          "criterion_id": "organization",
+          "dimension": "structure",
+          "evidence_anchor": "I found the reading on ITS really interesting. I think the biggest advantage is definitely how it manages cognitive load. In a regular class, if you miss a step, you're lost and your working memory gets flooded trying to catch up. But with an ITS, it literally stops and waits for you to master the current step. Has anyone else noticed this when using platforms like Duolingo or Khan Academy?",
+          "justification": "The submission is a single, informal paragraph that completely lacks any discernible organizational structure. It does not include an introduction, body paragraphs, or a conclusion, nor does it demonstrate clear sections or logical transitions expected in an academic response. It reads more like a personal reflection or forum post than a structured piece of writing.",
+          "max_score": 20,
+          "missing_keywords": [
+            "introduction",
+            "body paragraphs",
+            "conclusion",
+            "clear sections",
+            "transitions",
+            "logical flow"
+          ],
+          "score": 2,
+          "status": "missing",
+          "supporting_materials": [],
+          "title": "Criterion 2"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "quality_assessment",
+          "dimension": "content",
+          "evidence_anchor": "I think the biggest advantage is definitely how it manages cognitive load. In a regular class, if you miss a step, you're lost and your working memory gets flooded trying to catch up. But with an ITS, it literally stops and waits for you to master the current step.",
+          "justification": "The student correctly identifies that a key advantage of ITS is its ability to manage cognitive load, and implicitly describes how it does this through a form of scaffolding ('it literally stops and waits for you to master the current step'). This demonstrates a basic understanding of a core concept from the course material. However, the submission is highly informal and conversational, lacking the professional presentation and depth expected in an academic context. It fails to mention specific terminology like 'Cognitive Load Theory' or 'extraneous load', and completely omits the quantitative evidence (e.g., '30% reduction in extraneous load') provided in the ground truth. The overall quality, clarity, and effectiveness as an academic response are significantly low.",
+          "max_score": 10,
+          "missing_keywords": [
+            "Cognitive Load Theory",
+            "extraneous load",
+            "30% reduction"
+          ],
+          "score": 3,
+          "status": "partial",
+          "supporting_materials": [
+            "Course Material"
+          ],
+          "title": "Overall Quality and Effectiveness (AI-Generated)"
+        },
+        {
+          "ai_generated": true,
+          "criterion_id": "academic_integrity",
+          "dimension": "content",
+          "evidence_anchor": "I found the reading on ITS really interesting. I think the biggest advantage is definitely how it manages cognitive load. In a regular class, if you miss a step, you're lost and your working memory gets flooded trying to catch up. But with an ITS, it literally stops and waits for you to master the current step. Has anyone else noticed this when using platforms like Duolingo or Khan Academy?",
+          "justification": "The student's submission does not show any signs of blatant plagiarism or unauthorized collaboration. The language is conversational and reflective, discussing personal observations and relating them to the course material, which aligns with original thought.\n\nNote: Full credit cannot be confirmed \u2014 no strong course material match was found for this criterion. Please review manually.",
+          "max_score": 5,
+          "missing_keywords": [],
+          "score": 5,
+          "status": "partial",
+          "supporting_materials": [],
+          "title": "Academic Integrity and Originality (AI-Generated)"
+        }
+      ],
+      "structure_max": 20,
+      "structure_score": 2,
+      "student_id": "stu_experiment",
+      "submission_concepts": [
+        "ITS (Intelligent Tutoring Systems)",
+        "Cognitive load",
+        "Working memory",
+        "Step mastery",
+        "Personalized learning",
+        "Duolingo",
+        "Khan Academy"
+      ],
+      "topic_mastery_radar": {
+        "Academic Integrity and Originality (AI-Generated)": 1.0,
+        "Criterion 0": 0.88,
+        "Criterion 1": 0.38,
+        "Criterion 2": 0.1,
+        "Overall Quality and Effectiveness (AI-Generated)": 0.3
+      },
+      "total": 52,
+      "total_max": 100
+    },
+    "Method_B": {
+      "total": 50,
+      "content_score": 30,
+      "structure_score": 20,
+      "confidence": 0.9,
+      "misconception_hint": null,
+      "flag_for_human": false,
+      "rubric_walkthrough": [
+        {
+          "criterion_id": "content_mastery",
+          "score": 20,
+          "status": "partial",
+          "justification": "The student correctly identifies ITS and its role in managing cognitive load by allowing mastery at each step. This demonstrates a basic understanding of the connection between ITS and Cognitive Load Theory. However, the explanation lacks depth regarding the specific mechanisms or theoretical underpinnings of how ITS achieves this beyond a general observation.",
+          "evidence_anchor": "I think the biggest advantage is definitely how it manages cognitive load. ... But with an ITS, it literally stops and waits for you to master the current step.",
+          "missing_keywords": [
+            "student modeling",
+            "adaptive feedback",
+            "scaffolding",
+            "zone of proximal development",
+            "individualized learning paths"
+          ]
+        },
+        {
+          "criterion_id": "evidence_usage",
+          "score": 10,
+          "status": "partial",
+          "justification": "The student makes a claim about ITS managing cognitive load and provides real-world platform examples (Duolingo, Khan Academy) where this might be observed. However, they do not support their claims with specific data (e.g., '30% reduction') or named theoretical concepts (e.g., 'scaffolding,' 'adaptive sequencing,' 'immediate feedback') as explicitly requested by the rubric. The description of 'stops and waits' is an observation, not a named concept from the theories.",
+          "evidence_anchor": "Has anyone else noticed this when using platforms like Duolingo or Khan Academy?",
+          "missing_keywords": [
+            "scaffolding",
+            "adaptive feedback",
+            "30% reduction",
+            "empirical data",
+            "formative assessment"
+          ]
+        },
+        {
+          "criterion_id": "organization",
+          "score": 20,
+          "status": "full",
+          "justification": "The response is short, clear, and well-structured. It introduces the topic, states a main point, provides a brief explanation, and concludes with a relevant question, making it easy to follow.",
+          "evidence_anchor": "I found the reading on ITS really interesting. I think the biggest advantage is definitely how it manages cognitive load. In a regular class, if you miss a step, you're lost and your working memory gets flooded trying to catch up. But with an ITS, it literally stops and waits for you to master the current step. Has anyone else noticed this when using platforms like Duolingo or Khan Academy?",
+          "missing_keywords": []
+        }
+      ]
+    }
+  }
+}

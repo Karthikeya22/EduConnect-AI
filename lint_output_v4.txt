@@ -1,7 +1,0 @@
-pages/TeacherDashboard.tsx(88,7): error TS2304: Cannot find name 'setPlatformContext'.
-pages/TeacherDashboard.tsx(120,9): error TS2304: Cannot find name 'setUserProfile'.
-pages/TeacherDashboard.tsx(168,21): error TS2304: Cannot find name 'userProfile'.
-pages/TeacherDashboard.tsx(168,63): error TS2304: Cannot find name 'userProfile'.
-pages/TeacherDashboard.tsx(169,19): error TS2304: Cannot find name 'userProfile'.
-pages/TeacherDashboard.tsx(186,22): error TS2304: Cannot find name 'userProfile'.
-pages/TeacherDashboard.tsx(187,26): error TS2304: Cannot find name 'platformContext'.

@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Core Foundation - Tech Minimalist (Monochrome) */
+  --bg-main: #F4F7FA; 
+  --bg-card: #FFFFFF;
+  --bg-nested: #FDFEFE; 
+  
+  /* Text with Maximum Readability (Slate Foundation) */
+  --text-primary: #0F172A; 
+  --text-secondary: #334155; 
+  --text-muted: #64748B; 
+  --text-placeholder: #94A3B8;
+  
+  /* Interaction & Boundaries - Slate 200 border */
+  --border-primary: #E2E8F0; 
+  --border-strong: #CBD5E1; 
+  --ring-offset: #FFFFFF;
+  
+  /* Brand & Vibrant Accents - Indigo, Pink, Cyan */
+  --brand-primary: #4F46E5; 
+  --brand-secondary: #EC4899; 
+  --brand-accent: #06B6D4; 
+  
+  /* Status Colors for Visualization */
+  --color-success: #16A34A;
+  --color-success-bg: rgba(22, 163, 74, 0.08);
+  --color-warning: #D97706;
+  --color-warning-bg: rgba(217, 119, 6, 0.08);
+  --color-danger: #DC2626;
+  --color-danger-bg: rgba(220, 38, 38, 0.08);
+  --color-info: #2563EB;
+  --color-info-bg: rgba(37, 99, 235, 0.08);
+
+  /* Diffuse Shadows for Floating Cards */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.03);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.dark {
+  /* Core Foundation - High Contrast Dark Mode */
+  --bg-main: #020617;
+  --bg-card: #0F172A;
+  --bg-nested: #1E293B;
+  
+  /* High Contrast Text */
+  --text-primary: #F8FAFC;
+  --text-secondary: #E2E8F0;
+  --text-muted: #94A3B8;
+  --text-placeholder: #4A5568;
+  
+  /* Interaction & Boundaries */
+  --border-primary: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --ring-offset: #0F172A;
+  
+  /* Brand & Vibrant Accents in Dark Mode */
+  --brand-primary: #6366F1;
+  --brand-secondary: #F472B6;
+  --brand-accent: #22D3EE;
+
+  /* Status Colors */
+  --color-success: #34D399;
+  --color-warning: #FBBF24;
+  --color-danger: #F87171;
+  --color-info: #60A5FA;
+}
+
+@layer base {
+  body {
+    @apply text-[var(--text-primary)] antialiased transition-colors duration-300;
+    background-color: var(--bg-main);
+    font-family: 'Plus Jakarta Sans', sans-serif;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-black tracking-tighter text-[var(--text-primary)];
+    font-family: 'Space Grotesk', sans-serif;
+  }
+}
+
+@layer components {
+  .ui-card {
+    @apply bg-[var(--bg-card)] border-2 border-[var(--border-primary)] shadow-[var(--shadow-xl)] rounded-[2.5rem] transition-all duration-300 overflow-hidden;
+  }
+  
+  .ui-nested-block {
+    @apply bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-2xl p-6 shadow-inner;
+  }
+
+  /* Aggressive Input Differentiation */
+  input, textarea, select {
+    @apply bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] text-[var(--text-primary)] 
+           placeholder:text-[var(--text-placeholder)] font-bold text-sm
+           focus:border-[var(--brand-primary)] focus:bg-[var(--bg-card)] 
+           focus:shadow-[0_0_20px_rgba(8,145,178,0.15)] focus:ring-4 focus:ring-[var(--brand-primary)]/5
+           outline-none transition-all duration-200;
+  }
+
+  /* Custom checkbox visibility enhancement */
+  input[type="checkbox"] {
+    @apply border-2 border-[var(--border-strong)] rounded bg-[var(--bg-card)] cursor-pointer;
+  }
+}
+
+/* Global Transition Suppressor for initial load if needed */
+.no-transition * {
+  transition: none !important;
+}
+
+/* Animations */
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

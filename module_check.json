@@ -1,9 +1,0 @@
-{
-  "data": null,
-  "error": {
-    "code": "PGRST205",
-    "details": null,
-    "hint": null,
-    "message": "Could not find the table 'public.course_modules' in the schema cache"
-  }
-}

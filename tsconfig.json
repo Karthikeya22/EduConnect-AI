@@ -26,5 +26,13 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "supabase",
+    "fetch-schema.ts",
+    "scripts",
+    "node_modules",
+    "tmp",
+    "**/*.js"
+  ]
 }
