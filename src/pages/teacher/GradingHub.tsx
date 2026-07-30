@@ -10,6 +10,7 @@ import { GradingResult } from '../../components/grading/GradingResult';
 import { GradingOutput } from '../../types/grading';
 import { UniversalPreviewer } from '../../components/ui/UniversalPreviewer';
 import { selectPhaseFiles, CanvasCourseFile } from '../../lib/courseFileRanker';
+import { CourseMaterialsModal } from '../../components/modals/CourseMaterialsModal';
 
 const MOCK_LEARNING_PROFILE = {
   materialsViewed: '18/24',
@@ -109,6 +110,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   const [showAssignmentContext, setShowAssignmentContext] = useState(false);
   const [showLearningProfile, setShowLearningProfile] = useState(false);
   const [showRubricContext, setShowRubricContext] = useState(false);
+  const [showMaterialsModal, setShowMaterialsModal] = useState(false);
 
   // Phase 3: RAG States
   const [aiGradingData, setAiGradingData] = useState<Record<string, GradingOutput>>({});
@@ -409,7 +411,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           headers['X-Gemini-Api-Key'] = customGeminiKey;
         }
 
-        await fetch(`${API_BASE_URL}/api/ingest`, {
+        const ingestRes = await fetch(`${API_BASE_URL}/api/ingest`, {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -425,6 +427,10 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             exemplars: []
           })
         });
+        if (!ingestRes.ok) {
+          const errText = await ingestRes.text();
+          throw new Error(errText || 'Assignment ingest failed');
+        }
 
         const files = await canvasAPI.getCourseFiles(selectedCourse);
         const { phaseA, phaseB } = selectPhaseFiles(
@@ -569,8 +575,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
            if (isRetry) {
               throw new Error("No rubric exists for this assignment.");
            }
-           setIngestStatus({ type: 'error', msg: 'AI has no rubric. Attempting background ingestion again...' });
-           // Could retry autoingest here if needed, but it should have run.
+           setIngestStatus({ type: 'loading', msg: 'AI rubric unavailable. Retrying grade once...' });
            throw new Error("RUBRIC_MISSING_RETRY");
         }
         return data;
@@ -844,6 +849,13 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 </h2>
                 <div className="flex space-x-3 shrink-0 items-center">
 
+                  <button
+                    onClick={() => setShowMaterialsModal(true)}
+                    className="px-4 py-2 border border-zinc-300 dark:border-white/10 rounded-lg text-xs font-bold hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors flex items-center"
+                  >
+                    <Icons.IconBook className="w-4 h-4 mr-2 text-indigo-500" />
+                    Manage Materials
+                  </button>
                   <button 
                     onClick={handleDownloadZip}
                     disabled={isDownloading || studentsData.length === 0}
@@ -1505,6 +1517,17 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       </div>
     </div>
 
+      {showMaterialsModal && selectedCourse && selectedAssignment && (
+        <CourseMaterialsModal
+          courseId={selectedCourse}
+          assignmentId={selectedAssignment}
+          onClose={() => setShowMaterialsModal(false)}
+          onIngestSuccess={() => {
+            setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
+            alert("Materials successfully ingested! Future grading will use these materials.");
+          }}
+        />
+      )}
     </>
   );
 }
