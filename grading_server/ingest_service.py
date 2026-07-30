@@ -57,12 +57,22 @@ async def ingest_course_material(
                 "embedding": emb,
             })
 
-        # Upsert into Supabase — on_conflict replaces existing rows
-        await asyncio.to_thread(
-            lambda: sb.table("course_material_chunks")
-                .upsert(chunk_rows, on_conflict="assignment_id,chunk_index")
-                .execute()
-        )
+        # Assignment-description chunks are covered by a *partial* unique index
+        # (assignment_id, chunk_index) WHERE canvas_file_id IS NULL, which
+        # ON CONFLICT cannot infer, so replace the rows explicitly instead.
+        def _write_assignment_chunks():
+            try:
+                sb.table("course_material_chunks").delete().eq(
+                    "assignment_id", str(assignment_id)
+                ).is_("canvas_file_id", "null").execute()
+            except Exception:
+                # Pre-migration schema has no canvas_file_id column.
+                sb.table("course_material_chunks").delete().eq(
+                    "assignment_id", str(assignment_id)
+                ).execute()
+            sb.table("course_material_chunks").insert(chunk_rows).execute()
+
+        await asyncio.to_thread(_write_assignment_chunks)
         chunks_stored = len(chunk_rows)
 
     # ── 3. Upsert rubric criteria ─────────────────────────────────────────────
@@ -165,6 +175,22 @@ async def lookup_course_file(course_id: str, canvas_file_id: str) -> dict | None
         return None
 
 
+_SCHEMA_MISSING_MARKERS = (
+    "pgrst205",
+    "pgrst204",
+    "does not exist",
+    "could not find the table",
+    "could not find the",
+    "schema cache",
+)
+
+
+def _is_schema_missing_error(err: Exception) -> bool:
+    """True when Supabase reports the course-cache schema as absent."""
+    msg = str(err).lower()
+    return any(marker in msg for marker in _SCHEMA_MISSING_MARKERS)
+
+
 async def _upsert_registry(row: dict) -> None:
     sb = get_supabase()
     await asyncio.to_thread(
@@ -196,18 +222,38 @@ async def ingest_course_file(
         }
 
     sb = get_supabase()
-    aid = str(assignment_id or f"course:{course_id}")
+    # Course files are shared across assignments, so they are stamped with a
+    # course-scoped id. Using the triggering assignment id would let
+    # delete_assignment_data() wipe chunks other assignments still rely on.
+    aid = f"course:{course_id}"
+
+    async def _legacy_fallback() -> dict:
+        """Ingest assignment-scoped when the course-cache schema is missing."""
+        result = await ingest_course_material(
+            assignment_id=str(assignment_id or aid),
+            course_material_text=course_material_text,
+            rubric_criteria=[],
+            source_name=filename,
+            api_key=api_key,
+        )
+        return {**result, "skipped": False, "cached": False, "course_cache": False}
 
     try:
-        await _upsert_registry({
-            "course_id": str(course_id),
-            "canvas_file_id": str(canvas_file_id),
-            "filename": filename,
-            "updated_at": updated_at,
-            "status": "pending",
-            "chunk_count": 0,
-            "last_error": None,
-        })
+        try:
+            await _upsert_registry({
+                "course_id": str(course_id),
+                "canvas_file_id": str(canvas_file_id),
+                "filename": filename,
+                "updated_at": updated_at,
+                "status": "pending",
+                "chunk_count": 0,
+                "last_error": None,
+            })
+        except Exception as e:
+            if not _is_schema_missing_error(e):
+                raise
+            print(f"[course_cache] registry unavailable, falling back to assignment scope: {e}")
+            return await _legacy_fallback()
 
         chunks = _splitter.split_text(course_material_text) if course_material_text else []
         if not chunks and course_material_text:
@@ -228,25 +274,22 @@ async def ingest_course_file(
                 "embedding": emb,
             })
 
-        # Replace prior chunks for this course file
+        # Replace prior chunks for this course file. The (course_id,
+        # canvas_file_id, chunk_index) unique index is partial, so ON CONFLICT
+        # cannot infer it — delete then insert instead of upserting.
         def _write():
             sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
                 "canvas_file_id", str(canvas_file_id)
             ).execute()
-            sb.table("course_material_chunks").upsert(
-                chunk_rows, on_conflict="course_id,canvas_file_id,chunk_index"
-            ).execute()
+            sb.table("course_material_chunks").insert(chunk_rows).execute()
 
         try:
             await asyncio.to_thread(_write)
-        except Exception:
-            # Fallback if unique index name differs: insert after delete only
-            def _write_fallback():
-                sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
-                    "canvas_file_id", str(canvas_file_id)
-                ).execute()
-                sb.table("course_material_chunks").insert(chunk_rows).execute()
-            await asyncio.to_thread(_write_fallback)
+        except Exception as e:
+            if not _is_schema_missing_error(e):
+                raise
+            print(f"[course_cache] chunk columns unavailable, falling back to assignment scope: {e}")
+            return await _legacy_fallback()
 
         from datetime import datetime, timezone
         await _upsert_registry({

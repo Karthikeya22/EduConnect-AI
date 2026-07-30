@@ -53,7 +53,15 @@ CREATE UNIQUE INDEX uq_cmc_assignment_desc_chunk
     WHERE canvas_file_id IS NULL;
 
 -- 3. RPC: match by course_id and/or assignment_id (union)
-CREATE OR REPLACE FUNCTION match_course_material_chunks(
+-- Postgres treats a different argument list as a new overload, and PostgREST
+-- refuses to resolve a call when several overloads match. Drop every known
+-- signature before creating the 4-argument version.
+DROP FUNCTION IF EXISTS public.match_course_material_chunks(vector(768), int, text);
+DROP FUNCTION IF EXISTS public.match_course_material_chunks(vector(3072), int, text);
+DROP FUNCTION IF EXISTS public.match_course_material_chunks(vector(768), int, text, text);
+DROP FUNCTION IF EXISTS public.match_course_material_chunks(vector(3072), int, text, text);
+
+CREATE OR REPLACE FUNCTION public.match_course_material_chunks(
     query_embedding vector(768),
     match_count int DEFAULT 8,
     filter_assignment_id text DEFAULT NULL,
@@ -88,3 +96,6 @@ BEGIN
     LIMIT match_count;
 END;
 $$;
+
+-- Make PostgREST pick up the new signature immediately.
+NOTIFY pgrst, 'reload schema';
