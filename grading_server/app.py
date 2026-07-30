@@ -33,7 +33,7 @@ from grading_server.utils.supabase_client import get_supabase
 from grading_server.utils.gemini_client import (
     call_gemini, call_gemini_text, embed_texts
 )
-from grading_server.utils.file_parsers import parse_submission
+from grading_server.utils.file_parsers import parse_submission, _parse_pdf, _parse_docx, _parse_pptx
 from grading_server.config import GEMINI_LITE_MODEL, GEMINI_GRADING_MODEL, FLASK_PORT
 from grading_server.models import CriterionVerdict, CritiqueResult, GradingOutput
 
@@ -49,6 +49,7 @@ CORS(app)
 
 class GradingState(TypedDict):
     assignment_id: str
+    course_id: str | None
     student_id: str
     submission_text: str
     chunks: list[str]
@@ -173,7 +174,12 @@ Decompose this into 2-4 sub-queries. Return them as a JSON list of strings.
         print(f"[Decompose Error] {e}")
         return [f"{criterion_title}: {criterion_desc}"]
 
-async def _multihop_retrieve(sub_queries: list[str], assignment_id: str, api_key: str | None = None) -> list[dict]:
+async def _multihop_retrieve(
+    sub_queries: list[str],
+    assignment_id: str,
+    api_key: str | None = None,
+    course_id: str | None = None,
+) -> list[dict]:
     if not sub_queries:
         return []
     from grading_server.utils.gemini_client import embed_texts
@@ -189,11 +195,14 @@ async def _multihop_retrieve(sub_queries: list[str], assignment_id: str, api_key
         for vec in embeddings:
             if not vec: continue
             try:
-                chunks = sb.rpc("match_course_material_chunks", {
+                params = {
                     "query_embedding": vec,
-                    "match_count": 5,
+                    "match_count": 15,
                     "filter_assignment_id": assignment_id,
-                }).execute().data or []
+                }
+                if course_id:
+                    params["filter_course_id"] = course_id
+                chunks = sb.rpc("match_course_material_chunks", params).execute().data or []
                 all_chunks.extend(chunks)
             except Exception as e:
                 print(f"[Vector Search Error] {e}")
@@ -327,7 +336,12 @@ async def run_grade(state: GradingState) -> dict:
         # 1. Decompose
         sub_queries = await _decompose_criterion(criterion_title, criterion_desc, api_key=api_key)
         # 2. Multi-Hop Retrieve
-        retrieved_chunks = await _multihop_retrieve(sub_queries, aid, api_key=api_key)
+        retrieved_chunks = await _multihop_retrieve(
+            sub_queries,
+            aid,
+            api_key=api_key,
+            course_id=state.get("course_id"),
+        )
         
         # Build context from semantically retrieved course material
         ctx = "\n---\n".join([
@@ -643,6 +657,7 @@ async def grade_submission():
 
         final = await get_graph().ainvoke({
             "assignment_id": data.get("assignment_id"), 
+            "course_id": data.get("course_id") or request.form.get("course_id"),
             "student_id": data.get("student_id"), 
             "submission_text": submission_text,
             "custom_gemini_key": custom_gemini_key
@@ -784,6 +799,94 @@ async def ingest_file():
     except Exception:
         traceback.print_exc()
         return jsonify({"error": "File ingestion failed"}), 500
+
+import requests
+
+@app.route("/api/ingest/canvas-url", methods=["POST"])
+async def ingest_canvas_url():
+    """
+    Downloads a file from a given URL and ingests it.
+    """
+    try:
+        data = request.get_json(force=True)
+        assignment_id = data.get("assignment_id")
+        file_url = data.get("url")
+        filename = (data.get("filename") or "").lower()
+        canvas_token = data.get("canvas_token")
+
+        if not assignment_id or not file_url:
+            return jsonify({"error": "assignment_id and url are required"}), 400
+
+        headers = {}
+        if canvas_token:
+            headers["Authorization"] = f"Bearer {canvas_token}"
+
+        r = requests.get(file_url, headers=headers)
+        if r.status_code != 200:
+            return jsonify({"error": f"Failed to download from Canvas: {r.status_code} {r.text}"}), 400
+
+        file_bytes = r.content
+
+        # Determine file type and extract text
+        if filename.endswith(".pdf"):
+            course_material_text = _parse_pdf(file_bytes)
+        elif filename.endswith(".docx"):
+            course_material_text = _parse_docx(file_bytes)
+        elif filename.endswith(".pptx"):
+            course_material_text = _parse_pptx(file_bytes)
+        elif filename.endswith(".txt"):
+            course_material_text = file_bytes.decode("utf-8", errors="ignore")
+        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+            course_material_text = "[Image material submitted, skipping text extraction]"
+        else:
+            return jsonify({"error": f"Unsupported file type: '{filename}'."}), 400
+
+        if not course_material_text.strip():
+            return jsonify({"error": "Could not extract any text from the uploaded file"}), 400
+
+        from grading_server.ingest_service import ingest_course_file, ingest_course_material
+
+        course_id = data.get("course_id")
+        canvas_file_id = data.get("canvas_file_id")
+        updated_at = data.get("updated_at") or ""
+        custom_gemini_key = request.headers.get("X-Gemini-Api-Key")
+
+        if course_id and canvas_file_id:
+            result = await ingest_course_file(
+                course_id=str(course_id),
+                canvas_file_id=str(canvas_file_id),
+                updated_at=str(updated_at),
+                filename=data.get("filename") or filename,
+                course_material_text=course_material_text,
+                assignment_id=assignment_id,
+                api_key=custom_gemini_key,
+            )
+            return jsonify(result), 200
+
+        # Legacy fallback (assignment-scoped)
+        result = await ingest_course_material(
+            assignment_id=assignment_id,
+            course_material_text=course_material_text,
+            rubric_criteria=[],
+            source_name=filename,
+            api_key=custom_gemini_key,
+        )
+        return jsonify(result), 200
+
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Canvas URL ingestion failed"}), 500
+
+
+@app.route("/api/ingest/course-status", methods=["GET"])
+async def course_ingest_status():
+    course_id = request.args.get("course_id")
+    if not course_id:
+        return jsonify({"error": "course_id is required"}), 400
+    from grading_server.ingest_service import list_course_file_status
+    files = await list_course_file_status(course_id)
+    return jsonify({"course_id": course_id, "files": files}), 200
+
 
 
 @app.route("/api/ingest/<assignment_id>", methods=["DELETE"])
