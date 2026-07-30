@@ -142,3 +142,160 @@ async def delete_assignment_data(assignment_id: str) -> dict:
 
     counts = await asyncio.to_thread(_delete)
     return {"status": "success", **counts}
+
+
+async def lookup_course_file(course_id: str, canvas_file_id: str) -> dict | None:
+    sb = get_supabase()
+
+    def _q():
+        resp = (
+            sb.table("course_file_ingest")
+            .select("*")
+            .eq("course_id", str(course_id))
+            .eq("canvas_file_id", str(canvas_file_id))
+            .limit(1)
+            .execute()
+        )
+        return (resp.data or [None])[0]
+
+    try:
+        return await asyncio.to_thread(_q)
+    except Exception as e:
+        print(f"[course_cache] lookup failed (schema missing?): {e}")
+        return None
+
+
+async def _upsert_registry(row: dict) -> None:
+    sb = get_supabase()
+    await asyncio.to_thread(
+        lambda: sb.table("course_file_ingest")
+        .upsert(row, on_conflict="course_id,canvas_file_id")
+        .execute()
+    )
+
+
+async def ingest_course_file(
+    *,
+    course_id: str,
+    canvas_file_id: str,
+    updated_at: str,
+    filename: str,
+    course_material_text: str,
+    assignment_id: str | None = None,
+    api_key: str | None = None,
+) -> dict:
+    """Ingest one Canvas file into course-scoped chunk cache, or skip if fresh."""
+    updated_at = updated_at or ""
+    existing = await lookup_course_file(course_id, canvas_file_id)
+    if existing and existing.get("status") == "ready" and (existing.get("updated_at") or "") == updated_at:
+        return {
+            "status": "success",
+            "skipped": True,
+            "cached": True,
+            "chunks_stored": int(existing.get("chunk_count") or 0),
+        }
+
+    sb = get_supabase()
+    aid = str(assignment_id or f"course:{course_id}")
+
+    try:
+        await _upsert_registry({
+            "course_id": str(course_id),
+            "canvas_file_id": str(canvas_file_id),
+            "filename": filename,
+            "updated_at": updated_at,
+            "status": "pending",
+            "chunk_count": 0,
+            "last_error": None,
+        })
+
+        chunks = _splitter.split_text(course_material_text) if course_material_text else []
+        if not chunks and course_material_text:
+            chunks = [course_material_text[:1000]]
+        if not chunks:
+            raise ValueError("No text extracted from file")
+
+        embeddings = await asyncio.to_thread(embed_texts, chunks, api_key)
+        chunk_rows = []
+        for i, (text, emb) in enumerate(zip(chunks, embeddings)):
+            chunk_rows.append({
+                "assignment_id": aid,
+                "course_id": str(course_id),
+                "canvas_file_id": str(canvas_file_id),
+                "chunk_text": text,
+                "chunk_index": i,
+                "source_title": f"{filename} (chunk {i + 1}/{len(chunks)})",
+                "embedding": emb,
+            })
+
+        # Replace prior chunks for this course file
+        def _write():
+            sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
+                "canvas_file_id", str(canvas_file_id)
+            ).execute()
+            sb.table("course_material_chunks").upsert(
+                chunk_rows, on_conflict="course_id,canvas_file_id,chunk_index"
+            ).execute()
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception:
+            # Fallback if unique index name differs: insert after delete only
+            def _write_fallback():
+                sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
+                    "canvas_file_id", str(canvas_file_id)
+                ).execute()
+                sb.table("course_material_chunks").insert(chunk_rows).execute()
+            await asyncio.to_thread(_write_fallback)
+
+        from datetime import datetime, timezone
+        await _upsert_registry({
+            "course_id": str(course_id),
+            "canvas_file_id": str(canvas_file_id),
+            "filename": filename,
+            "updated_at": updated_at,
+            "status": "ready",
+            "chunk_count": len(chunk_rows),
+            "last_error": None,
+            "ingested_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return {
+            "status": "success",
+            "skipped": False,
+            "cached": False,
+            "chunks_stored": len(chunk_rows),
+        }
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            await _upsert_registry({
+                "course_id": str(course_id),
+                "canvas_file_id": str(canvas_file_id),
+                "filename": filename,
+                "updated_at": updated_at,
+                "status": "failed",
+                "chunk_count": 0,
+                "last_error": str(e)[:500],
+            })
+        except Exception:
+            pass
+        raise
+
+
+async def list_course_file_status(course_id: str) -> list[dict]:
+    sb = get_supabase()
+
+    def _q():
+        resp = (
+            sb.table("course_file_ingest")
+            .select("course_id,canvas_file_id,filename,updated_at,status,chunk_count,last_error,ingested_at")
+            .eq("course_id", str(course_id))
+            .execute()
+        )
+        return resp.data or []
+
+    try:
+        return await asyncio.to_thread(_q)
+    except Exception as e:
+        print(f"[course_cache] status failed: {e}")
+        return []
