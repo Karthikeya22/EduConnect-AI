@@ -821,7 +821,7 @@ async def ingest_canvas_url():
         if canvas_token:
             headers["Authorization"] = f"Bearer {canvas_token}"
 
-        r = requests.get(file_url, headers=headers)
+        r = requests.get(file_url, headers=headers, timeout=30)
         if r.status_code != 200:
             return jsonify({"error": f"Failed to download from Canvas: {r.status_code} {r.text}"}), 400
 
