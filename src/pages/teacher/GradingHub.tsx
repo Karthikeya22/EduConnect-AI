@@ -116,11 +116,10 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   const [aiGradingData, setAiGradingData] = useState<Record<string, GradingOutput>>({});
   const [loadingStudents, setLoadingStudents] = useState<Set<string>>(new Set());
   const [ingestingStudents, setIngestingStudents] = useState<Set<string>>(new Set());
-  const [ingestStatus, setIngestStatus] = useState<{ type: 'success' | 'error' | 'loading', msg: string } | null>(null);
+  const [ingestStatus, setIngestStatus] = useState<{ type: 'success' | 'error' | 'warning' | 'loading', msg: string } | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [ingestedAssignments, setIngestedAssignments] = useState<Set<string>>(new Set());
   const ingestionPromisesRef = useRef<Record<string, Promise<void>>>({});
-  const [backgroundIndexing, setBackgroundIndexing] = useState(false);
   const [highlightText, setHighlightText] = useState<string | null>(null);
 
   // References for animations
@@ -390,6 +389,40 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   // Phase 3: RAG Handlers
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
 
+  // Pushes the assignment description + rubric criteria to the grading server.
+  const postAssignmentIngest = async (assignmentId: string) => {
+    const currentItem = assignments.find(a => String(a.id) === assignmentId) || discussions.find(d => String(d.id) === assignmentId);
+    const rubric = currentItem?.rubric || [];
+    const materialText = currentItem?.description || currentItem?.message || '';
+
+    const headers: any = { 'Content-Type': 'application/json' };
+    const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
+    if (customGeminiKey) {
+      headers['X-Gemini-Api-Key'] = customGeminiKey;
+    }
+
+    const res = await fetch(`${API_BASE_URL}/api/ingest`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        assignment_id: assignmentId,
+        course_material_text: materialText,
+        rubric_criteria: rubric.map((r: any) => ({
+          criterion_id: r.id || r.description,
+          title: r.description,
+          description: r.long_description || r.description,
+          max_score: r.points,
+          dimension: 'content' // default
+        })),
+        exemplars: []
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(errText || 'Assignment ingest failed');
+    }
+  };
+
   // Auto-ingest when assignment is selected
   useEffect(() => {
     if (!selectedCourse || !selectedAssignment) return;
@@ -402,35 +435,9 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       setIngestStatus({ type: 'loading', msg: 'Reading class materials, please wait...' });
       try {
         const currentItem = assignments.find(a => String(a.id) === selectedAssignment) || discussions.find(d => String(d.id) === selectedAssignment);
-        const rubric = currentItem?.rubric || [];
-        const materialText = currentItem?.description || currentItem?.message || '';
-
-        const headers: any = { 'Content-Type': 'application/json' };
         const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
-        if (customGeminiKey) {
-          headers['X-Gemini-Api-Key'] = customGeminiKey;
-        }
 
-        const ingestRes = await fetch(`${API_BASE_URL}/api/ingest`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            assignment_id: selectedAssignment,
-            course_material_text: materialText,
-            rubric_criteria: rubric.map((r: any) => ({
-              criterion_id: r.id || r.description,
-              title: r.description,
-              description: r.long_description || r.description,
-              max_score: r.points,
-              dimension: 'content' // default
-            })),
-            exemplars: []
-          })
-        });
-        if (!ingestRes.ok) {
-          const errText = await ingestRes.text();
-          throw new Error(errText || 'Assignment ingest failed');
-        }
+        await postAssignmentIngest(selectedAssignment);
 
         const files = await canvasAPI.getCourseFiles(selectedCourse);
         const { phaseA, phaseB } = selectPhaseFiles(
@@ -463,34 +470,48 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (!res.ok) {
             throw new Error(await res.text());
           }
+          return await res.json().catch(() => ({} as any));
         };
 
+        let succeeded = 0;
+        let failed = 0;
         for (const file of phaseA) {
           try {
-            await ingestFile(file);
-            await new Promise(r => setTimeout(r, 800));
+            const result = await ingestFile(file);
+            succeeded += 1;
+            // A cache hit does no embedding work, so there is no quota to pace.
+            if (!result?.cached && !result?.skipped) {
+              await new Promise(r => setTimeout(r, 800));
+            }
           } catch (e) {
+            failed += 1;
             console.error(`Failed to ingest course file: ${file.display_name}`, e);
           }
         }
 
         setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
-        setIngestStatus({ type: 'success', msg: 'Materials auto-ingested' });
+        const phaseAStatus: { type: 'success' | 'warning', msg: string } = failed > 0
+          ? {
+              type: 'warning',
+              msg: `Materials partially indexed — ${failed} of ${failed + succeeded} file${failed + succeeded === 1 ? '' : 's'} failed. Grading may miss some context.`
+            }
+          : { type: 'success', msg: 'Materials auto-ingested' };
+        setIngestStatus(phaseAStatus);
 
         if (phaseB.length > 0) {
           void (async () => {
-            setBackgroundIndexing(true);
             setIngestStatus({ type: 'loading', msg: 'Indexing more materials in background...' });
             for (const file of phaseB) {
               try {
-                await ingestFile(file);
-                await new Promise(r => setTimeout(r, 400));
+                const result = await ingestFile(file);
+                if (!result?.cached && !result?.skipped) {
+                  await new Promise(r => setTimeout(r, 400));
+                }
               } catch (e) {
                 console.error(`Background ingest failed: ${file.display_name}`, e);
               }
             }
-            setBackgroundIndexing(false);
-            setIngestStatus({ type: 'success', msg: 'Materials auto-ingested' });
+            setIngestStatus(phaseAStatus);
             setTimeout(() => setIngestStatus(null), 5000);
           })();
         } else {
@@ -575,7 +596,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
            if (isRetry) {
               throw new Error("No rubric exists for this assignment.");
            }
-           setIngestStatus({ type: 'loading', msg: 'AI rubric unavailable. Retrying grade once...' });
+           setIngestStatus({ type: 'loading', msg: 'AI rubric unavailable. Re-sending the rubric and retrying once...' });
            throw new Error("RUBRIC_MISSING_RETRY");
         }
         return data;
@@ -645,7 +666,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       setSelectedStudent(studentId);
     } catch (err: any) {
       if (err.message === "RUBRIC_MISSING_RETRY") {
-          return handleFetchAiGrade(studentId, true); 
+          // Re-upsert the rubric once before retrying, otherwise the retry hits
+          // the same empty rubric and fails for the same reason.
+          try {
+            await postAssignmentIngest(selectedAssignment!);
+          } catch (ingestErr: any) {
+            setIngestStatus({ type: 'error', msg: 'Could not send the rubric to the AI.' });
+            setRowErrors(prev => ({ ...prev, [studentId]: `No rubric exists for this assignment (rubric upload failed: ${ingestErr.message})` }));
+            return;
+          }
+          return await handleFetchAiGrade(studentId, true);
       }
       setRowErrors(prev => ({ ...prev, [studentId]: err.message }));
     } finally {
@@ -874,12 +904,14 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 <div className={`mt-4 p-3 rounded-lg text-sm font-bold flex items-center shadow-sm
                   ${ingestStatus.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20' :
                     ingestStatus.type === 'loading' ? 'bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:border-blue-500/20 animate-pulse' :
+                    ingestStatus.type === 'warning' ? 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20' :
                     'bg-red-50 text-red-700 border border-red-200 dark:bg-red-500/10 dark:text-red-400 dark:border-red-500/20'}`}
                 >
                   {ingestStatus.type === 'loading' && (
                     <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin mr-3"></div>
                   )}
                   {ingestStatus.type === 'success' && <Icons.IconCheck className="w-5 h-5 mr-2" />}
+                  {ingestStatus.type === 'warning' && <Icons.IconAlertCircle className="w-5 h-5 mr-2" />}
                   {ingestStatus.type === 'error' && <Icons.IconX className="w-5 h-5 mr-2" />}
                   {ingestStatus.msg}
                 </div>
@@ -972,8 +1004,6 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                             {loadingStudents.has(student.id) ? (
                               ingestingStudents.has(student.id) ? (
                                 <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Reading class materials, please wait...</span>
-                              ) : backgroundIndexing ? (
-                                <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Indexing more materials in background...</span>
                               ) : (
                                 <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Grading...</span>
                               )
@@ -1444,9 +1474,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                               <div className="text-[10px] font-black text-indigo-500 uppercase tracking-widest text-center animate-pulse">
                                 {ingestingStudents.has(selectedStudent)
                                   ? "Reading class materials, please wait..."
-                                  : backgroundIndexing
-                                    ? "Indexing more materials in background..."
-                                    : "CONSULTING CONTEXT & RUBRICS..."}
+                                  : "CONSULTING CONTEXT & RUBRICS..."}
                               </div>
                             </div>
                           )}
