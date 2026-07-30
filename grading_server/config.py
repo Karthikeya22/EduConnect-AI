@@ -36,6 +36,11 @@ GEMINI_API_KEY: str = _require("GEMINI_API_KEY", "VITE_GEMINI_API_KEY")
 SUPABASE_URL: str = _require("SUPABASE_URL", "VITE_SUPABASE_URL")
 SUPABASE_KEY: str = _require("SUPABASE_KEY", "VITE_SUPABASE_ANON_KEY")
 
+# ── Canvas ────────────────────────────────────────────────────────────────────
+CANVAS_BASE_URL: str = os.getenv(
+    "CANVAS_BASE_URL", os.getenv("VITE_CANVAS_BASE_URL", "https://usflearn.instructure.com")
+)
+
 # ── Server ────────────────────────────────────────────────────────────────────
 FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5557"))
 FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "true").lower() == "true"

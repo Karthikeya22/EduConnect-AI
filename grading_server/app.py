@@ -34,7 +34,7 @@ from grading_server.utils.gemini_client import (
     call_gemini, call_gemini_text, embed_texts
 )
 from grading_server.utils.file_parsers import parse_submission, _parse_pdf, _parse_docx, _parse_pptx
-from grading_server.config import GEMINI_LITE_MODEL, GEMINI_GRADING_MODEL, FLASK_PORT
+from grading_server.config import GEMINI_LITE_MODEL, GEMINI_GRADING_MODEL, FLASK_PORT, CANVAS_BASE_URL
 from grading_server.models import CriterionVerdict, CritiqueResult, GradingOutput
 
 # Windows event loop policy fix
@@ -197,7 +197,7 @@ async def _multihop_retrieve(
             try:
                 params = {
                     "query_embedding": vec,
-                    "match_count": 15,
+                    "match_count": 5,
                     "filter_assignment_id": assignment_id,
                 }
                 if course_id:
@@ -800,7 +800,50 @@ async def ingest_file():
         traceback.print_exc()
         return jsonify({"error": "File ingestion failed"}), 500
 
+import ipaddress
 import requests
+from urllib.parse import urlparse
+
+# Only Canvas-hosted files may be fetched server-side; the download is
+# authenticated with the caller's Canvas token, so an arbitrary URL would let a
+# client turn this route into an SSRF proxy.
+MAX_CANVAS_DOWNLOAD_BYTES = 25 * 1024 * 1024
+
+
+def _canvas_url_rejection(file_url: str) -> str | None:
+    """Return a rejection reason for non-Canvas URLs, or None when allowed."""
+    parsed = urlparse(file_url)
+    if parsed.scheme not in ("http", "https"):
+        return "Only http(s) URLs can be ingested"
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return "URL has no host"
+
+    if host in ("localhost", "localhost.localdomain", "metadata.google.internal"):
+        return "Refusing to fetch a local address"
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast
+    ):
+        return "Refusing to fetch a private or link-local address"
+
+    allowed_hosts = {"instructure.com", "inscloudgate.net", "instructuremedia.com"}
+    configured = urlparse(CANVAS_BASE_URL).hostname
+    if configured:
+        allowed_hosts.add(configured.lower())
+
+    if host.startswith("canvas."):
+        return None
+    for allowed in allowed_hosts:
+        if host == allowed or host.endswith(f".{allowed}"):
+            return None
+    return f"Host '{host}' is not a recognized Canvas host"
+
 
 @app.route("/api/ingest/canvas-url", methods=["POST"])
 async def ingest_canvas_url():
@@ -817,15 +860,30 @@ async def ingest_canvas_url():
         if not assignment_id or not file_url:
             return jsonify({"error": "assignment_id and url are required"}), 400
 
+        rejection = _canvas_url_rejection(str(file_url))
+        if rejection:
+            return jsonify({"error": rejection}), 400
+
         headers = {}
         if canvas_token:
             headers["Authorization"] = f"Bearer {canvas_token}"
 
-        r = requests.get(file_url, headers=headers, timeout=30)
-        if r.status_code != 200:
-            return jsonify({"error": f"Failed to download from Canvas: {r.status_code} {r.text}"}), 400
+        with requests.get(file_url, headers=headers, timeout=30, stream=True) as r:
+            if r.status_code != 200:
+                return jsonify({"error": f"Failed to download from Canvas: {r.status_code} {r.text[:500]}"}), 400
 
-        file_bytes = r.content
+            declared_length = r.headers.get("Content-Length")
+            if declared_length and declared_length.isdigit() and int(declared_length) > MAX_CANVAS_DOWNLOAD_BYTES:
+                return jsonify({"error": "File is too large to ingest (limit 25MB)"}), 400
+
+            parts: list[bytes] = []
+            total = 0
+            for part in r.iter_content(chunk_size=65536):
+                total += len(part)
+                if total > MAX_CANVAS_DOWNLOAD_BYTES:
+                    return jsonify({"error": "File is too large to ingest (limit 25MB)"}), 400
+                parts.append(part)
+            file_bytes = b"".join(parts)
 
         # Determine file type and extract text
         if filename.endswith(".pdf"):
