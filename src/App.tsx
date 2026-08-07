@@ -92,6 +92,11 @@ const App: React.FC = () => {
   const [user, setUser] = useState<any>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [isRecoveringPassword, setIsRecoveringPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [resetError, setResetError] = useState('');
+  const [isResetting, setIsResetting] = useState(false);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -152,6 +157,10 @@ const App: React.FC = () => {
     initSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsRecoveringPassword(true);
+      }
+      
       if (session?.user) {
         setUser(session.user);
       } else {
@@ -164,6 +173,34 @@ const App: React.FC = () => {
 
     return () => subscription.unsubscribe();
   }, [navigate]);
+
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetError('');
+    if (newPassword.length < 8) {
+      setResetError("Password must be at least 8 characters");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setResetError("Passwords do not match");
+      return;
+    }
+    
+    setIsResetting(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setIsRecoveringPassword(false);
+      setNewPassword('');
+      setConfirmNewPassword('');
+      // User is already signed in by the recovery link
+      navigate('/teacher/dashboard');
+    } catch (err: any) {
+      setResetError(err.message || "Failed to update password");
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   const commonProps = {
     onBack: goBack,
@@ -221,6 +258,35 @@ const App: React.FC = () => {
 
         <GlobalNotifications isOpen={isNotifOpen} onClose={() => setIsNotifOpen(false)} user={user} />
       </Suspense>
+
+      {isRecoveringPassword && (
+        <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
+          <div className="bg-[var(--bg-card)] max-w-md w-full rounded-[2rem] shadow-[var(--shadow-2xl)] border-2 border-[var(--border-primary)] overflow-hidden p-8 animate-fade-in">
+            <h2 className="text-2xl font-black text-[var(--text-primary)] mb-2 font-['Space_Grotesk']">Reset Password</h2>
+            <p className="text-[var(--text-muted)] font-bold text-xs mb-6">Enter your new secure faculty key below.</p>
+            
+            {resetError && (
+              <div className="bg-[var(--color-danger)]/10 text-[var(--color-danger)] px-4 py-3 rounded-xl text-xs font-bold mb-4">
+                {resetError}
+              </div>
+            )}
+            
+            <form onSubmit={handlePasswordReset} className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">New Password</label>
+                <input required type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="••••••••" className="w-full h-12 px-5 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] focus:border-[var(--brand-primary)] focus:outline-none font-bold text-sm" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Confirm Password</label>
+                <input required type="password" value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} placeholder="••••••••" className="w-full h-12 px-5 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] focus:border-[var(--brand-primary)] focus:outline-none font-bold text-sm" />
+              </div>
+              <button disabled={isResetting} type="submit" className="w-full h-12 bg-[var(--brand-primary)] text-white rounded-[1rem] font-black text-[11px] uppercase tracking-widest shadow-lg hover:brightness-110 disabled:opacity-50 mt-2">
+                {isResetting ? "Updating..." : "Update Password"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

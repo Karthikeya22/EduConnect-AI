@@ -97,5 +97,5 @@ class GradingOutput(BaseModel):
     referenced_materials: list[str] = []
     
     # RAG Coverage
-    rag_coverage_level: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    rag_coverage_level: Literal["HIGH", "MEDIUM", "LOW", "NONE"] = "NONE"
     strong_match_count: int = 0

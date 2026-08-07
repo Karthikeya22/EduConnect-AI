@@ -24,6 +24,8 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
   const [agreeTerms, setAgreeTerms] = useState(false);
 
   const [showTermsModal, setShowTermsModal] = useState(false);
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
+  const [isSendingReset, setIsSendingReset] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const leftSideRef = useRef<HTMLDivElement>(null);
@@ -136,6 +138,28 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
     }
   };
 
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email) {
+      setToast({ message: "Please enter your email address first.", type: 'error' });
+      return;
+    }
+    
+    setIsSendingReset(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      });
+      if (error) throw error;
+      setToast({ message: "Password reset link sent to your email.", type: 'success' });
+      setIsForgotPassword(false);
+    } catch (error: any) {
+      setToast({ message: error.message || "Failed to send reset link", type: 'error' });
+    } finally {
+      setIsSendingReset(false);
+    }
+  };
+
   return (
     <div ref={containerRef} className="fixed inset-0 z-[1000] flex flex-col md:flex-row bg-[var(--bg-main)] overflow-hidden font-['Plus_Jakarta_Sans']">
       {toast && (
@@ -177,9 +201,29 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
             <button onClick={() => setIsLogin(false)} className={`relative z-10 w-1/2 py-3 text-[10px] font-black uppercase tracking-widest ${!isLogin ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]'}`}>New Instructor</button>
           </div>
 
-          <h2 className="text-4xl font-black text-[var(--text-primary)] mb-2 tracking-tighter font-['Space_Grotesk'] leading-none">{isLogin ? 'Synchronize' : 'Register'}</h2>
-          <p className="text-[var(--text-muted)] font-bold text-sm mb-6">{isLogin ? 'Establish a secure session for course management.' : 'Initialize your official faculty credentials.'}</p>
+          <h2 className="text-4xl font-black text-[var(--text-primary)] mb-2 tracking-tighter font-['Space_Grotesk'] leading-none">
+            {isForgotPassword ? 'Recover Access' : isLogin ? 'Synchronize' : 'Register'}
+          </h2>
+          <p className="text-[var(--text-muted)] font-bold text-sm mb-6">
+            {isForgotPassword ? 'Enter your email to receive a secure reset link.' : isLogin ? 'Establish a secure session for course management.' : 'Initialize your official faculty credentials.'}
+          </p>
 
+          {isForgotPassword ? (
+            <form onSubmit={handleForgotPassword} className="space-y-4">
+              <div className="space-y-2">
+                <label htmlFor="auth-email-reset" className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Email Address</label>
+                <input id="auth-email-reset" required type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="instructor@usf.edu" className="w-full h-14 px-6 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1.25rem] focus:border-[var(--brand-primary)] focus:outline-none transition-all font-bold text-sm shadow-[var(--shadow-sm)]" />
+              </div>
+              <div className="flex flex-col gap-3 mt-4">
+                <button disabled={isSendingReset} type="submit" className="w-full h-14 bg-[var(--brand-primary)] text-white rounded-[1.25rem] font-black text-[11px] uppercase tracking-[0.25em] shadow-[var(--shadow-xl)] hover:translate-y-[-2px] active:scale-[0.98] transition-all flex items-center justify-center disabled:opacity-50">
+                  {isSendingReset ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> : <span>Send Reset Link</span>}
+                </button>
+                <button type="button" onClick={() => setIsForgotPassword(false)} className="w-full h-14 bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-[1.25rem] font-black text-[11px] uppercase tracking-widest transition-colors">
+                  Back to Login
+                </button>
+              </div>
+            </form>
+          ) : (
           <form onSubmit={handleAuth} className="space-y-4" ref={formElementsRef}>
             {!isLogin && (
               <div className="space-y-2">
@@ -192,7 +236,14 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
               <input id="auth-email" required type="email" autoComplete="username email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="instructor@usf.edu" className="w-full h-14 px-6 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1.25rem] focus:border-[var(--brand-primary)] focus:outline-none transition-all font-bold text-sm shadow-[var(--shadow-sm)]" />
             </div>
             <div className="space-y-2">
-              <label htmlFor="auth-password" className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Secure Faculty Key</label>
+              <div className="flex items-center justify-between ml-1">
+                <label htmlFor="auth-password" className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Secure Faculty Key</label>
+                {isLogin && (
+                  <button type="button" onClick={() => setIsForgotPassword(true)} className="text-[10px] font-black text-[var(--brand-primary)] hover:underline uppercase tracking-widest focus:outline-none">
+                    Forgot Key?
+                  </button>
+                )}
+              </div>
               <div className="relative">
                 <input id="auth-password" required type={showPassword ? "text" : "password"} autoComplete={isLogin ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="w-full h-14 px-6 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1.25rem] focus:border-[var(--brand-primary)] focus:outline-none transition-all font-bold text-sm shadow-[var(--shadow-sm)] pr-12" />
                 <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} onClick={() => setShowPassword(!showPassword)} className="absolute right-5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] rounded">
@@ -232,6 +283,7 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
               {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div> : <span>{isLogin ? 'Access Course Hub' : 'Register Profile'}</span>}
             </button>
           </form>
+          )}
         </div>
       </div>
 

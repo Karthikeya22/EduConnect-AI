@@ -8,9 +8,20 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { GradingResult } from '../../components/grading/GradingResult';
 import { GradingOutput } from '../../types/grading';
-import { UniversalPreviewer } from '../../components/ui/UniversalPreviewer';
+import { UniversalPreviewer, prefetchPreviewFile } from '../../components/ui/UniversalPreviewer';
 import { selectPhaseFiles, CanvasCourseFile } from '../../lib/courseFileRanker';
 import { CourseMaterialsModal } from '../../components/modals/CourseMaterialsModal';
+import { loadAiGrades, saveAiGrade, formatAiGradeLabel } from '../../lib/aiGradeCache';
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
+
+async function fetchViaCanvasProxy(url: string): Promise<Response> {
+  const token = localStorage.getItem('custom_canvas_token') || '';
+  const proxyUrl = `${API_BASE_URL}/api/proxy-file?url=${encodeURIComponent(url)}`;
+  return fetch(proxyUrl, {
+    headers: token ? { 'X-Canvas-Token': token } : {}
+  });
+}
 
 const MOCK_LEARNING_PROFILE = {
   materialsViewed: '18/24',
@@ -210,21 +221,38 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
   // Fetch Submissions when assignment changes
   useEffect(() => {
-    // Clear old grading data so we don't bleed previous assignment's scores
+    // Clear in-memory grading so we don't bleed previous assignment's scores
     setAiGradingData({});
     setSelectedStudent(null);
     setRowErrors({});
     
     if (!selectedCourse || !selectedAssignment) return;
     const isDiscussion = discussions.some(d => String(d.id) === selectedAssignment);
+    const cachedGrades = loadAiGrades(selectedCourse, selectedAssignment);
+
+    const mergeCachedGrade = (student: any) => {
+      const cached = cachedGrades[student.id];
+      if (!cached || student.status === 'Missing') return student;
+      // Canvas official score wins for the badge when present
+      if (student.rawScore !== null && student.rawScore !== undefined) return student;
+      return {
+        ...student,
+        status: 'Graded',
+        gradeText: `${formatAiGradeLabel(cached)} AI`,
+        rawScore: cached.total ?? null,
+      };
+    };
 
     const fetchSubmissions = async () => {
       setLoading(l => ({ ...l, submissions: true }));
       try {
+        // Restore persisted AI grades (survive leaving the page / refresh)
+        setAiGradingData(cachedGrades);
+
         if (isDiscussion) {
           const entries = await canvasAPI.getDiscussionEntries(selectedCourse, selectedAssignment);
           // format entries to match student view
-          const mapped = (Array.isArray(entries) ? entries : []).map((e: any) => ({
+          const mapped = (Array.isArray(entries) ? entries : []).map((e: any) => mergeCachedGrade({
             id: String(e.user_id),
             name: e.user_name || 'Unknown Student',
             initials: (e.user_name || 'U S').substring(0, 2).toUpperCase(),
@@ -238,7 +266,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           setStudentsData(mapped);
         } else {
           const subs = await canvasAPI.getSubmissions(selectedCourse, selectedAssignment);
-          const mapped = (Array.isArray(subs) ? subs : []).filter((s: any) => s.user).map((s: any) => ({
+          const mapped = (Array.isArray(subs) ? subs : []).filter((s: any) => s.user).map((s: any) => mergeCachedGrade({
             id: String(s.user_id),
             name: s.user?.name || s.user?.short_name || 'Unknown Student',
             initials: (s.user?.name || s.user?.short_name || 'U S').substring(0, 2).toUpperCase(),
@@ -297,6 +325,24 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     fetchSubmissions();
   }, [selectedCourse, selectedAssignment, discussions]);
 
+  // Prefetch attachment bytes so Local Reader opens quickly
+  useEffect(() => {
+    if (!studentsData.length) return;
+    const selected = selectedStudent
+      ? studentsData.find(s => s.id === selectedStudent)
+      : null;
+    const queue: string[] = [];
+    if (selected?.attachments?.length) {
+      selected.attachments.forEach((a: any) => { if (a?.url) queue.push(a.url); });
+    }
+    // Warm cache for nearby students' first attachment
+    for (const s of studentsData.slice(0, 8)) {
+      const url = s.attachments?.[0]?.url;
+      if (url && !queue.includes(url)) queue.push(url);
+    }
+    queue.forEach(prefetchPreviewFile);
+  }, [studentsData, selectedStudent]);
+
   // Stagger center panel rows when assignment changes
   useEffect(() => {
     if (selectedAssignment && centerRowsRef.current && !loading.submissions) {
@@ -344,17 +390,19 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         const rawBodyText = student.body ? student.body.replace(/(<([^>]+)>)/gi, "\n") : "No submission text.";
         studentFolder.file(`${student.name}_submission.txt`, rawBodyText);
 
-        // Fetch attachments
+        // Fetch attachments via API proxy (Canvas CDN blocks browser CORS)
         if (student.attachments && student.attachments.length > 0) {
           for (const att of student.attachments) {
-            if (att.url && att.filename) {
+            const name = att.filename || att.display_name;
+            if (att.url && name) {
               try {
-                const res = await fetch(att.url);
+                const res = await fetchViaCanvasProxy(att.url);
+                if (!res.ok) throw new Error(`Proxy ${res.status}`);
                 const blob = await res.blob();
-                studentFolder.file(att.filename, blob);
+                studentFolder.file(name, blob);
               } catch (err) {
-                console.error(`Failed to download attachment for ${student.name}: ${att.filename}`, err);
-                studentFolder.file(`${att.filename}_download_error.txt`, `Failed to download file from canvas.`);
+                console.error(`Failed to download attachment for ${student.name}: ${name}`, err);
+                studentFolder.file(`${name}_download_error.txt`, `Failed to download file from canvas.`);
               }
             }
           }
@@ -375,7 +423,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
   const handleDownloadSingleAttachment = async (url: string, filename: string) => {
     try {
-      const res = await fetch(url);
+      const res = await fetchViaCanvasProxy(url);
+      if (!res.ok) throw new Error(`Proxy download failed (${res.status})`);
       const blob = await res.blob();
       saveAs(blob, filename);
     } catch (err) {
@@ -383,11 +432,6 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       alert(`Failed to download file from canvas.`);
     }
   };
-
-
-
-  // Phase 3: RAG Handlers
-  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
 
   // Pushes the assignment description + rubric criteria to the grading server.
   const postAssignmentIngest = async (assignmentId: string) => {
@@ -556,14 +600,30 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           headers['X-Gemini-Api-Key'] = customGeminiKey;
         }
 
+        const canvasToken = localStorage.getItem('custom_canvas_token') || '';
+        if (canvasToken) {
+          headers['X-Canvas-Token'] = canvasToken;
+        }
+
+        const rawBody = student.body || '';
+        const placeholderBody =
+          !rawBody ||
+          /^submission type:/i.test(rawBody.trim()) ||
+          /^no submission content/i.test(rawBody.trim());
+
         if (student.attachments && student.attachments.length > 0) {
           headers['Content-Type'] = 'application/json';
           body = JSON.stringify({
             assignment_id: selectedAssignment,
             course_id: selectedCourse,
             student_id: studentId,
-            submission_text: student.body || '',
-            file_urls: student.attachments.map((a: any) => ({ url: a.url, filename: a.filename }))
+            // Don't send Canvas placeholders — grader reads the attached file(s)
+            submission_text: placeholderBody ? '' : rawBody,
+            canvas_token: canvasToken,
+            file_urls: student.attachments.map((a: any) => ({
+              url: a.url,
+              filename: a.filename || a.display_name || 'submission.bin'
+            }))
           });
         } else {
           headers['Content-Type'] = 'application/json';
@@ -571,7 +631,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             assignment_id: selectedAssignment,
             course_id: selectedCourse,
             student_id: studentId,
-            submission_text: student.body || ''
+            submission_text: student.body || '',
+            canvas_token: canvasToken
           });
         }
 
@@ -589,7 +650,9 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
              throw new Error(data.error || "Gemini API quota exceeded. Wait a moment and retry.");
           }
-          throw new Error(data.error || data.details || "Grading failed");
+          // Prefer actionable error; fall back to details so "Internal computation error" isn't opaque
+          const msg = data.error || data.details || "Grading failed";
+          throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
         }
         
         if (data.rubric_missing) {
@@ -600,18 +663,6 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
            throw new Error("RUBRIC_MISSING_RETRY");
         }
         return data;
-      };
-
-      const linguisticReq = async () => {
-          try {
-             const { analyzeSubmission } = await import('../../grader/linguistic_analyzer');
-             const apiKey = localStorage.getItem('custom_gemini_api_key') || import.meta.env.VITE_GEMINI_API_KEY || '';
-             const profile = await analyzeSubmission(submissionTextForAnalysis, "", "", apiKey);
-             return profile;
-         } catch(e) {
-            console.error("Linguistic profile failed", e);
-            return undefined;
-         }
       };
 
       const integrityReq = async () => {
@@ -651,18 +702,33 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
          }
       };
 
-      const [backendData, linguisticProfile, integrityEvaluation] = await Promise.all([
+      const [backendData, integrityEvaluation] = await Promise.all([
           backendReq(),
-          linguisticReq(),
           integrityReq()
       ]);
 
-      const finalData = { ...backendData, linguisticProfile };
+      const finalData = { ...backendData };
       if (integrityEvaluation) {
          finalData.integrityEvaluation = integrityEvaluation;
       }
 
       setAiGradingData(prev => ({ ...prev, [studentId]: finalData }));
+
+      // Persist so grades survive navigation / refresh
+      if (selectedCourse && selectedAssignment) {
+        saveAiGrade(selectedCourse, selectedAssignment, studentId, finalData);
+      }
+      setStudentsData(prev => prev.map(s => {
+        if (s.id !== studentId) return s;
+        if (s.status === 'Missing') return s;
+        return {
+          ...s,
+          status: 'Graded',
+          gradeText: `${formatAiGradeLabel(finalData)} AI`,
+          rawScore: finalData.total ?? s.rawScore,
+        };
+      }));
+
       setSelectedStudent(studentId);
     } catch (err: any) {
       if (err.message === "RUBRIC_MISSING_RETRY") {
@@ -994,25 +1060,31 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         </div>
                       </div>
                       <div className="shrink-0 flex items-center space-x-4">
-                        {/* Per-Submission Grade Trigger */}
+                        {/* Per-Submission Grade / Regrade Trigger */}
                         <div className="flex flex-col items-end">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleFetchAiGrade(student.id); }}
-                            disabled={loadingStudents.has(student.id)}
-                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50"
-                          >
-                            {loadingStudents.has(student.id) ? (
-                              ingestingStudents.has(student.id) ? (
-                                <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Reading class materials, please wait...</span>
+                          {student.status !== 'Missing' && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleFetchAiGrade(student.id); }}
+                              disabled={loadingStudents.has(student.id)}
+                              className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 ${
+                                aiGradingData[student.id]
+                                  ? 'bg-zinc-800 hover:bg-zinc-900 text-white border border-zinc-600'
+                                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                              }`}
+                            >
+                              {loadingStudents.has(student.id) ? (
+                                ingestingStudents.has(student.id) ? (
+                                  <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Reading materials...</span>
+                                ) : (
+                                  <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> {aiGradingData[student.id] ? 'Regrading...' : 'Grading...'}</span>
+                                )
                               ) : (
-                                <span className="flex items-center"><div className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin mr-1.5"></div> Grading...</span>
-                              )
-                            ) : (
-                              "Grade with AI ✨"
-                            )}
-                          </button>
+                                aiGradingData[student.id] ? 'Regrade ✨' : 'Grade with AI ✨'
+                              )}
+                            </button>
+                          )}
                           {rowErrors[student.id] && (
-                            <span className="text-xs font-bold text-red-500 mt-1 max-w-[120px] truncate">
+                            <span className="text-xs font-bold text-red-500 mt-1 max-w-[140px] truncate" title={rowErrors[student.id]}>
                               {rowErrors[student.id]}
                             </span>
                           )}
@@ -1108,20 +1180,20 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                       <div className="flex items-center bg-zinc-100 dark:bg-white/5 p-2 rounded-xl">
                         <button 
                           onClick={() => setShowAssignmentContext(!showAssignmentContext)}
-                          className={`px-4 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${showAssignmentContext ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700'}`}
+                          className={`px-4 py-1.5 text-[11px] font-black uppercase tracking-widest rounded-lg transition-all ${showAssignmentContext ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white'}`}
                         >
                           CONTEXT
                         </button>
                         <button 
                           onClick={() => setShowLearningProfile(!showLearningProfile)}
-                          className={`px-4 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${showLearningProfile ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700'}`}
+                          className={`px-4 py-1.5 text-[11px] font-black uppercase tracking-widest rounded-lg transition-all ${showLearningProfile ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white'}`}
                           title="Learning Profile"
                         >
                           PROFILE
                         </button>
                         <button 
                           onClick={() => setShowRubricContext(!showRubricContext)}
-                          className={`px-4 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${showRubricContext ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700'}`}
+                          className={`px-4 py-1.5 text-[11px] font-black uppercase tracking-widest rounded-lg transition-all ${showRubricContext ? 'bg-white dark:bg-white/10 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white'}`}
                           title="Official Rubric"
                         >
                           {scoreText}
@@ -1306,21 +1378,32 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                                   }
                                                   
                                                   const activeClass = !verdict 
-                                                    ? 'opacity-100 border border-dashed rounded-xl' 
+                                                    ? 'opacity-100 border border-dashed rounded-xl bg-white/80 dark:bg-zinc-900/40' 
                                                     : (isSelected 
-                                                        ? 'opacity-100 border-2 border-solid font-bold scale-[1.02] z-10 rounded-xl' 
-                                                        : 'opacity-40 grayscale scale-95 border border-dashed rounded-xl');
+                                                        ? 'opacity-100 border-2 border-solid font-bold scale-[1.02] z-10 rounded-xl bg-white dark:bg-zinc-900 shadow-sm' 
+                                                        : 'opacity-100 border border-dashed rounded-xl bg-zinc-50/90 dark:bg-zinc-900/50');
 
                                                   return (
-                                                    <div key={rIdx} className={`flex-1 flex flex-col relative px-3 py-2 transition-all duration-300 ${borderAccentColor} ${textColor} ${activeClass}`}>
+                                                    <div key={rIdx} className={`flex-1 flex flex-col relative px-3.5 py-3 transition-all duration-300 ${borderAccentColor} ${textColor} ${activeClass}`}>
                                                       {isSelected && (
-                                                        <div className="absolute top-2 right-2 w-4 h-4 bg-indigo-600 rounded-full flex items-center justify-center shadow-md">
-                                                          <Icons.IconCheck className="w-2.5 h-2.5 text-white" />
+                                                        <div className="absolute top-2 right-2 w-5 h-5 bg-indigo-600 rounded-full flex items-center justify-center shadow-md">
+                                                          <Icons.IconCheck className="w-3 h-3 text-white" />
                                                         </div>
                                                       )}
-                                                      <span className="text-[11px] font-bold mb-1 leading-tight">{rating.description}</span>
-                                                      <span className="text-[10px] font-black opacity-80 mb-2">{rating.points} pts</span>
-                                                      {rating.long_description && <span className="text-[9px] opacity-75 leading-relaxed line-clamp-4" title={rating.long_description}>{rating.long_description}</span>}
+                                                      <span className={`text-sm mb-1 leading-snug ${isSelected ? 'font-black' : 'font-bold'} text-zinc-900 dark:text-zinc-100`}>
+                                                        {rating.description}
+                                                      </span>
+                                                      <span className={`text-xs font-black mb-2 ${isSelected ? textColor : 'text-zinc-700 dark:text-zinc-300'}`}>
+                                                        {rating.points} pts
+                                                      </span>
+                                                      {rating.long_description && (
+                                                        <span
+                                                          className="text-[11px] leading-relaxed line-clamp-5 text-zinc-700 dark:text-zinc-300"
+                                                          title={rating.long_description}
+                                                        >
+                                                          {rating.long_description}
+                                                        </span>
+                                                      )}
                                                     </div>
                                                   );
                                                 });
@@ -1359,19 +1442,20 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         </div>
                       )}
 
-                      <div className="w-full max-w-5xl bg-white dark:bg-[#0F172A] rounded-2xl border border-zinc-200 dark:border-white/5 shadow-2xl shadow-black/5 overflow-hidden flex flex-col min-h-[600px] transition-all duration-500 p-2">
+                      <div className="w-full max-w-5xl bg-white dark:bg-[#0F172A] rounded-2xl border border-zinc-200 dark:border-white/5 shadow-2xl shadow-black/5 overflow-hidden flex flex-col h-[min(78vh,860px)] min-h-[560px] transition-all duration-500">
 
 
-                        {/* MAIN VIEWER AREA */}
-                        <div className="flex-1 flex flex-col min-w-0">
+                        {/* MAIN VIEWER AREA — format-specific PDF / Word / PPT / image preview */}
+                        <div className="flex-1 flex flex-col min-h-0 min-w-0">
                           {student.attachments && student.attachments.length > 0 ? (
                             (() => {
                               const att = activeAttachment || student.attachments[0];
+                              const fileLabel = att.display_name || att.filename || 'submission.docx';
                               return (
                                 <UniversalPreviewer 
                                   url={att.url} 
-                                  filename={att.filename} 
-                                  onDownload={() => handleDownloadSingleAttachment(att.url, att.filename)}
+                                  filename={fileLabel} 
+                                  onDownload={() => handleDownloadSingleAttachment(att.url, fileLabel)}
                                   highlightText={highlightText}
                                 />
                               );
@@ -1481,11 +1565,20 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
                           {/* Phase 3: RAG Result View */}
                           {!loadingStudents.has(selectedStudent!) && aiGradingData[selectedStudent!] ? (
-                            <GradingResult 
-                               result={aiGradingData[selectedStudent!]} 
-                               rubricContext={currentAuthItem?.rubric || []}
-                               onEvidenceAnchorClick={(text) => setHighlightText(text)}
-                            />
+                            <div className="space-y-4">
+                              <button
+                                onClick={() => handleFetchAiGrade(selectedStudent!)}
+                                className="w-full py-2.5 px-4 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center border border-zinc-700"
+                              >
+                                <Icons.IconRefresh className="w-3.5 h-3.5 mr-2" />
+                                Regrade with AI
+                              </button>
+                              <GradingResult 
+                                 result={aiGradingData[selectedStudent!]} 
+                                 rubricContext={currentAuthItem?.rubric || []}
+                                 onEvidenceAnchorClick={(text) => setHighlightText(text)}
+                              />
+                            </div>
                           ) : (
                             !loadingStudents.has(selectedStudent!) && (
                               <div className="space-y-6">
@@ -1493,6 +1586,12 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                   <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl shadow-sm">
                                     <div className="text-red-600 dark:text-red-400 text-xs font-bold mb-1 flex items-center"><Icons.IconX className="w-4 h-4 mr-1"/> GRADING FAILED</div>
                                     <div className="text-red-500 dark:text-red-300 text-xs whitespace-pre-wrap">{rowErrors[selectedStudent!]}</div>
+                                    <button
+                                      onClick={() => handleFetchAiGrade(selectedStudent!)}
+                                      className="mt-3 w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                                    >
+                                      Retry grade
+                                    </button>
                                   </div>
                                 ) : (
                                   <div className="flex flex-col">

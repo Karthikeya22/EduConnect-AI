@@ -126,7 +126,7 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
                         <div className="bg-[var(--bg-card)] border-2 border-[var(--border-primary)] rounded-[2.5rem] p-8 shadow-[var(--shadow-xl)]">
                             <h2 className="text-lg font-black uppercase text-[var(--text-primary)] mb-2">Canvas Configuration</h2>
                             <p className="text-sm font-medium text-[var(--text-muted)] mb-6">
-                                If the system secret is invalid (401 error), you can provide a temporary API access token here. This token is stored only in your browser's local storage.
+                                You must provide your API keys here to use the features. These keys are stored securely in your profile.
                             </p>
 
                             <div className="space-y-4">

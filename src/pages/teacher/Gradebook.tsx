@@ -5,7 +5,7 @@ import { AppPath } from '@/src/App';
 import * as Icons from '@/src/components/ui/Icons';
 import ThemeToggle from '@/src/components/ui/ThemeToggle';
 import { DashboardSkeleton } from '@/src/components/ui/Skeleton';
-import AIAssistantModal from '@/src/components/modals/AIAssistantModal';
+
 import { canvasAPI } from '@/src/services/canvasAPI';
 
 interface GradebookProps {
@@ -20,7 +20,7 @@ const Gradebook: React.FC<GradebookProps> = (props) => {
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [loading, setLoading] = useState(true);
     const [profileOpen, setProfileOpen] = useState(false);
-    const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
+
     const [activeAssignmentId, setActiveAssignmentId] = useState<string>('all');
     const [activeStudentId, setActiveStudentId] = useState<string>('all');
     const [activeCourse, setActiveCourse] = useState<{id: string, name: string} | null>(null);
@@ -171,12 +171,6 @@ const Gradebook: React.FC<GradebookProps> = (props) => {
                 currentPath={props.currentPath}
             />
 
-            <AIAssistantModal
-                isOpen={aiAssistantOpen}
-                onClose={() => setAiAssistantOpen(false)}
-                teacherName="Professor"
-                platformContext="Viewing Class Ledger"
-            />
 
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
                 <header className="h-20 bg-[var(--bg-card)] border-b-2 border-[var(--border-primary)] flex items-center justify-between px-8 shrink-0 z-40 shadow-[var(--shadow-sm)] transition-colors duration-500">

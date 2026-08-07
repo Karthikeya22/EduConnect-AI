@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { supabase } from '@/src/lib/supabase';
-import AIAssistantModal from '@/src/components/modals/AIAssistantModal';
+
 import AppSidebar from '@/src/components/layout/AppSidebar';
 import { DashboardSkeleton } from '@/src/components/ui/Skeleton';
 import { AppPath } from '@/src/App';
@@ -22,7 +22,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
   const [userProfile, setUserProfile] = useState<any>(null);
   const [stats, setStats] = useState({ students: 48, assignments: 12, pending: 18, discussions: 142 });
   const [profileOpen, setProfileOpen] = useState(false);
-  const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
+
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isOffline, setIsOffline] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
@@ -132,24 +132,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
         onLogout={props.onLogout} 
       />
 
-      <AIAssistantModal 
-        isOpen={aiAssistantOpen} 
-        onClose={() => setAiAssistantOpen(false)} 
-        teacherName={userProfile?.user_metadata?.full_name || 'Professor'} 
-      />
-      
-      {/* Primary Floating AI Trigger */}
-      <button 
-        onClick={() => setAiAssistantOpen(true)}
-        className="fixed bottom-8 right-8 z-[100] w-16 h-16 bg-[#18181B] text-white rounded-full shadow-2xl flex items-center justify-center transition-all hover:scale-110 active:scale-95 group overflow-hidden border-2 border-white/10"
-      >
-        <div className="absolute inset-0 bg-gradient-to-tr from-purple-600/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-        <Icons.IconBot className="w-8 h-8 relative z-10" />
-        <div className="absolute -top-12 right-0 bg-zinc-900 text-white text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-xl opacity-0 group-hover:opacity-100 transition-all pointer-events-none whitespace-nowrap translate-y-2 group-hover:translate-y-0">
-          Open AI Assistant
-        </div>
-        <div className="absolute inset-0 rounded-full border-4 border-purple-500/30 animate-ping-slow"></div>
-      </button>
+
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-20 bg-white border-b border-zinc-200 flex items-center justify-between px-12 shrink-0 z-40">
@@ -255,18 +238,14 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
               <div className="lg:col-span-8">
                 <div className="flex justify-between items-center mb-10">
                   <h3 className="dashboard-stagger text-2xl font-black text-zinc-900 tracking-tight font-['Space_Grotesk'] uppercase">Control Matrix</h3>
-                  <button onClick={() => setAiAssistantOpen(true)} className="dashboard-stagger flex items-center space-x-2 px-6 py-3 bg-purple-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-purple-700 transition-all active:scale-95">
-                    <Icons.IconBot className="w-4 h-4" /> <span>Ask Faculty AI</span>
-                  </button>
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
                   {[
                     { id: "assignments", Icon: Icons.IconDraft, title: "New Lab", sub: "Architect Mode", color: "bg-pink-600" },
                     { id: "predictor", Icon: Icons.IconTrending, title: "Sentinel", sub: "Risk Analysis", color: "bg-red-600" },
                     { id: "analytics", Icon: Icons.IconChart, title: "Insights", sub: "Student Growth", color: "bg-orange-600" },
-                    { id: "ai", Icon: Icons.IconBot, title: "AI Assistant", sub: "Global Query", color: "bg-[#18181B]" },
                   ].map((action) => (
-                    <button key={action.id} onClick={() => action.id === 'ai' ? setAiAssistantOpen(true) : props.onNavigateTo(`teacher-${action.id}` as AppPath)} className={`dashboard-stagger ${action.color} text-white p-8 rounded-[2.5rem] flex flex-col items-start text-left justify-end h-48 hover:translate-y-[-4px] hover:shadow-2xl transition-all shadow-xl shadow-black/5 group relative overflow-hidden active:scale-95`}>
+                    <button key={action.id} onClick={() => props.onNavigateTo(`teacher-${action.id}` as AppPath)} className={`dashboard-stagger ${action.color} text-white p-8 rounded-[2.5rem] flex flex-col items-start text-left justify-end h-48 hover:translate-y-[-4px] hover:shadow-2xl transition-all shadow-xl shadow-black/5 group relative overflow-hidden active:scale-95`}>
                       <div className="mb-8 group-hover:scale-110 transition-transform">
                         <action.Icon className="w-10 h-10" />
                       </div>

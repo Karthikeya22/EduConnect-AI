@@ -812,6 +812,17 @@ export const supabase = {
       return { error: null };
     },
 
+    async resetPasswordForEmail(email: string, options?: any) {
+      try {
+        return await realSupabase.auth.resetPasswordForEmail(email, options);
+      } catch (err: any) {
+        if (isConnectionError(err)) {
+          return { data: null, error: { message: "Network error: cannot connect to Auth server" } };
+        }
+        return { data: null, error: err };
+      }
+    },
+
     async updateUser(attributes: any) {
       try {
         const res = await realSupabase.auth.updateUser(attributes);

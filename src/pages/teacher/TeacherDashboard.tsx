@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { supabase } from '@/src/lib/supabase';
-import AIAssistantModal from '@/src/components/modals/AIAssistantModal';
+
 import AppSidebar from '@/src/components/layout/AppSidebar';
 import { DashboardSkeleton } from '@/src/components/ui/Skeleton';
 import { AppPath } from '@/src/App';
@@ -56,7 +56,7 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
 
   const [platformContext, setPlatformContext] = useState<string>('');
   const [profileOpen, setProfileOpen] = useState(false);
-  const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
+
   const [lastSyncTime, setLastSyncTime] = useState<string>(new Date().toLocaleTimeString());
   const [canvasStats, setCanvasStats] = useState<{
     pendingGrades: number;
@@ -267,12 +267,6 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
         currentPath={props.currentPath}
       />
 
-      <AIAssistantModal
-        isOpen={aiAssistantOpen}
-        onClose={() => setAiAssistantOpen(false)}
-        teacherName={userProfile?.user_metadata?.full_name || 'Professor'}
-        platformContext={platformContext}
-      />
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
         <header className="h-20 bg-[var(--bg-card)] border-b-2 border-[var(--border-primary)] flex items-center justify-between px-12 shrink-0 z-40 shadow-[var(--shadow-sm)]">

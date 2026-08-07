@@ -44,22 +44,6 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
     }
   };
 
-  const linguisticScore = (() => {
-    if (!result.linguisticProfile) return null;
-    let score = 0;
-    const prof = result.linguisticProfile;
-    if (prof.clarity === 'clear') score += 3;
-    else if (prof.clarity === 'partially_clear') score += 1;
-    const reasoning = prof.reasoning_depth || (prof as any).reasoningDepth;
-    if (reasoning === 'deep') score += 4;
-    else if (reasoning === 'moderate') score += 2;
-    else if (reasoning === 'surface') score += 1;
-    const engagement = prof.engagement_level || (prof as any).engagementLevel;
-    if (engagement === 'high') score += 3;
-    else if (engagement === 'medium') score += 1;
-    return score;
-  })();
-
   const getRubricDetail = (criterionNameOrId: string) => {
     const match = rubricContext.find((r: any) => 
       r.id === criterionNameOrId || 
@@ -108,10 +92,6 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
                 <span className="text-xs text-zinc-900 dark:text-white font-bold ml-auto">{result.structure_score}/{result.structure_max}</span>
               </div>
             )}
-            <div className="flex items-center space-x-2 text-[9px] font-black text-zinc-600 dark:text-zinc-400 uppercase tracking-widest">
-              <span className={`w-1.5 h-1.5 rounded-full ${result.rag_coverage_level?.toUpperCase() === 'HIGH' ? 'bg-emerald-500' : result.rag_coverage_level?.toUpperCase() === 'MEDIUM' ? 'bg-amber-500' : 'bg-rose-500'}`}></span>
-              <span>RAG: {String(result.rag_coverage_level).toUpperCase()}</span>
-            </div>
           </div>
         </div>
 
@@ -277,51 +257,29 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
         </div>
       )}
 
-      {/* Section E: Writing & Academic Integrity Profile */}
-      {(result.linguisticProfile || result.integrityEvaluation) && (
+      {/* Section E: Academic Integrity */}
+      {result.integrityEvaluation && (
         <div className="space-y-2 relative overflow-hidden pt-2">
           <div className="flex items-center space-x-2 border-b border-zinc-100 dark:border-white/5 pb-1.5">
             <Icons.IconSparkles className="w-3 h-3 text-indigo-500" />
-            <div className="text-[8px] font-black uppercase tracking-[0.2em] text-zinc-500">LINGUISTIC & ACADEMIC INTEGRITY</div>
+            <div className="text-[8px] font-black uppercase tracking-[0.2em] text-zinc-500">ACADEMIC INTEGRITY</div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2">
-            {/* Left: Writing Quality */}
-            {result.linguisticProfile && (
-              <div className="space-y-2 bg-zinc-50 dark:bg-white/5 p-3 rounded-lg border border-zinc-100/50 dark:border-white/5">
-                <div className="flex justify-between items-center">
-                  <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400">WRITING QUALITY</span>
-                  <span className="text-xs font-black text-indigo-500 bg-indigo-500/10 px-1.5 py-0.5 rounded">{linguisticScore}/10</span>
-                </div>
-                <div className="space-y-1 text-[9px] text-zinc-500 dark:text-zinc-400 font-medium">
-                  <div className="flex justify-between"><span className="text-zinc-400">Tone:</span> <span className="font-bold text-zinc-700 dark:text-zinc-300 capitalize">{result.linguisticProfile.tone}</span></div>
-                  <div className="flex justify-between"><span className="text-zinc-400">Clarity:</span> <span className="font-bold text-zinc-700 dark:text-zinc-300 capitalize">{result.linguisticProfile.clarity.replace('_', ' ')}</span></div>
-                  <div className="flex justify-between"><span className="text-zinc-400">Reasoning Depth:</span> <span className="font-bold text-zinc-700 dark:text-zinc-300 capitalize">{(result.linguisticProfile.reasoning_depth || (result.linguisticProfile as any).reasoningDepth || 'N/A').replace('_', ' ')}</span></div>
-                  <div className="flex justify-between"><span className="text-zinc-400">Engagement:</span> <span className="font-bold text-zinc-700 dark:text-zinc-300 capitalize">{(result.linguisticProfile.engagement_level || (result.linguisticProfile as any).engagementLevel || 'N/A').replace('_', ' ')}</span></div>
-                </div>
+          <div className="space-y-2 bg-zinc-50 dark:bg-white/5 p-3 rounded-lg border border-zinc-100/50 dark:border-white/5">
+            <div className="space-y-1 text-[9px] text-zinc-500 dark:text-zinc-400 font-medium">
+              <div className="flex justify-between">
+                <span className="text-zinc-400">AI Authorship:</span>
+                <span className={`font-bold ${result.integrityEvaluation.ai_authorship_probability > 0.5 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                  {Math.round(result.integrityEvaluation.ai_authorship_probability * 100)}%
+                </span>
               </div>
-            )}
-
-            {/* Right: Academic Integrity */}
-            {result.integrityEvaluation && (
-              <div className="space-y-2 bg-zinc-50 dark:bg-white/5 p-3 rounded-lg border border-zinc-100/50 dark:border-white/5">
-                <span className="text-[9px] font-black uppercase tracking-wider text-zinc-400 block">ACADEMIC INTEGRITY</span>
-                <div className="space-y-1 text-[9px] text-zinc-500 dark:text-zinc-400 font-medium">
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">AI Authorship:</span>
-                    <span className={`font-bold ${result.integrityEvaluation.ai_authorship_probability > 0.5 ? 'text-rose-500' : 'text-emerald-500'}`}>
-                      {Math.round(result.integrityEvaluation.ai_authorship_probability * 100)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-400">Plagiarism Risk:</span>
-                    <span className={`font-bold uppercase tracking-wider px-1 py-0.5 rounded ${result.integrityEvaluation.plagiarism_risk === 'High' ? 'bg-rose-500/10 text-rose-500' : result.integrityEvaluation.plagiarism_risk === 'Medium' ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
-                      {result.integrityEvaluation.plagiarism_risk}
-                    </span>
-                  </div>
-                </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Plagiarism Risk:</span>
+                <span className={`font-bold uppercase tracking-wider px-1 py-0.5 rounded ${result.integrityEvaluation.plagiarism_risk === 'High' ? 'bg-rose-500/10 text-rose-500' : result.integrityEvaluation.plagiarism_risk === 'Medium' ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
+                  {result.integrityEvaluation.plagiarism_risk}
+                </span>
               </div>
-            )}
+            </div>
           </div>
         </div>
       )}

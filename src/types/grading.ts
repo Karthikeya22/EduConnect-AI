@@ -43,7 +43,7 @@ export interface GradingOutput {
   overall_confidence: number;
   flag_for_human: boolean;
   misconception_hint: string;
-  rag_coverage_level: "HIGH" | "MEDIUM" | "LOW";
+  rag_coverage_level: "HIGH" | "MEDIUM" | "LOW" | "NONE";
   strong_match_count: number;
   referenced_materials: string[];
   criteria_verdicts: CriterionVerdict[];

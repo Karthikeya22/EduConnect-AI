@@ -202,10 +202,41 @@ async def _multihop_retrieve(
                 }
                 if course_id:
                     params["filter_course_id"] = course_id
-                chunks = sb.rpc("match_course_material_chunks", params).execute().data or []
+                try:
+                    chunks = sb.rpc("match_course_material_chunks", params).execute().data or []
+                except Exception as rpc_err:
+                    # Live DB may still have the 3-arg RPC (migration not applied).
+                    # Retry without filter_course_id so retrieval still works.
+                    err_text = str(rpc_err)
+                    if course_id and ("PGRST202" in err_text or "filter_course_id" in err_text or "Could not find the function" in err_text):
+                        legacy = {
+                            "query_embedding": vec,
+                            "match_count": 5,
+                            "filter_assignment_id": assignment_id,
+                        }
+                        chunks = sb.rpc("match_course_material_chunks", legacy).execute().data or []
+                    else:
+                        raise
                 all_chunks.extend(chunks)
             except Exception as e:
                 print(f"[Vector Search Error] {e}")
+        if not all_chunks:
+            # Last-resort: return any stored chunks for this assignment (no similarity)
+            try:
+                fallback = (
+                    sb.table("course_material_chunks")
+                    .select("id, chunk_text, source_title, chunk_index")
+                    .eq("assignment_id", assignment_id)
+                    .limit(8)
+                    .execute()
+                    .data
+                    or []
+                )
+                for row in fallback:
+                    row.setdefault("similarity", 0.0)
+                all_chunks.extend(fallback)
+            except Exception as e:
+                print(f"[Vector Search Fallback Error] {e}")
         return all_chunks
     
     chunks = await asyncio.to_thread(_db)
@@ -250,30 +281,31 @@ async def _gp(c, ctx, txt, exemplar_context, previous_critique=None, api_key=Non
         scoring_philosophy = (
             f"=== SCORING PHILOSOPHY (STRUCTURE) ===\n"
             f"- Be fair, constructive, and evidence-based.\n"
-            f"- REASONING CHAIN VERIFICATION: You MUST base your grade on explicit evidence. Map the RETRIEVED COURSE MATERIAL to specific quotes in the STUDENT SUBMISSION.\n"
-            f"- If the student demonstrated the required concepts/structure, extract a direct quote as the 'evidence_anchor'.\n"
-            f"- If no valid student quote can be found to satisfy the criterion, explicitly set 'evidence_anchor' to 'not found'. Do NOT hallucinate an anchor.\n"
-            f"- Focus strictly on logical organization (clear sections, flow, transitions) and cohesion.\n"
-            f"- Evaluate paragraph and sentence structure for readability, not perfection. For code: check naming consistency, comments, and readability.\n"
+            f"- PRIMARY EVIDENCE: Grade ONLY from the STUDENT SUBMISSION. evidence_anchor MUST be a verbatim quote from the student text.\n"
+            f"- If the student demonstrated the required structure, extract a direct student quote as 'evidence_anchor'.\n"
+            f"- VISUALS/TABLES: [FIGURE / VISUAL ...] and [TABLE ...] blocks are real student content — credit them; never say images/tables are missing when present.\n"
+            f"- If no valid student quote exists, set 'evidence_anchor' to 'not found'. Do NOT quote course slides/lectures as evidence.\n"
+            f"- Course materials are OPTIONAL REFERENCE only (definitions, examples). Do NOT require the student to match lecture examples or slide filenames.\n"
+            f"- Focus on logical organization (clear sections, flow, transitions) and cohesion.\n"
             f"- EXPLICITLY IGNORE visual formatting details you cannot see.\n"
             f"- Do not penalize minor grammar issues or non-native phrasing as long as the structure and meaning are clear.\n"
-            f"- 'missing_keywords' should list key structural components from the rubric that the student failed to include.\n"
-            f"- 'supporting_materials' should list any relevant course materials used to judge this structure.\n"
-            f"- CONCEPT GRAPH COVERAGE: Extract the 'required_concepts' based on the rubric/course material. Extract the 'covered_concepts' that the student demonstrated. The ratio will compute the depth score.\n\n"
+            f"- 'missing_keywords' should list rubric requirements the student failed to include (not unrelated lecture topics).\n"
+            f"- 'supporting_materials' should list course Source titles only if they truly informed this judgment; otherwise use [].\n"
+            f"- CONCEPT GRAPH COVERAGE: Derive 'required_concepts' from the RUBRIC first. 'covered_concepts' must come from the student text.\n\n"
         )
     else:
         scoring_philosophy = (
             f"=== SCORING PHILOSOPHY ===\n"
             f"- Be fair, constructive, and evidence-based.\n"
-            f"- REASONING CHAIN VERIFICATION: You MUST base your grade on explicit evidence. Map the RETRIEVED COURSE MATERIAL (Ground Truth) to specific quotes in the STUDENT SUBMISSION.\n"
-            f"- If the student demonstrated the required concepts, extract a direct quote as the 'evidence_anchor'.\n"
-            f"- If no valid student quote can be found to satisfy the criterion, explicitly set 'evidence_anchor' to 'not found'. Do NOT hallucinate an anchor.\n"
-            f"- Avoid hyper-literal interpretation of section headings. Focus on the semantic meaning and whether the student discussed the required functional concepts.\n"
-            f"- If the student demonstrates the core concept (even with synonyms or paraphrases), give appropriate credit.\n"
-            f"- Use the course material below as GROUND TRUTH for what correct answers should contain.\n"
-            f"- 'missing_keywords' should list key terms/concepts from the rubric or course material that the student failed to address.\n"
-            f"- 'supporting_materials' should list the Source titles from the retrieved course material that were most relevant and actually used for this criterion.\n"
-            f"- CONCEPT GRAPH COVERAGE: Extract the 'required_concepts' based on the rubric/course material. Extract the 'covered_concepts' that the student demonstrated. The ratio will compute the depth score.\n\n"
+            f"- PRIMARY EVIDENCE: Grade against the RUBRIC using the STUDENT SUBMISSION. evidence_anchor MUST be a verbatim quote from the student text.\n"
+            f"- If the student addressed the criterion (including synonyms/paraphrase), give appropriate credit.\n"
+            f"- VISUALS/TABLES: Blocks marked [FIGURE / VISUAL ...] or [TABLE ...] are real content from the student's file (charts, images, tables). Treat them as present evidence. Do NOT claim 'no visualizations/images/tables' when those markers exist.\n"
+            f"- If no valid student quote exists, set 'evidence_anchor' to 'not found'. Never invent anchors or cite slide decks as student evidence.\n"
+            f"- Course materials are OPTIONAL REFERENCE for terminology/context — NOT mandatory ground truth. Do NOT zero a criterion because lecture slides omit that section, or because the student's domain/example differs from a slide example.\n"
+            f"- Prefer the rubric description over unrelated retrieved lecture chunks.\n"
+            f"- 'missing_keywords' should list rubric concepts the student missed — not topics that only appear in course slides.\n"
+            f"- 'supporting_materials' should list Source titles only when actually used; otherwise [].\n"
+            f"- CONCEPT GRAPH COVERAGE: Derive 'required_concepts' from the RUBRIC first. 'covered_concepts' must come from the student text.\n\n"
         )
 
     prompt = (
@@ -283,9 +315,9 @@ async def _gp(c, ctx, txt, exemplar_context, previous_critique=None, api_key=Non
         f"Description: {criterion_desc}\n"
         f"Max Score: {max_score}\n\n"
         f"{scoring_philosophy}"
-        f"=== RETRIEVED COURSE MATERIAL (Ground Truth) ===\n{ctx}\n\n"
+        f"=== OPTIONAL COURSE CONTEXT (reference only — not required) ===\n{ctx}\n\n"
         f"{exemplar_section}"
-        f"=== STUDENT SUBMISSION ===\n{txt[:150000]}\n"
+        f"=== STUDENT SUBMISSION (grade this) ===\n{txt[:150000]}\n"
     )
     try:
         r = await asyncio.to_thread(call_gemini, prompt, model=GEMINI_GRADING_MODEL, response_schema=LLMGradingPayload, api_key=api_key)
@@ -296,6 +328,16 @@ async def _gp(c, ctx, txt, exemplar_context, previous_critique=None, api_key=Non
     # Clamp score to max
     raw_score = int(r.get('score', 0))
     clamped_score = max(0, min(raw_score, max_score))
+    evidence_anchor = str(r.get('evidence_anchor', '') or '').strip()
+
+    # Reject anchors that are not actually present in the student submission
+    if evidence_anchor and evidence_anchor.lower() not in ("not found", "n/a", "none"):
+        norm_sub = " ".join(txt.lower().split())
+        norm_anchor = " ".join(evidence_anchor.lower().split())
+        # Allow short fuzzy match: full anchor or first ~12 words
+        anchor_probe = norm_anchor if len(norm_anchor) <= 180 else " ".join(norm_anchor.split()[:12])
+        if anchor_probe and anchor_probe not in norm_sub:
+            evidence_anchor = "not found"
 
     v = {
         "criterion_id": c['criterion_id'],
@@ -306,7 +348,7 @@ async def _gp(c, ctx, txt, exemplar_context, previous_critique=None, api_key=Non
         "status": str(r.get('status', 'partial')),
         "justification": str(r.get('justification', '')),
         "missing_keywords": r.get('missing_keywords', []) or [],
-        "evidence_anchor": str(r.get('evidence_anchor', '')),
+        "evidence_anchor": evidence_anchor or "not found",
         "supporting_materials": r.get('supporting_materials', []) or [],
         "covered_concepts": r.get('covered_concepts', []) or [],
         "required_concepts": r.get('required_concepts', []) or [],
@@ -349,7 +391,7 @@ async def run_grade(state: GradingState) -> dict:
             for ch in retrieved_chunks[:10]  # Take top 10 distinct chunks for this criterion
         ])
         if not ctx:
-            ctx = "(No course material has been ingested for this assignment. Grading based on rubric criteria only.)"
+            ctx = "(No course material retrieved. Grade using the rubric and student submission only.)"
         
         criterion_exemplars = exemplars.get(cid, []) if isinstance(exemplars, dict) else []
         pc = prev_critiques.get(cid)
@@ -370,25 +412,21 @@ async def run_grade(state: GradingState) -> dict:
             if cid not in seen_chunks:
                 seen_chunks.add(cid)
                 all_chunks.append(ch)
-    
+
+    # Do NOT downgrade full credit for weak course-slide similarity — open-ended
+    # assignments often diverge from lecture examples. Flag only when the model
+    # claimed full credit with no student evidence anchor.
     force_flag_for_human = False
     for v in verdicts:
-        if v.get("status") == "full":
-            has_high_sim = False
-            for chunk_title in v.get("supporting_materials", []):
-                for ch in all_chunks:
-                    ch_title = ch.get('source_title', '').split(' (chunk')[0].strip()
-                    if ch_title == chunk_title and ch.get("similarity", 0) >= 0.65:
-                        has_high_sim = True
-                        break
-                if has_high_sim:
-                    break
-            
-            if not has_high_sim:
-                v["status"] = "partial"
-                v["ungrounded_full"] = True
-                v["justification"] += "\n\nDowngraded: no strong course-material match found to support full credit"
-                force_flag_for_human = True
+        anchor = (v.get("evidence_anchor") or "").strip().lower()
+        if v.get("status") == "full" and anchor in ("", "not found", "n/a", "none"):
+            v["status"] = "partial"
+            v["ungrounded_full"] = True
+            v["justification"] = (
+                (v.get("justification") or "")
+                + "\n\nDowngraded: full credit claimed without a verifiable quote from the student submission."
+            ).strip()
+            force_flag_for_human = True
 
     return {"verdicts": verdicts, "loop_count": state.get("loop_count", 0) + 1, "force_flag_for_human": force_flag_for_human, "relevant_chunks": all_chunks}
 
@@ -492,19 +530,35 @@ async def run_output(state: GradingState) -> dict:
                 referenced_materials.append(base_src)
     referenced_materials = referenced_materials[:5]
 
-    # Calculate RAG coverage
-    similarity_threshold = 0.65
-    strong_match_count = sum(1 for ch in relevant_chunks if ch.get("similarity", 0) >= similarity_threshold)
-    if strong_match_count >= 5:
+    # Calculate RAG coverage from retrieved course-material chunks.
+    # Prior threshold (0.65 + needing 5 hits) was unrealistically strict for
+    # embedding cosine scores, so nearly every paper showed LOW.
+    sims = sorted(
+        (float(ch.get("similarity") or 0) for ch in relevant_chunks),
+        reverse=True,
+    )
+    strong_match_count = sum(1 for s in sims if s >= 0.45)
+    usable_count = sum(1 for s in sims if s >= 0.28)
+    top_avg = (sum(sims[:5]) / min(5, len(sims))) if sims else 0.0
+
+    if not sims or usable_count == 0:
+        rag_coverage_level = "NONE"
+    elif strong_match_count >= 3 or top_avg >= 0.50:
         rag_coverage_level = "HIGH"
-    elif strong_match_count >= 2:
+    elif strong_match_count >= 1 or usable_count >= 3 or top_avg >= 0.35:
         rag_coverage_level = "MEDIUM"
     else:
         rag_coverage_level = "LOW"
 
-    # Determine if any critique flagged for human review
-    any_flagged = any(c.flag_for_human for c in critiques) or state.get("force_flag_for_human", False)
+    # Human review: require real uncertainty — not a single noisy critique flag.
     overall_confidence = sum(c.confidence for c in critiques) / len(critiques) if critiques else 0.9
+    flagged_count = sum(1 for c in critiques if c.flag_for_human)
+    majority_flagged = flagged_count >= max(1, (len(critiques) + 1) // 2) if critiques else False
+    any_flagged = (
+        state.get("force_flag_for_human", False)
+        or overall_confidence < 0.65
+        or majority_flagged
+    )
 
     out = GradingOutput(
         assignment_id=state["assignment_id"],
@@ -588,6 +642,7 @@ async def grade_submission():
             
         # Extract submission text (priority: text field > uploaded file)
         submission_text = data.get("submission_text", "").strip()
+        custom_gemini_key = request.headers.get("X-Gemini-Api-Key")
         
         extracted_parts = []
         if request.files:
@@ -596,64 +651,142 @@ async def grade_submission():
                 file_bytes = uploaded_file.read()
                 
                 if file_bytes:
+                    part = ""
                     if filename.endswith(".pdf"):
-                        extracted_parts.append(_extract_pdf(file_bytes))
+                        part = _extract_pdf(file_bytes, api_key=custom_gemini_key)
                     elif filename.endswith(".docx"):
-                        extracted_parts.append(_extract_docx(file_bytes))
+                        part = _extract_docx(file_bytes, api_key=custom_gemini_key)
                     elif filename.endswith(".pptx"):
-                        extracted_parts.append(_extract_pptx(file_bytes))
+                        part = _extract_pptx(file_bytes)
                     elif filename.endswith(".ppt"):
-                        extracted_parts.append("This is a legacy .ppt file; content could not be extracted for AI grading. Please review manually.")
+                        part = "This is a legacy .ppt file; content could not be extracted for AI grading. Please review manually."
                     elif filename.endswith(".txt"):
-                        extracted_parts.append(file_bytes.decode("utf-8", errors="ignore"))
+                        part = file_bytes.decode("utf-8", errors="ignore")
+                    elif filename.endswith(".ipynb"):
+                        part = _extract_ipynb(file_bytes)
                     elif filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
                         mime_type = "image/png"
                         if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
                         elif filename.endswith(".webp"): mime_type = "image/webp"
-                        extracted_parts.append(_extract_image(file_bytes, mime_type))
+                        part = _extract_image(file_bytes, mime_type, api_key=custom_gemini_key)
+                    if part and part.strip():
+                        extracted_parts.append(part.strip())
         
-        # Download from file_urls if provided
+        # Download from file_urls if provided (authenticated Canvas download)
         file_urls = data.get("file_urls", [])
+        canvas_token = (
+            data.get("canvas_token")
+            or request.headers.get("X-Canvas-Token")
+            or request.form.get("canvas_token")
+        )
+
+        def _is_placeholder_body(text: str) -> bool:
+            t = (text or "").strip()
+            if not t:
+                return True
+            lower = t.lower()
+            return (
+                lower.startswith("submission type:")
+                or lower == "no submission content."
+                or lower.startswith("no submission content")
+            )
+
+        # Ignore Canvas placeholder bodies when real files are attached
+        if file_urls and _is_placeholder_body(submission_text):
+            submission_text = ""
+
+        download_errors: list[str] = []
         if file_urls:
-            import urllib.request
             for file_info in file_urls:
+                filename = ""
                 try:
-                    url = file_info.get("url")
-                    filename = (file_info.get("filename") or "").lower()
-                    if not url: continue
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=15) as response:
-                        file_bytes = response.read()
-                    
+                    url = file_info.get("url") if isinstance(file_info, dict) else None
+                    filename = (file_info.get("filename") or "").lower() if isinstance(file_info, dict) else ""
+                    if not url:
+                        continue
+                    # Fall back to URL path for extension when filename is odd/missing
+                    if not any(filename.endswith(ext) for ext in (
+                        ".pdf", ".docx", ".pptx", ".ppt", ".txt", ".ipynb", ".png", ".jpg", ".jpeg", ".webp"
+                    )):
+                        from urllib.parse import urlparse, unquote
+                        path_name = unquote(urlparse(url).path).lower()
+                        filename = path_name.split("/")[-1] or filename
+
+                    file_bytes = await asyncio.to_thread(_download_canvas_bytes, url, canvas_token)
+
                     if file_bytes:
-                        if filename.endswith(".pdf"):
-                            extracted_parts.append(_extract_pdf(file_bytes))
-                        elif filename.endswith(".docx"):
-                            extracted_parts.append(_extract_docx(file_bytes))
-                        elif filename.endswith(".pptx"):
-                            extracted_parts.append(_extract_pptx(file_bytes))
-                        elif filename.endswith(".ppt"):
-                            extracted_parts.append("This is a legacy .ppt file; content could not be extracted for AI grading. Please review manually.")
-                        elif filename.endswith(".txt"):
-                            extracted_parts.append(file_bytes.decode("utf-8", errors="ignore"))
-                        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
-                            mime_type = "image/png"
-                            if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
-                            elif filename.endswith(".webp"): mime_type = "image/webp"
-                            extracted_parts.append(_extract_image(file_bytes, mime_type))
+                        # OOXML magic: zip header — prefer content sniff when extension ambiguous
+                        is_ooxml = file_bytes[:2] == b"PK"
+
+                        def _extract_one() -> str:
+                            if filename.endswith(".pdf") or file_bytes[:4] == b"%PDF":
+                                return _extract_pdf(file_bytes, api_key=custom_gemini_key)
+                            if filename.endswith(".docx") or (is_ooxml and "word" in filename):
+                                return _extract_docx(file_bytes, api_key=custom_gemini_key)
+                            if filename.endswith(".pptx") or (is_ooxml and "ppt" in filename):
+                                return _extract_pptx(file_bytes)
+                            if filename.endswith(".ppt"):
+                                return "This is a legacy .ppt file; content could not be extracted for AI grading. Please review manually."
+                            if filename.endswith(".txt"):
+                                return file_bytes.decode("utf-8", errors="ignore")
+                            if filename.endswith(".ipynb"):
+                                return _extract_ipynb(file_bytes)
+                            if filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                                mime_type = "image/png"
+                                if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
+                                elif filename.endswith(".webp"): mime_type = "image/webp"
+                                return _extract_image(file_bytes, mime_type, api_key=custom_gemini_key)
+                            if is_ooxml:
+                                try:
+                                    return _extract_docx(file_bytes, api_key=custom_gemini_key)
+                                except Exception:
+                                    return _extract_pptx(file_bytes)
+                            return ""
+
+                        extracted = await asyncio.to_thread(_extract_one)
+                        if not extracted and not (
+                            filename.endswith((".pdf", ".docx", ".pptx", ".ppt", ".txt", ".ipynb", ".png", ".jpg", ".jpeg", ".webp"))
+                            or is_ooxml
+                            or file_bytes[:4] == b"%PDF"
+                        ):
+                            download_errors.append(f"Unsupported file type: {filename or url}")
+                            continue
+
+                        if extracted and len(extracted.strip()) >= 40:
+                            extracted_parts.append(extracted.strip())
+                        elif extracted and extracted.strip():
+                            # Keep short extracts but warn — better than discarding
+                            extracted_parts.append(extracted.strip())
+                            print(f"[WARN] Short extract ({len(extracted.strip())} chars) from {filename}")
+                        else:
+                            download_errors.append(f"{filename or 'attachment'}: extracted empty text")
                 except Exception as e:
                     print(f"Failed to download or extract {filename} from URL: {e}")
+                    download_errors.append(f"{filename or 'attachment'}: {e}")
 
         if extracted_parts:
-            submission_text = submission_text + "\n\n" + "\n\n".join(extracted_parts)
-            submission_text = submission_text.strip()
+            submission_text = (submission_text + "\n\n" + "\n\n".join(extracted_parts)).strip()
+
+        # Placeholder bodies like "Submission type: online_upload" are not real content
+        placeholder_only = _is_placeholder_body(submission_text)
+        if file_urls and not extracted_parts:
+            detail = "; ".join(download_errors) if download_errors else "Could not extract text from attached files"
+            return jsonify({
+                "error": f"Could not read submission file(s). {detail}",
+                "details": detail,
+            }), 400
+        if file_urls and extracted_parts and len(submission_text) < 40:
+            return jsonify({
+                "error": "Submission file was downloaded but almost no text was extracted. The document may be image-only or corrupted.",
+                "details": f"chars={len(submission_text)}; errors={download_errors}",
+            }), 400
         
-        if not submission_text:
+        if not submission_text or placeholder_only:
             return jsonify({"error": "No submission text or valid file provided"}), 400
 
         print(f"[DEBUG] Extracted submission text length for {data.get('student_id')}: {len(submission_text)} characters")
-
-        custom_gemini_key = request.headers.get("X-Gemini-Api-Key")
+        if "[FIGURE" in submission_text or "[TABLE" in submission_text:
+            print(f"[DEBUG] Visual/table markers present for {data.get('student_id')}")
 
         final = await get_graph().ainvoke({
             "assignment_id": data.get("assignment_id"), 
@@ -669,11 +802,18 @@ async def grade_submission():
         return jsonify(res), 200
     except Exception as e:
         traceback.print_exc()
-        # Extract specific error message if it's a vector dimension mismatch
         err_msg = str(e)
         if "expected 768 dimensions" in err_msg or "expected 3072 dimensions" in err_msg:
              return jsonify({"error": "DATABASE_DIMENSION_MISMATCH", "details": "Please run the setup_ingestion_tables.sql in Supabase SQL Editor to update your vector dimensions to 3072."}), 500
-        return jsonify({"error": "Internal computation error", "details": err_msg}), 500
+        if "PERMISSION_DENIED" in err_msg or "API key not valid" in err_msg or "API key was reported as leaked" in err_msg:
+             return jsonify({"error": "Invalid Gemini API key. Update GEMINI_API_KEY or your custom key in settings.", "details": err_msg}), 401
+        if "RESOURCE_EXHAUSTED" in err_msg or "exceeded your current quota" in err_msg or "429" in err_msg:
+             return jsonify({"error": "Gemini API quota exceeded. Wait ~30 seconds and retry one student.", "details": err_msg}), 429
+        if "cannot schedule new futures after shutdown" in err_msg:
+             return jsonify({"error": "Grading server restarted mid-request. Please click Grade again.", "details": err_msg}), 503
+        # Surface a short actionable message (not just a vague internal error)
+        short = err_msg[:240] if err_msg else "Unknown error"
+        return jsonify({"error": f"Grading failed: {short}", "details": err_msg}), 500
 
 @app.route("/api/health")
 def health(): return jsonify({"status":"ok"}), 200
@@ -845,6 +985,84 @@ def _canvas_url_rejection(file_url: str) -> str | None:
     return f"Host '{host}' is not a recognized Canvas host"
 
 
+def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> bytes:
+    """Download a Canvas-hosted file with auth, size limit, and SSRF checks."""
+    rejection = _canvas_url_rejection(str(file_url))
+    if rejection:
+        raise ValueError(rejection)
+
+    headers = {"User-Agent": "EduConnect-AI/1.0"}
+    if canvas_token:
+        headers["Authorization"] = f"Bearer {canvas_token}"
+
+    with requests.get(file_url, headers=headers, timeout=30, stream=True, allow_redirects=True) as r:
+        if r.status_code != 200:
+            raise ValueError(f"Failed to download from Canvas: {r.status_code}")
+
+        declared_length = r.headers.get("Content-Length")
+        if declared_length and declared_length.isdigit() and int(declared_length) > MAX_CANVAS_DOWNLOAD_BYTES:
+            raise ValueError("File is too large (limit 25MB)")
+
+        parts: list[bytes] = []
+        total = 0
+        for part in r.iter_content(chunk_size=65536):
+            if not part:
+                continue
+            total += len(part)
+            if total > MAX_CANVAS_DOWNLOAD_BYTES:
+                raise ValueError("File is too large (limit 25MB)")
+            parts.append(part)
+        return b"".join(parts)
+
+
+@app.route("/api/proxy-file", methods=["GET"])
+def proxy_file():
+    """
+    Browser-safe proxy for Canvas file URLs (avoids CORS Failed to fetch in Local Reader).
+    GET /api/proxy-file?url=...
+    Header: X-Canvas-Token (optional)
+    """
+    file_url = request.args.get("url")
+    if not file_url:
+        return jsonify({"error": "url is required"}), 400
+
+    canvas_token = request.headers.get("X-Canvas-Token") or request.args.get("canvas_token")
+    try:
+        file_bytes = _download_canvas_bytes(file_url, canvas_token)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Proxy download failed: {e}"}), 502
+
+    # Guess content type from URL / extension
+    lower = file_url.lower().split("?")[0]
+    content_type = "application/octet-stream"
+    if lower.endswith(".pdf"):
+        content_type = "application/pdf"
+    elif lower.endswith(".docx"):
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif lower.endswith(".pptx"):
+        content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif lower.endswith(".xlsx"):
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif lower.endswith(".txt"):
+        content_type = "text/plain"
+    elif lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        content_type = "image/" + lower.rsplit(".", 1)[-1].replace("jpg", "jpeg")
+
+    from flask import Response
+    return Response(
+        file_bytes,
+        status=200,
+        mimetype=content_type,
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 @app.route("/api/ingest/canvas-url", methods=["POST"])
 async def ingest_canvas_url():
     """
@@ -967,26 +1185,14 @@ async def delete_ingested(assignment_id: str):
 
 # ── File extraction helpers ───────────────────────────────────────────────────
 
-def _extract_pdf(file_bytes: bytes) -> str:
-    """Extract text from PDF using pdfplumber."""
-    import io
-    import pdfplumber
-    pages = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text and text.strip():
-                pages.append(text.strip())
-    return "\n\n".join(pages)
+def _extract_pdf(file_bytes: bytes, api_key: str | None = None) -> str:
+    """Extract PDF text, tables, and describe embedded charts/images via vision."""
+    return _parse_pdf(file_bytes, api_key=api_key)
 
 
-def _extract_docx(file_bytes: bytes) -> str:
-    """Extract text from DOCX using python-docx."""
-    import io
-    from docx import Document
-    doc = Document(io.BytesIO(file_bytes))
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    return "\n\n".join(paragraphs)
+def _extract_docx(file_bytes: bytes, api_key: str | None = None) -> str:
+    """Extract DOCX text/tables and describe embedded figures via vision."""
+    return _parse_docx(file_bytes, api_key=api_key)
 
 
 def _extract_pptx(file_bytes: bytes) -> str:
@@ -1007,24 +1213,61 @@ def _extract_pptx(file_bytes: bytes) -> str:
     return "\n".join(lines)
 
 
-def _extract_image(file_bytes: bytes, mime_type: str) -> str:
-    """Extract text from image using Gemini."""
-    from google.genai import types
-    from grading_server.utils.gemini_client import _genai_client
+def _extract_image(file_bytes: bytes, mime_type: str, api_key: str | None = None) -> str:
+    """Extract text/visual info from a standalone image using Gemini vision."""
+    from grading_server.utils.file_parsers import _describe_visual
+    desc = _describe_visual(file_bytes, mime_type, api_key=api_key)
+    if desc:
+        return f"[FIGURE / VISUAL - treat as present in the submission]\n{desc}"
+    return ""
+
+
+def _extract_ipynb(file_bytes: bytes) -> str:
+    """Extract markdown, code, and text outputs from a Jupyter notebook."""
+    import json
+
     try:
-        response = _genai_client.models.generate_content(
-            model="models/gemini-2.5-flash",
-            contents=[
-                "Extract and transcribe all text and key visual information from this poster/image.",
-                types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-            ]
-        )
-        return response.text or ""
+        nb = json.loads(file_bytes.decode("utf-8", errors="replace"))
     except Exception as e:
-        print(f"[IMAGE EXTRACT] Error: {e}")
-        return ""
+        raise ValueError(f"Invalid notebook JSON: {e}") from e
+
+    parts: list[str] = ["=== Jupyter Notebook ==="]
+    for i, cell in enumerate(nb.get("cells") or [], start=1):
+        cell_type = cell.get("cell_type") or "code"
+        source = cell.get("source") or ""
+        if isinstance(source, list):
+            source = "".join(source)
+        source = str(source).strip()
+        parts.append(f"\n--- Cell {i} ({cell_type}) ---")
+        if source:
+            parts.append(source)
+
+        for out in cell.get("outputs") or []:
+            if out.get("output_type") == "stream":
+                text = out.get("text") or ""
+                if isinstance(text, list):
+                    text = "".join(text)
+                if str(text).strip():
+                    parts.append(f"[stdout]\n{text}")
+            elif out.get("output_type") == "error":
+                parts.append(
+                    f"[error] {out.get('ename', '')}: {out.get('evalue', '')}"
+                )
+            else:
+                data = out.get("data") or {}
+                plain = data.get("text/plain") or ""
+                if isinstance(plain, list):
+                    plain = "".join(plain)
+                if str(plain).strip():
+                    parts.append(f"[output]\n{plain}")
+                if data.get("image/png") or data.get("image/jpeg"):
+                    parts.append("[FIGURE / VISUAL - notebook plot/image output present]")
+
+    return "\n".join(parts).strip()
 
 
 if __name__ == "__main__":
     print(f"Starting Flask server on port {FLASK_PORT}...")
-    app.run(host="0.0.0.0", port=FLASK_PORT, debug=True)
+    # use_reloader=False: Windows watchdog reloads kill in-flight grade/ingest
+    # requests with "cannot schedule new futures after shutdown".
+    app.run(host="0.0.0.0", port=FLASK_PORT, debug=True, use_reloader=False)

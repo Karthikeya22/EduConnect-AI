@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import time
 import asyncio
 from google import genai
 from google.genai import types
@@ -15,6 +16,38 @@ from grading_server.config import GEMINI_API_KEY, GEMINI_EMBEDDING_MODEL
 
 # Single global sync client
 _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+
+def _is_quota_error(err: BaseException) -> bool:
+    msg = str(err)
+    return (
+        "RESOURCE_EXHAUSTED" in msg
+        or "exceeded your current quota" in msg
+        or "429" in msg
+    )
+
+
+def _retry_delay_seconds(err: BaseException, attempt: int) -> float:
+    """Prefer Gemini's RetryInfo delay; otherwise exponential backoff."""
+    match = re.search(r"Please retry in ([\d.]+)s", str(err))
+    if match:
+        return float(match.group(1)) + 1.0
+    return min(60.0, (2 ** attempt) * 5.0)
+
+
+def _with_quota_retry(fn, *, max_attempts: int = 5):
+    last_err: BaseException | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if not _is_quota_error(e) or attempt == max_attempts - 1:
+                raise
+            delay = _retry_delay_seconds(e, attempt)
+            print(f"[Gemini] Quota hit; retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})")
+            time.sleep(delay)
+    raise last_err  # pragma: no cover
 
 
 def call_gemini(
@@ -35,11 +68,15 @@ def call_gemini(
         config_kwargs["response_schema"] = response_schema
         
     client = genai.Client(api_key=api_key) if api_key else _genai_client
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(**config_kwargs),
-    )
+
+    def _call():
+        return client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+
+    response = _with_quota_retry(_call)
     raw_text = response.text or ""
     clean = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.MULTILINE)
     clean = re.sub(r"```\s*$", "", clean, flags=re.MULTILINE).strip()
@@ -59,42 +96,57 @@ def call_gemini_text(
 ) -> str:
     """Synchronous text-only Gemini call."""
     client = genai.Client(api_key=api_key) if api_key else _genai_client
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=4096,
-        ),
-    )
+
+    def _call():
+        return client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=4096,
+            ),
+        )
+
+    response = _with_quota_retry(_call)
     return response.text or ""
 
 
 def embed_text(text: str) -> list[float]:
-    """Sync single embedding. Truncated to 768 for database compatibility."""
+    """Sync single embedding. Requested as 768 for database compatibility."""
     if not text: return []
-    result = _genai_client.models.embed_content(
-        model=GEMINI_EMBEDDING_MODEL,
-        contents=text,
-    )
-    # Gemini models return 3072, but we slice to 768 for legacy DB support
-    return list(result.embeddings[0].values)[:768]
+
+    def _call():
+        return _genai_client.models.embed_content(
+            model=GEMINI_EMBEDDING_MODEL,
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=768)
+        )
+
+    result = _with_quota_retry(_call)
+    return list(result.embeddings[0].values)
 
 
 def embed_texts(texts: list[str], api_key: str | None = None) -> list[list[float]]:
-    """Sync batch embedding. Truncated to 768 for database compatibility."""
+    """Sync batch embedding. Requested as 768 for database compatibility."""
     if not texts: return []
     all_embeddings = []
     client = genai.Client(api_key=api_key) if api_key else _genai_client
-    # Batch in chunks of 100
-    for i in range(0, len(texts), 100):
-        chunk = texts[i:i + 100]
-        result = client.models.embed_content(
-            model=GEMINI_EMBEDDING_MODEL,
-            contents=chunk,
-        )
-        # Matryoshka-style truncation: first 768 dimensions are stable
-        all_embeddings.extend([list(e.values)[:768] for e in result.embeddings])
+    # Smaller batches + pacing to stay under Gemini embed rate limits
+    batch_size = 32
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i + batch_size]
+
+        def _call(batch=chunk):
+            return client.models.embed_content(
+                model=GEMINI_EMBEDDING_MODEL,
+                contents=batch,
+                config=types.EmbedContentConfig(output_dimensionality=768)
+            )
+
+        result = _with_quota_retry(_call)
+        all_embeddings.extend([list(e.values) for e in result.embeddings])
+        if i + batch_size < len(texts):
+            time.sleep(0.35)
     return all_embeddings
 
 

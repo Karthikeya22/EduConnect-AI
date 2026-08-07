@@ -142,7 +142,7 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
 
     // 2. Verify Gemini
     try {
-      const apiKey = customGeminiKey.trim() || import.meta.env.VITE_GEMINI_API_KEY;
+      const apiKey = customGeminiKey.trim();
       if (!apiKey) throw new Error("No Gemini API key provided and no default available.");
       
       const client = new GoogleGenAI({ apiKey } as any);
@@ -251,7 +251,9 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
           <div className="w-12 h-12 rounded-xl bg-[var(--brand-primary)] flex items-center justify-center text-white shadow-lg">
             <Icons.IconChart className="w-6 h-6" />
           </div>
-          <h1 className="text-3xl font-black text-zinc-900 dark:text-white tracking-tighter uppercase font-['Space_Grotesk']">EduConnect</h1>
+          <h1 className="text-3xl font-black text-zinc-900 dark:text-white tracking-tighter uppercase font-['Space_Grotesk']">
+            EduConnect <span className="bg-clip-text text-transparent bg-gradient-to-r from-[var(--brand-primary)] to-[var(--brand-accent)] animate-pulse inline-block">AI</span>
+          </h1>
         </div>
         <div className="flex items-center space-x-6">
           <ThemeToggle />
@@ -291,7 +293,7 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
                   type="password" 
                   value={customToken}
                   onChange={(e) => setCustomToken(e.target.value)}
-                  placeholder="Leave blank for system default"
+                  placeholder="Enter your Canvas API Key"
                   className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
                 />
               </div>
@@ -313,7 +315,7 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
                   type="password" 
                   value={customGeminiKey}
                   onChange={(e) => setCustomGeminiKey(e.target.value)}
-                  placeholder="Leave blank for system default"
+                  placeholder="Enter your Gemini API Key"
                   className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
                 />
               </div>
@@ -322,7 +324,7 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
             <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                  Status: {localStorage.getItem('custom_canvas_token') ? <span className="text-emerald-500">Custom Key Active</span> : <span className="text-indigo-500">System Default Used</span>}
+                  Status: {localStorage.getItem('custom_canvas_token') ? <span className="text-emerald-500">Custom Key Active</span> : <span className="text-red-500">Missing Key</span>}
                   {localStorage.getItem('custom_canvas_token_expiry') && <span className="ml-2 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 px-2 py-1 rounded-md">Expires: {new Date(localStorage.getItem('custom_canvas_token_expiry')!).toLocaleDateString()}</span>}
                 </p>
                 <button 
