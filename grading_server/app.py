@@ -24,6 +24,11 @@ os.environ["TEMP"] = workspace_tmp
 os.environ["TMP"] = workspace_tmp
 tempfile.tempdir = workspace_tmp
 
+# Ensure repo root is importable when this file is launched as a script
+# (Streamlit Cloud, `python grading_server/app.py`, etc.)
+if workspace_dir not in sys.path:
+    sys.path.insert(0, workspace_dir)
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langgraph.graph import StateGraph, END
@@ -1266,7 +1271,11 @@ def _extract_ipynb(file_bytes: bytes) -> str:
     return "\n".join(parts).strip()
 
 
-if __name__ == "__main__":
+def _running_under_streamlit() -> bool:
+    return "streamlit" in sys.modules or bool(os.environ.get("STREAMLIT_SERVER_PORT"))
+
+
+if __name__ == "__main__" and not _running_under_streamlit():
     print(f"Starting Flask server on port {FLASK_PORT}...")
     # use_reloader=False: Windows watchdog reloads kill in-flight grade/ingest
     # requests with "cannot schedule new futures after shutdown".
