@@ -11,7 +11,7 @@
 
 > **Project status:** Early-stage research and development project at the University of South Florida College of Education, VISTA Lab. EduConnect AI provides instructor-reviewable draft grades and feedback; it does not replace educator judgment.
 
-![EduConnect AI](docs/images/logo.png)
+![EduConnect AI](https://github.com/Karthikeya22/EduConnect-AI/blob/main/logo-EduConnect%20AI.png)
 
 ## Overview
 
@@ -23,7 +23,7 @@ Instead of treating an LLM score as the answer, EduConnect uses a **reasoning-ba
 
 ### Product walkthrough
 
-[![Watch the EduConnect AI demo](https://img.youtube.com/vi/RJ5QKtY_peQ/hqdefault.jpg)](https://youtu.be/1Hw0SclGrQc)
+[![Watch the EduConnect AI demo]()](https://youtu.be/1Hw0SclGrQc)
 
 ▶️ **[Watch the 2-minute EduConnect AI walkthrough](https://youtu.be/1Hw0SclGrQc)**
 
