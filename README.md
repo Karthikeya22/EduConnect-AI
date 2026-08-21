@@ -23,7 +23,9 @@ Instead of treating an LLM score as the answer, EduConnect uses a **reasoning-ba
 
 ### Product walkthrough
 
-[![Watch the EduConnect AI demo]()](https://youtu.be/1Hw0SclGrQc)
+### Product walkthrough
+
+[![Watch the EduConnect AI demo](https://img.youtube.com/vi/1Hw0SclGrQc/maxresdefault.jpg)](https://youtu.be/1Hw0SclGrQc)
 
 ▶️ **[Watch the 2-minute EduConnect AI walkthrough](https://youtu.be/1Hw0SclGrQc)**
 
