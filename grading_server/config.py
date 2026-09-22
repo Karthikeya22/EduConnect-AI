@@ -30,7 +30,8 @@ def _require(key: str, *fallback_keys: str) -> str:
 
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
-GEMINI_API_KEY: str = _require("GEMINI_API_KEY", "VITE_GEMINI_API_KEY")
+# Optional at process start — grading/ingest require BYOK via request headers.
+GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("VITE_GEMINI_API_KEY")
 
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL: str = _require("SUPABASE_URL", "VITE_SUPABASE_URL")
@@ -43,7 +44,9 @@ CANVAS_BASE_URL: str = os.getenv(
 
 # ── Server ────────────────────────────────────────────────────────────────────
 FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5557"))
-FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "true").lower() == "true"
+# Default off on Render/Railway/Fly; on locally unless FLASK_DEBUG is set.
+_default_debug = "false" if os.getenv("RENDER") or os.getenv("RAILWAY_ENVIRONMENT") else "true"
+FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", _default_debug).lower() == "true"
 
 # ── Model Config ──────────────────────────────────────────────────────────────
 GEMINI_GRADING_MODEL: str = os.getenv("GEMINI_GRADING_MODEL", "models/gemini-2.5-flash")

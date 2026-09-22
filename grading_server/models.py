@@ -43,6 +43,9 @@ class CriterionVerdict(BaseModel):
         description="The core concepts required to fully satisfy this criterion.",
     )
     ai_generated: bool = False
+    material_alignment: Literal["supports", "neutral", "contradicts"] = "neutral"
+    placement_issue: bool = False
+    ungrounded_full: bool = False
 
 
 class CritiqueResult(BaseModel):
@@ -61,6 +64,7 @@ class CritiqueResult(BaseModel):
     flag_for_human: bool = Field(
         ..., description="True if confidence < 0.65."
     )
+    reasoning: str = ""
 
 
 class GradingOutput(BaseModel):

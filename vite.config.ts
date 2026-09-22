@@ -13,6 +13,11 @@ export default defineConfig(({ mode }) => {
             target: 'https://usflearn.instructure.com',
             changeOrigin: true,
             rewrite: (path) => path.replace(/^\/canvas-api/, '')
+          },
+          '/grading-api': {
+            target: 'http://127.0.0.1:5557',
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/grading-api/, '')
           }
         }
       },

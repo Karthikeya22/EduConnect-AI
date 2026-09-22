@@ -10,10 +10,116 @@ import traceback
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from grading_server.utils.supabase_client import get_supabase
-from grading_server.utils.gemini_client import embed_text, embed_texts
+from grading_server.utils.llm_client import embed_texts as llm_embed_texts
+from grading_server.utils.llm_registry import get_provider
 
 
 _splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+
+_SCHEMA_MISSING_MARKERS = (
+    "pgrst205",
+    "pgrst204",
+    "does not exist",
+    "could not find the table",
+    "could not find the",
+    "schema cache",
+)
+
+
+def _is_schema_missing_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return any(marker in msg for marker in _SCHEMA_MISSING_MARKERS)
+
+
+def embed_texts(texts: list[str], api_key: str | None = None, provider: str | None = None) -> list[list[float]]:
+    """Module-level embed helper (patchable in tests)."""
+    if not provider or not api_key:
+        raise ValueError("BYOK required: provider and api_key are required for embeddings")
+    return llm_embed_texts(texts, provider=provider, api_key=api_key)
+
+
+async def _embed(texts: list[str], *, provider: str, api_key: str) -> list[list[float]]:
+    return await asyncio.to_thread(embed_texts, texts, api_key, provider)
+
+
+async def set_embedding_meta(
+    *,
+    scope_key: str,
+    embedding_provider: str,
+    assignment_id: str | None = None,
+    course_id: str | None = None,
+) -> None:
+    """Persist which provider produced embeddings for this scope."""
+    try:
+        cfg = get_provider(embedding_provider)
+        sb = get_supabase()
+        row = {
+            "scope_key": scope_key,
+            "assignment_id": assignment_id,
+            "course_id": course_id,
+            "embedding_provider": cfg.id,
+            "embedding_model": cfg.embedding_model,
+        }
+
+        def _upsert():
+            sb.table("assignment_embedding_meta").upsert(
+                row, on_conflict="scope_key"
+            ).execute()
+
+        await asyncio.to_thread(_upsert)
+    except Exception as e:
+        if not _is_schema_missing_error(e):
+            print(f"[embedding_meta] upsert failed: {e}")
+
+
+async def get_embedding_meta(scope_key: str) -> dict | None:
+    try:
+        sb = get_supabase()
+
+        def _sel():
+            return (
+                sb.table("assignment_embedding_meta")
+                .select("*")
+                .eq("scope_key", scope_key)
+                .limit(1)
+                .execute()
+            )
+
+        resp = await asyncio.to_thread(_sel)
+        rows = resp.data or []
+        return rows[0] if rows else None
+    except Exception as e:
+        if not _is_schema_missing_error(e):
+            print(f"[embedding_meta] select failed: {e}")
+        return None
+
+
+async def assert_embedding_provider_compatible(
+    *,
+    assignment_id: str,
+    course_id: str | None,
+    provider: str,
+) -> None:
+    """
+    Raise RuntimeError with code REINGEST_REQUIRED if stored embeddings
+    were produced by a different provider.
+    """
+    keys = [f"assignment:{assignment_id}"]
+    if course_id:
+        keys.append(f"course:{course_id}")
+
+    for key in keys:
+        meta = await get_embedding_meta(key)
+        if not meta:
+            continue
+        stored = (meta.get("embedding_provider") or "").strip().lower()
+        if stored and stored != provider.strip().lower():
+            raise RuntimeError(
+                "REINGEST_REQUIRED:"
+                f"Course materials were embedded with '{stored}', but grading "
+                f"is using '{provider}'. Re-ingest materials with the current "
+                "provider before grading."
+            )
 
 
 async def ingest_course_material(
@@ -23,30 +129,27 @@ async def ingest_course_material(
     exemplars: list[dict] | None = None,
     source_name: str = "Course Material",
     api_key: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """
     Full ingestion pipeline:
     1. Chunk + embed course material text
     2. Upsert rubric criteria
     3. Optionally embed + upsert exemplars
-
-    All embedding calls are parallelized using asyncio.gather().
-    Returns summary counts.
     """
+    if not provider or not api_key:
+        raise ValueError("BYOK required: provider and api_key are required for ingest")
+
     sb = get_supabase()
 
-    # ── 1. Chunk course material ──────────────────────────────────────────────
     chunks = _splitter.split_text(course_material_text) if course_material_text else []
     if not chunks and course_material_text:
         chunks = [course_material_text[:1000]]
 
-    # ── 2. Embed chunks in parallel batches ───────────────────────────────────
     chunks_stored = 0
     if chunks:
-        # Batch embed — the SDK handles batching internally
-        chunk_embeddings = await asyncio.to_thread(embed_texts, chunks, api_key)
+        chunk_embeddings = await _embed(chunks, provider=provider, api_key=api_key)
 
-        # Build rows for upsert
         chunk_rows = []
         for i, (text, emb) in enumerate(zip(chunks, chunk_embeddings)):
             chunk_rows.append({
@@ -57,16 +160,12 @@ async def ingest_course_material(
                 "embedding": emb,
             })
 
-        # Assignment-description chunks are covered by a *partial* unique index
-        # (assignment_id, chunk_index) WHERE canvas_file_id IS NULL, which
-        # ON CONFLICT cannot infer, so replace the rows explicitly instead.
         def _write_assignment_chunks():
             try:
                 sb.table("course_material_chunks").delete().eq(
                     "assignment_id", str(assignment_id)
                 ).is_("canvas_file_id", "null").execute()
             except Exception:
-                # Pre-migration schema has no canvas_file_id column.
                 sb.table("course_material_chunks").delete().eq(
                     "assignment_id", str(assignment_id)
                 ).execute()
@@ -75,7 +174,6 @@ async def ingest_course_material(
         await asyncio.to_thread(_write_assignment_chunks)
         chunks_stored = len(chunk_rows)
 
-    # ── 3. Upsert rubric criteria ─────────────────────────────────────────────
     criteria_stored = 0
     if rubric_criteria:
         criteria_rows = []
@@ -96,14 +194,12 @@ async def ingest_course_material(
         )
         criteria_stored = len(criteria_rows)
 
-    # ── 4. Embed + upsert exemplars (parallel) ───────────────────────────────
     exemplars_stored = 0
     if exemplars:
-        # Extract texts for batch embedding
         exemplar_texts = [ex["submission_text"] for ex in exemplars]
-
-        # Embed all exemplar texts in one call
-        exemplar_embeddings = await asyncio.to_thread(embed_texts, exemplar_texts, api_key)
+        exemplar_embeddings = await _embed(
+            exemplar_texts, provider=provider, api_key=api_key
+        )
 
         exemplar_rows = []
         for ex, emb in zip(exemplars, exemplar_embeddings):
@@ -124,11 +220,18 @@ async def ingest_course_material(
         )
         exemplars_stored = len(exemplar_rows)
 
+    await set_embedding_meta(
+        scope_key=f"assignment:{assignment_id}",
+        embedding_provider=provider,
+        assignment_id=str(assignment_id),
+    )
+
     return {
         "status": "success",
         "chunks_stored": chunks_stored,
         "criteria_stored": criteria_stored,
         "exemplars_stored": exemplars_stored,
+        "embedding_provider": provider,
     }
 
 
@@ -140,64 +243,62 @@ async def delete_assignment_data(assignment_id: str) -> dict:
     sb = get_supabase()
 
     def _delete():
-        # Delete in reverse dependency order
         ex_resp = sb.table("exemplars").delete().eq("assignment_id", assignment_id).execute()
-        cr_resp = sb.table("rubric_criteria").delete().eq("assignment_id", assignment_id).execute()
         ch_resp = sb.table("course_material_chunks").delete().eq("assignment_id", assignment_id).execute()
+        cr_resp = sb.table("rubric_criteria").delete().eq("assignment_id", assignment_id).execute()
+        try:
+            sb.table("assignment_embedding_meta").delete().eq(
+                "scope_key", f"assignment:{assignment_id}"
+            ).execute()
+        except Exception:
+            pass
         return {
-            "chunks_deleted": len(ch_resp.data) if ch_resp.data else 0,
-            "criteria_deleted": len(cr_resp.data) if cr_resp.data else 0,
-            "exemplars_deleted": len(ex_resp.data) if ex_resp.data else 0,
+            "exemplars": len(ex_resp.data or []),
+            "chunks": len(ch_resp.data or []),
+            "criteria": len(cr_resp.data or []),
         }
 
     counts = await asyncio.to_thread(_delete)
-    return {"status": "success", **counts}
+    return {
+        "status": "success",
+        "chunks_deleted": counts.get("chunks", 0),
+        "criteria_deleted": counts.get("criteria", 0),
+        "exemplars_deleted": counts.get("exemplars", 0),
+    }
+
+
+def _lookup_course_file_sync(course_id: str, canvas_file_id: str):
+    sb = get_supabase()
+    return (
+        sb.table("course_file_ingest")
+        .select("*")
+        .eq("course_id", str(course_id))
+        .eq("canvas_file_id", str(canvas_file_id))
+        .limit(1)
+        .execute()
+    )
 
 
 async def lookup_course_file(course_id: str, canvas_file_id: str) -> dict | None:
-    sb = get_supabase()
-
-    def _q():
-        resp = (
-            sb.table("course_file_ingest")
-            .select("*")
-            .eq("course_id", str(course_id))
-            .eq("canvas_file_id", str(canvas_file_id))
-            .limit(1)
-            .execute()
-        )
-        return (resp.data or [None])[0]
-
     try:
-        return await asyncio.to_thread(_q)
+        resp = await asyncio.to_thread(_lookup_course_file_sync, course_id, canvas_file_id)
+        rows = resp.data or []
+        return rows[0] if rows else None
     except Exception as e:
-        print(f"[course_cache] lookup failed (schema missing?): {e}")
-        return None
-
-
-_SCHEMA_MISSING_MARKERS = (
-    "pgrst205",
-    "pgrst204",
-    "does not exist",
-    "could not find the table",
-    "could not find the",
-    "schema cache",
-)
-
-
-def _is_schema_missing_error(err: Exception) -> bool:
-    """True when Supabase reports the course-cache schema as absent."""
-    msg = str(err).lower()
-    return any(marker in msg for marker in _SCHEMA_MISSING_MARKERS)
+        if _is_schema_missing_error(e):
+            return None
+        raise
 
 
 async def _upsert_registry(row: dict) -> None:
     sb = get_supabase()
-    await asyncio.to_thread(
-        lambda: sb.table("course_file_ingest")
-        .upsert(row, on_conflict="course_id,canvas_file_id")
-        .execute()
-    )
+
+    def _up():
+        sb.table("course_file_ingest").upsert(
+            row, on_conflict="course_id,canvas_file_id"
+        ).execute()
+
+    await asyncio.to_thread(_up)
 
 
 async def ingest_course_file(
@@ -209,32 +310,36 @@ async def ingest_course_file(
     course_material_text: str,
     assignment_id: str | None = None,
     api_key: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Ingest one Canvas file into course-scoped chunk cache, or skip if fresh."""
+    if not provider or not api_key:
+        raise ValueError("BYOK required: provider and api_key are required for ingest")
+
     updated_at = updated_at or ""
     existing = await lookup_course_file(course_id, canvas_file_id)
     if existing and existing.get("status") == "ready" and (existing.get("updated_at") or "") == updated_at:
-        return {
-            "status": "success",
-            "skipped": True,
-            "cached": True,
-            "chunks_stored": int(existing.get("chunk_count") or 0),
-        }
+        meta = await get_embedding_meta(f"course:{course_id}")
+        stored = (meta or {}).get("embedding_provider")
+        if not stored or stored == provider:
+            return {
+                "status": "success",
+                "skipped": True,
+                "cached": True,
+                "chunks_stored": int(existing.get("chunk_count") or 0),
+            }
 
     sb = get_supabase()
-    # Course files are shared across assignments, so they are stamped with a
-    # course-scoped id. Using the triggering assignment id would let
-    # delete_assignment_data() wipe chunks other assignments still rely on.
     aid = f"course:{course_id}"
 
     async def _legacy_fallback() -> dict:
-        """Ingest assignment-scoped when the course-cache schema is missing."""
         result = await ingest_course_material(
             assignment_id=str(assignment_id or aid),
             course_material_text=course_material_text,
             rubric_criteria=[],
             source_name=filename,
             api_key=api_key,
+            provider=provider,
         )
         return {**result, "skipped": False, "cached": False, "course_cache": False}
 
@@ -261,7 +366,7 @@ async def ingest_course_file(
         if not chunks:
             raise ValueError("No text extracted from file")
 
-        embeddings = await asyncio.to_thread(embed_texts, chunks, api_key)
+        embeddings = await _embed(chunks, provider=provider, api_key=api_key)
         chunk_rows = []
         for i, (text, emb) in enumerate(zip(chunks, embeddings)):
             chunk_rows.append({
@@ -274,9 +379,6 @@ async def ingest_course_file(
                 "embedding": emb,
             })
 
-        # Replace prior chunks for this course file. The (course_id,
-        # canvas_file_id, chunk_index) unique index is partial, so ON CONFLICT
-        # cannot infer it — delete then insert instead of upserting.
         def _write():
             sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
                 "canvas_file_id", str(canvas_file_id)
@@ -302,11 +404,18 @@ async def ingest_course_file(
             "last_error": None,
             "ingested_at": datetime.now(timezone.utc).isoformat(),
         })
+        await set_embedding_meta(
+            scope_key=f"course:{course_id}",
+            embedding_provider=provider,
+            course_id=str(course_id),
+            assignment_id=str(assignment_id) if assignment_id else None,
+        )
         return {
             "status": "success",
             "skipped": False,
             "cached": False,
             "chunks_stored": len(chunk_rows),
+            "embedding_provider": provider,
         }
     except Exception as e:
         traceback.print_exc()
@@ -323,7 +432,6 @@ async def ingest_course_file(
         except Exception:
             pass
         raise
-
 
 async def list_course_file_status(course_id: str) -> list[dict]:
     sb = get_supabase()

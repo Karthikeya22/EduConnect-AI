@@ -16,7 +16,7 @@ export const GradingResult: React.FC<GradingResultProps> = ({ result, rubricCont
 Content: ${result.content_score}/${result.content_max || '?'} | Structure: ${result.structure_score}/${result.structure_max || '?'} | Total: ${result.total}/${result.total_max || '?'}
 
 ${result.criteria_verdicts.map(v => 
-  `[${v.criterion_name}] (${v.status}): ${v.justification}${v.missing_keywords.length > 0 ? `\nMissing: ${v.missing_keywords.join(', ')}` : ''}`
+  `[${v.criterion_name}] ${v.score}/${v.max_score} (${v.status}): ${v.justification}${v.missing_keywords.length > 0 ? `\nMissing: ${v.missing_keywords.join(', ')}` : ''}`
 ).join('\n\n')}
 
 ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''}`;

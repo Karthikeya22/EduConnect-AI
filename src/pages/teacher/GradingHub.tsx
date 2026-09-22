@@ -12,8 +12,265 @@ import { UniversalPreviewer, prefetchPreviewFile } from '../../components/ui/Uni
 import { selectPhaseFiles, CanvasCourseFile } from '../../lib/courseFileRanker';
 import { CourseMaterialsModal } from '../../components/modals/CourseMaterialsModal';
 import { loadAiGrades, saveAiGrade, formatAiGradeLabel } from '../../lib/aiGradeCache';
+import { llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
+
+function htmlToPlainText(html: string): string {
+  if (!html) return '';
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    return (doc.body.textContent || '').replace(/\u00a0/g, ' ').trim();
+  } catch {
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+}
+
+/** True when Canvas stored only an LTI/external launch URL as the "submission". */
+function getExternalSubmissionUrl(html: string): string | null {
+  const text = htmlToPlainText(html);
+  if (!text) return null;
+  // Canvas sometimes inserts <br>/whitespace into long launch URLs
+  const collapsed = text.replace(/\s+/g, '');
+  const match = collapsed.match(/^(https?:\/\/\S+)$/i);
+  if (!match) return null;
+  const url = match[1];
+  if (/\/lti\//i.test(url) || /harmonize/i.test(url) || /42lines\.net/i.test(url)) return url;
+  return null;
+}
+
+const CANVAS_WEB_BASE = 'https://usflearn.instructure.com';
+
+/** Fetch submission from Canvas (API + signed LTI launch) and render it in-app. */
+function ExternalSubmissionViewer({
+  url,
+  courseId,
+  assignmentId,
+  studentId,
+}: {
+  url: string;
+  courseId: string;
+  assignmentId: string;
+  studentId: string;
+}) {
+  const [html, setHtml] = useState<string | null>(null);
+  const [text, setText] = useState<string | null>(null);
+  const [launchUrl, setLaunchUrl] = useState<string | null>(null);
+  const [speedgraderUrl, setSpeedgraderUrl] = useState<string | null>(null);
+  const [toolName, setToolName] = useState<string>('Canvas submission');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<'content' | 'text' | 'embed'>('content');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setHtml(null);
+    setText(null);
+    setLaunchUrl(null);
+    const fallbackSpeedGrader =
+      courseId && assignmentId && studentId
+        ? `${CANVAS_WEB_BASE}/courses/${courseId}/gradebook/speed_grader?assignment_id=${assignmentId}&student_id=${studentId}`
+        : null;
+    setSpeedgraderUrl(fallbackSpeedGrader);
+
+    (async () => {
+      try {
+        const canvasToken = localStorage.getItem('custom_canvas_token') || '';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (canvasToken) headers['X-Canvas-Token'] = canvasToken;
+
+        const res = await fetch(`${API_BASE_URL}/api/resolve-external-submission`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            url,
+            course_id: courseId,
+            assignment_id: assignmentId,
+            student_id: studentId,
+            extract_text: true,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+
+        if (data.speedgrader_url) setSpeedgraderUrl(data.speedgrader_url);
+        if (data.tool_name) setToolName(data.tool_name);
+        if (data.launch_url) setLaunchUrl(data.launch_url);
+
+        const extractedHtml = String(data.html || '').trim();
+        const extractedText = String(data.text || '').trim();
+        const isLtiError =
+          /unknown version/i.test(extractedText) ||
+          /launch message is of an unknown version/i.test(extractedText) ||
+          /unknown version/i.test(extractedHtml);
+
+        if (extractedHtml && extractedHtml.length >= 40 && !isLtiError) {
+          setHtml(extractedHtml);
+          setText(extractedText || htmlToPlainText(extractedHtml));
+          setMode('content');
+        } else if (extractedText && extractedText.length >= 40 && !isLtiError) {
+          setText(extractedText);
+          setMode('text');
+        } else if (data.launch_url) {
+          setMode('embed');
+          if (!res.ok) setError(data.error || data.details || null);
+        } else {
+          setError(data.error || data.details || 'Could not load this submission from Canvas.');
+          setMode('embed');
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setError(e?.message || 'Could not load submission from Canvas');
+          setMode('embed');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [url, courseId, assignmentId, studentId]);
+
+  const openHref = speedgraderUrl || launchUrl || url;
+  const hasContent = Boolean((html && html.length >= 40) || (text && text.length >= 40));
+
+  return (
+    <div className="h-full flex flex-col bg-white dark:bg-[#0F172A] min-h-0">
+      <div className="shrink-0 px-4 py-2.5 border-b border-zinc-200 dark:border-white/5 flex items-center justify-between gap-3 bg-zinc-50 dark:bg-white/5">
+        <div className="min-w-0">
+          <div className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Student submission</div>
+          <div className="text-[11px] text-zinc-400 truncate">Loaded from Canvas · {toolName}</div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="flex bg-white dark:bg-black/20 p-0.5 rounded-lg border border-zinc-200 dark:border-white/10">
+            <button
+              type="button"
+              onClick={() => setMode('content')}
+              disabled={!html}
+              className={`px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-40 ${
+                mode === 'content' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              Content
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('text')}
+              disabled={!text}
+              className={`px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-40 ${
+                mode === 'text' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              Text
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('embed')}
+              disabled={!launchUrl}
+              className={`px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-40 ${
+                mode === 'embed' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+            >
+              Live
+            </button>
+          </div>
+          <a
+            href={openHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90"
+          >
+            {speedgraderUrl ? 'SpeedGrader' : 'Open'}
+          </a>
+        </div>
+      </div>
+
+      {loading && (
+        <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 gap-3">
+          <Icons.IconRefresh className="w-7 h-7 animate-spin text-[var(--brand-primary)]" />
+          <div className="text-[10px] font-black uppercase tracking-widest">Fetching submission from Canvas…</div>
+        </div>
+      )}
+
+      {!loading && mode === 'content' && html && (
+        <div
+          className="flex-1 overflow-y-auto p-8 prose dark:prose-invert max-w-none text-zinc-800 dark:text-zinc-200 break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:no-underline"
+          dangerouslySetInnerHTML={{ __html: prepareSubmissionHtml(html) }}
+        />
+      )}
+
+      {!loading && mode === 'text' && text && (
+        <div className="flex-1 overflow-y-auto p-8 text-sm leading-relaxed text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+          {text}
+        </div>
+      )}
+
+      {!loading && mode === 'embed' && launchUrl && (
+        <iframe
+          src={launchUrl}
+          title="Canvas LTI submission"
+          className="flex-1 w-full border-0 bg-white"
+          allow="clipboard-read; clipboard-write; fullscreen"
+          referrerPolicy="no-referrer-when-downgrade"
+        />
+      )}
+
+      {!loading && !hasContent && !launchUrl && (
+        <div className="flex-1 flex flex-col items-center justify-center text-center p-10 gap-3">
+          <Icons.IconAlertCircle className="w-14 h-14 text-amber-500" />
+          <h4 className="text-base font-bold text-zinc-900 dark:text-white">No submission content from Canvas</h4>
+          <p className="text-sm text-zinc-500 max-w-md">
+            {error || 'Canvas did not return readable HTML for this Harmonize submission.'}
+          </p>
+          {openHref && (
+            <a
+              href={openHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 px-5 py-2.5 rounded-xl bg-[var(--brand-primary)] text-white text-[10px] font-black uppercase tracking-widest"
+            >
+              Open in Canvas SpeedGrader
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Prepare Canvas HTML for the grading viewer:
+ * - unwrap <a> so fragments aren't shown as blue links
+ * - drop iframes/images that show as broken loaders under pasted URLs
+ */
+function prepareSubmissionHtml(html: string): string {
+  if (!html) return html;
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('img, iframe, object, embed, video, audio, script, style').forEach((el) => el.remove());
+    doc.querySelectorAll('a').forEach((anchor) => {
+      const parent = anchor.parentNode;
+      if (!parent) return;
+      while (anchor.firstChild) {
+        parent.insertBefore(anchor.firstChild, anchor);
+      }
+      parent.removeChild(anchor);
+    });
+    doc.querySelectorAll('[style]').forEach((el) => {
+      const style = (el.getAttribute('style') || '')
+        .replace(/color\s*:[^;]+;?/gi, '')
+        .replace(/text-decoration\s*:[^;]+;?/gi, '');
+      if (style.trim()) el.setAttribute('style', style);
+      else el.removeAttribute('style');
+    });
+    return doc.body.innerHTML;
+  } catch {
+    return html
+      .replace(/<\/?a\b[^>]*>/gi, '')
+      .replace(/<(img|iframe|object|embed|video|audio|script|style)\b[^>]*>/gi, '');
+  }
+}
 
 async function fetchViaCanvasProxy(url: string): Promise<Response> {
   const token = localStorage.getItem('custom_canvas_token') || '';
@@ -291,6 +548,9 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
               }
               return allAtts;
             })(),
+            submissionType: s.submission_type || null,
+            submissionUrl: s.url || null,
+            previewUrl: s.preview_url || null,
             body: (() => {
               let content = s.body || '';
               // For graded discussions, Canvas returns student responses inside discussion_entries
@@ -301,9 +561,19 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
               if (!content && s.submission_history && Array.isArray(s.submission_history) && s.submission_history.length > 0) {
                  const latestHistory = s.submission_history[s.submission_history.length - 1];
                  if (latestHistory && latestHistory.body) content = latestHistory.body;
+                 else if (latestHistory && latestHistory.url) content = latestHistory.url;
                  else if (latestHistory && latestHistory.discussion_entries) {
                     content = latestHistory.discussion_entries.map((e: any) => e.message || '').filter(Boolean).join('<hr class="my-4 border-zinc-200 dark:border-white/10" />');
                  }
+              }
+              // basic_lti_launch / online_url: Canvas stores the tool URL in `url`, often with empty body
+              const launchUrl = s.url || '';
+              const bodyIsPlaceholder =
+                !content ||
+                /^submission type:/i.test(content.trim()) ||
+                /^no submission content/i.test(content.trim());
+              if (launchUrl && (bodyIsPlaceholder || getExternalSubmissionUrl(content))) {
+                content = launchUrl;
               }
               if (!content) {
                  content = s.submission_type ? `Submission type: ${s.submission_type}` : 'No submission content.';
@@ -439,11 +709,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     const rubric = currentItem?.rubric || [];
     const materialText = currentItem?.description || currentItem?.message || '';
 
-    const headers: any = { 'Content-Type': 'application/json' };
-    const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
-    if (customGeminiKey) {
-      headers['X-Gemini-Api-Key'] = customGeminiKey;
-    }
+    const headers: any = { 'Content-Type': 'application/json', ...llmAuthHeaders() };
+    requireLlmCredentials();
 
     const res = await fetch(`${API_BASE_URL}/api/ingest`, {
       method: 'POST',
@@ -479,7 +746,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       setIngestStatus({ type: 'loading', msg: 'Reading class materials, please wait...' });
       try {
         const currentItem = assignments.find(a => String(a.id) === selectedAssignment) || discussions.find(d => String(d.id) === selectedAssignment);
-        const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
+        requireLlmCredentials();
 
         await postAssignmentIngest(selectedAssignment);
 
@@ -501,10 +768,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             canvas_token: localStorage.getItem('custom_canvas_token') || ''
           };
 
-          const fileHeaders: any = { 'Content-Type': 'application/json' };
-          if (customGeminiKey) {
-            fileHeaders['X-Gemini-Api-Key'] = customGeminiKey;
-          }
+          const fileHeaders: any = { 'Content-Type': 'application/json', ...llmAuthHeaders() };
 
           const res = await fetch(`${API_BASE_URL}/api/ingest/canvas-url`, {
             method: 'POST',
@@ -594,11 +858,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
       const backendReq = async () => {
         let body: any;
-        let headers: any = {};
-        const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
-        if (customGeminiKey) {
-          headers['X-Gemini-Api-Key'] = customGeminiKey;
-        }
+        let headers: any = { ...llmAuthHeaders() };
+        requireLlmCredentials();
 
         const canvasToken = localStorage.getItem('custom_canvas_token') || '';
         if (canvasToken) {
@@ -610,6 +871,13 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           !rawBody ||
           /^submission type:/i.test(rawBody.trim()) ||
           /^no submission content/i.test(rawBody.trim());
+
+        const assignMeta = assignments.find(a => String(a.id) === selectedAssignment)
+          || discussions.find(d => String(d.id) === selectedAssignment);
+        const assignmentPayload = {
+          assignment_name: (assignMeta as any)?.name || (assignMeta as any)?.title || '',
+          assignment_description: (assignMeta as any)?.description || (assignMeta as any)?.message || '',
+        };
 
         if (student.attachments && student.attachments.length > 0) {
           headers['Content-Type'] = 'application/json';
@@ -623,7 +891,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             file_urls: student.attachments.map((a: any) => ({
               url: a.url,
               filename: a.filename || a.display_name || 'submission.bin'
-            }))
+            })),
+            ...assignmentPayload,
           });
         } else {
           headers['Content-Type'] = 'application/json';
@@ -632,7 +901,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             course_id: selectedCourse,
             student_id: studentId,
             submission_text: student.body || '',
-            canvas_token: canvasToken
+            canvas_token: canvasToken,
+            ...assignmentPayload,
           });
         }
 
@@ -647,8 +917,14 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (data.error === "DATABASE_DIMENSION_MISMATCH") {
              throw new Error(`Database Error: ${data.details}`);
           }
+          if (data.error === "BYOK_REQUIRED" || res.status === 401) {
+             throw new Error(data.message || data.error || "Verify your LLM provider API key before grading.");
+          }
+          if (data.error === "REINGEST_REQUIRED" || res.status === 409) {
+             throw new Error(data.message || "Re-ingest course materials with your current LLM provider, then grade again.");
+          }
           if (res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
-             throw new Error(data.error || "Gemini API quota exceeded. Wait a moment and retry.");
+             throw new Error(data.error || "LLM API quota exceeded. Wait a moment and retry.");
           }
           // Prefer actionable error; fall back to details so "Internal computation error" isn't opaque
           const msg = data.error || data.details || "Grading failed";
@@ -1461,34 +1737,55 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                               );
                             })()
                           ) : student.body ? (
-                            <div className="h-full bg-white dark:bg-[#0F172A] p-12 overflow-y-auto prose dark:prose-invert max-w-none text-zinc-800 dark:text-zinc-200" 
-                                dangerouslySetInnerHTML={{ 
-                                  __html: (() => {
-                                    let content = typeof student.body === 'string' ? student.body : JSON.stringify(student.body);
-                                    if (highlightText) {
-                                      const words = highlightText.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-                                      if (words.length > 0) {
-                                        const fuzzyPattern = words.join('(?:\\s|&nbsp;|<[^>]+>)+');
-                                        try {
-                                          const regex = new RegExp(`(${fuzzyPattern})`, 'gi');
-                                          if (regex.test(content)) {
-                                            content = content.replace(regex, '<mark id="evidence-anchor-highlight" class="bg-[var(--brand-primary)]/10 dark:bg-[var(--brand-primary)]/30 text-inherit px-1 rounded transition-all duration-500">$1</mark>');
-                                            setTimeout(() => {
-                                              const mark = document.getElementById('evidence-anchor-highlight');
-                                              if (mark) {
-                                                mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                                              }
-                                            }, 200);
+                            (() => {
+                              const rawBody = typeof student.body === 'string' ? student.body : JSON.stringify(student.body);
+                              const externalUrl =
+                                getExternalSubmissionUrl(rawBody) ||
+                                (student.submissionUrl && getExternalSubmissionUrl(student.submissionUrl)
+                                  ? student.submissionUrl
+                                  : null);
+                              if (externalUrl && selectedCourse && selectedAssignment) {
+                                return (
+                                  <ExternalSubmissionViewer
+                                    url={externalUrl}
+                                    courseId={String(selectedCourse)}
+                                    assignmentId={String(selectedAssignment)}
+                                    studentId={String(student.id)}
+                                  />
+                                );
+                              }
+                              return (
+                                <div
+                                  className="h-full bg-white dark:bg-[#0F172A] p-12 overflow-y-auto prose dark:prose-invert max-w-none text-zinc-800 dark:text-zinc-200 break-words [overflow-wrap:anywhere] [&_a]:text-inherit [&_a]:no-underline [&_a]:pointer-events-none"
+                                  dangerouslySetInnerHTML={{
+                                    __html: (() => {
+                                      let content = prepareSubmissionHtml(rawBody);
+                                      if (highlightText) {
+                                        const words = highlightText.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+                                        if (words.length > 0) {
+                                          const fuzzyPattern = words.join('(?:\\s|&nbsp;|<[^>]+>)+');
+                                          try {
+                                            const regex = new RegExp(`(${fuzzyPattern})`, 'gi');
+                                            if (regex.test(content)) {
+                                              content = content.replace(regex, '<mark id="evidence-anchor-highlight" class="bg-[var(--brand-primary)]/10 dark:bg-[var(--brand-primary)]/30 text-inherit px-1 rounded transition-all duration-500">$1</mark>');
+                                              setTimeout(() => {
+                                                const mark = document.getElementById('evidence-anchor-highlight');
+                                                if (mark) {
+                                                  mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                                }
+                                              }, 200);
+                                            }
+                                          } catch (e) {
+                                            console.error("Highlight regex error", e);
                                           }
-                                        } catch (e) {
-                                          console.error("Highlight regex error", e);
                                         }
                                       }
-                                    }
-                                    return content;
-                                  })()
-                                }} 
-                            />
+                                      return content;
+                                    })()
+                                  }}
+                                />
+                              );
+                            })()
                           ) : (
                             <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 bg-white dark:bg-[#0F172A] p-12">
                               <Icons.IconFile className="w-16 h-16 mb-4 text-zinc-300 dark:text-zinc-700" />

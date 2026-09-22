@@ -9,34 +9,58 @@ export const canvasAPI = {
         return {};
     },
 
-    async syncTokenWithBackend(email: string, token: string, expiry: string, geminiKey?: string) {
+    async syncPreferences(
+        email: string,
+        updates: {
+            canvas_token?: string;
+            canvas_token_expiry?: string;
+            llm_api_key?: string;
+            llm_provider?: string;
+        },
+    ) {
         try {
             const payload: any = {
-                teacher_email: email, 
-                canvas_token: token, 
-                canvas_token_expiry: expiry 
+                teacher_email: email,
+                ...updates,
             };
-            if (geminiKey !== undefined) {
-                payload.gemini_api_key = geminiKey;
+            if (updates.llm_api_key !== undefined) {
+                payload.gemini_api_key = updates.llm_api_key;
             }
-            
+
             const { error } = await supabase
                 .from('teacher_preferences')
                 .upsert(payload, { onConflict: 'teacher_email' });
-            
+
             if (error) throw error;
             return true;
         } catch (e) {
-            console.error("Failed to sync Canvas token with backend:", e);
+            console.error("Failed to sync preferences with backend:", e);
             throw e;
         }
+    },
+
+    /** @deprecated use syncPreferences — kept for call-site compatibility */
+    async syncTokenWithBackend(
+        email: string,
+        token: string,
+        expiry: string,
+        llmApiKey?: string,
+        llmProvider?: string,
+    ) {
+        const updates: any = {
+            canvas_token: token,
+            canvas_token_expiry: expiry,
+        };
+        if (llmApiKey !== undefined) updates.llm_api_key = llmApiKey;
+        if (llmProvider !== undefined) updates.llm_provider = llmProvider;
+        return this.syncPreferences(email, updates);
     },
 
     async fetchTokenFromBackend(email: string) {
         try {
             const { data, error } = await supabase
                 .from('teacher_preferences')
-                .select('canvas_token, canvas_token_expiry, gemini_api_key')
+                .select('canvas_token, canvas_token_expiry, gemini_api_key, llm_api_key, llm_provider')
                 .eq('teacher_email', email)
                 .single();
             

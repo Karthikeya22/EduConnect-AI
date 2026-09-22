@@ -1,7 +1,8 @@
 """
 Robust Gemini Client (Threaded-Async Strategy)
-Provides async wrappers around verified sync functions.
-Enables safe and reliable parallelism in Windows environments.
+
+Legacy Gemini helpers. New code should prefer grading_server.utils.llm_client.
+Env GEMINI_API_KEY is optional; BYOK paths must pass api_key explicitly.
 """
 
 from __future__ import annotations
@@ -14,8 +15,16 @@ from google import genai
 from google.genai import types
 from grading_server.config import GEMINI_API_KEY, GEMINI_EMBEDDING_MODEL
 
-# Single global sync client
-_genai_client = genai.Client(api_key=GEMINI_API_KEY)
+# Lazy global sync client (only if env key present — for local scripts/tests)
+_genai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+
+def _client(api_key: str | None = None):
+    if api_key:
+        return genai.Client(api_key=api_key)
+    if _genai_client is not None:
+        return _genai_client
+    raise ValueError("BYOK required: no Gemini API key provided and GEMINI_API_KEY is unset")
 
 
 def _is_quota_error(err: BaseException) -> bool:
@@ -66,8 +75,8 @@ def call_gemini(
     }
     if response_schema:
         config_kwargs["response_schema"] = response_schema
-        
-    client = genai.Client(api_key=api_key) if api_key else _genai_client
+
+    client = _client(api_key)
 
     def _call():
         return client.models.generate_content(
@@ -95,7 +104,7 @@ def call_gemini_text(
     api_key: str | None = None,
 ) -> str:
     """Synchronous text-only Gemini call."""
-    client = genai.Client(api_key=api_key) if api_key else _genai_client
+    client = _client(api_key)
 
     def _call():
         return client.models.generate_content(
@@ -111,12 +120,13 @@ def call_gemini_text(
     return response.text or ""
 
 
-def embed_text(text: str) -> list[float]:
+def embed_text(text: str, api_key: str | None = None) -> list[float]:
     """Sync single embedding. Requested as 768 for database compatibility."""
     if not text: return []
+    client = _client(api_key)
 
     def _call():
-        return _genai_client.models.embed_content(
+        return client.models.embed_content(
             model=GEMINI_EMBEDDING_MODEL,
             contents=text,
             config=types.EmbedContentConfig(output_dimensionality=768)
@@ -130,8 +140,7 @@ def embed_texts(texts: list[str], api_key: str | None = None) -> list[list[float
     """Sync batch embedding. Requested as 768 for database compatibility."""
     if not texts: return []
     all_embeddings = []
-    client = genai.Client(api_key=api_key) if api_key else _genai_client
-    # Smaller batches + pacing to stay under Gemini embed rate limits
+    client = _client(api_key)
     batch_size = 32
     for i in range(0, len(texts), batch_size):
         chunk = texts[i:i + batch_size]
@@ -150,18 +159,13 @@ def embed_texts(texts: list[str], api_key: str | None = None) -> list[list[float
     return all_embeddings
 
 
-# ── Async Wrappers (Threaded) ───────────────────────────────────────────────────
-
 async def async_call_gemini(prompt: str, **kwargs) -> dict:
-    """Non-blocking call via thread pool executor."""
     return await asyncio.to_thread(call_gemini, prompt, **kwargs)
 
 
 async def async_call_gemini_text(prompt: str, **kwargs) -> str:
-    """Non-blocking text call via thread."""
     return await asyncio.to_thread(call_gemini_text, prompt, **kwargs)
 
 
-async def async_embed_texts(texts: list[str]) -> list[list[float]]:
-    """Non-blocking batch embedding."""
-    return await asyncio.to_thread(embed_texts, texts)
+async def async_embed_texts(texts: list[str], api_key: str | None = None) -> list[list[float]]:
+    return await asyncio.to_thread(embed_texts, texts, api_key)

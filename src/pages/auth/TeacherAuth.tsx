@@ -41,14 +41,29 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
       }
     } catch (e) { }
 
+    const panels = [leftSideRef.current, rightSideRef.current].filter(Boolean) as HTMLElement[];
     const ctx = gsap.context(() => {
-      if (leftSideRef.current) gsap.from(leftSideRef.current, { xPercent: -100, duration: 0.8, ease: "power4.out" });
+      if (leftSideRef.current) {
+        gsap.fromTo(
+          leftSideRef.current,
+          { xPercent: -100 },
+          { xPercent: 0, duration: 0.8, ease: "power4.out" }
+        );
+      }
       if (rightSideRef.current) {
-        gsap.from(rightSideRef.current, { xPercent: 100, duration: 0.8, ease: "power4.out" });
+        gsap.fromTo(
+          rightSideRef.current,
+          { xPercent: 100 },
+          { xPercent: 0, duration: 0.8, ease: "power4.out" }
+        );
       }
     }, containerRef);
 
-    return () => ctx.revert();
+    return () => {
+      ctx.revert();
+      // Strict Mode cleanup reverts to the "from" state (off-screen). Force panels visible.
+      if (panels.length) gsap.set(panels, { clearProps: "transform" });
+    };
   }, []);
 
   useEffect(() => {

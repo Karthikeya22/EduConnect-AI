@@ -12,7 +12,12 @@ import re
 import zipfile
 
 
-def parse_submission(file_bytes: bytes, content_type: str, api_key: str | None = None) -> str:
+def parse_submission(
+    file_bytes: bytes,
+    content_type: str,
+    api_key: str | None = None,
+    provider: str | None = None,
+) -> str:
     """
     Parse a submission file into plain text.
     Supports: application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, text/*
@@ -20,9 +25,9 @@ def parse_submission(file_bytes: bytes, content_type: str, api_key: str | None =
     ct = content_type.lower()
 
     if "pdf" in ct:
-        return _parse_pdf(file_bytes, api_key=api_key)
+        return _parse_pdf(file_bytes, api_key=api_key, provider=provider)
     elif "wordprocessingml" in ct or "docx" in ct:
-        return _parse_docx(file_bytes, api_key=api_key)
+        return _parse_docx(file_bytes, api_key=api_key, provider=provider)
     elif "presentationml" in ct or "pptx" in ct:
         return _parse_pptx(file_bytes)
     elif "ms-powerpoint" in ct or "ppt" in ct:
@@ -36,34 +41,28 @@ def parse_submission(file_bytes: bytes, content_type: str, api_key: str | None =
             raise ValueError(f"Unsupported content type: {content_type}")
 
 
-def _describe_visual(image_bytes: bytes, mime_type: str = "image/png", api_key: str | None = None) -> str:
+def _describe_visual(
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+    api_key: str | None = None,
+    provider: str | None = None,
+) -> str:
     """Describe a chart/image/table screenshot for inclusion in submission text."""
     if not image_bytes or len(image_bytes) < 200:
         return ""
+    if not api_key or not provider:
+        return ""
     try:
-        from google import genai
-        from google.genai import types
-        from grading_server.utils.gemini_client import _genai_client, _with_quota_retry
+        from grading_server.utils.llm_client import describe_image
 
-        client = genai.Client(api_key=api_key) if api_key else _genai_client
-        prompt = (
-            "You are helping grade a student submission. Describe this page/figure for a text-only grader.\n"
-            "Include: chart/table/image type, title/caption if visible, axes/legend labels, "
-            "key values or trends, and whether it is a real data visualization (not decorative).\n"
-            "Be concrete and concise (max ~180 words). Do not say the figure is missing."
-        )
-
-        def _call():
-            return client.models.generate_content(
-                model="models/gemini-2.5-flash",
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
+        # Prefer dedicated vision path; fall back to a short text note on failure.
+        try:
+            return describe_image(
+                image_bytes, mime_type, provider=provider, api_key=api_key
             )
-
-        response = _with_quota_retry(_call, max_attempts=3)
-        return (response.text or "").strip()
+        except Exception as vision_err:
+            print(f"[VISUAL EXTRACT] Vision call failed ({vision_err}); skipping figure")
+            return ""
     except Exception as e:
         print(f"[VISUAL EXTRACT] Error: {e}")
         return ""
@@ -129,17 +128,25 @@ def _extract_pdf_tables(file_bytes: bytes) -> dict[int, list[str]]:
     return out
 
 
-def _parse_pdf(file_bytes: bytes, api_key: str | None = None) -> str:
+def _parse_pdf(file_bytes: bytes, api_key: str | None = None, provider: str | None = None) -> str:
     """
     Extract PDF text + tables, and describe pages that contain figures/charts
     (vision) so graders can see visualizations that have no OCR text.
     """
     import fitz  # PyMuPDF
 
+    # Keep peak RAM down on small hosts (Render free = 512MB).
+    max_bytes = 12 * 1024 * 1024
+    if len(file_bytes) > max_bytes:
+        raise ValueError(
+            f"PDF too large ({len(file_bytes) // (1024 * 1024)}MB). "
+            "Please upload a file under 12MB for AI grading."
+        )
+
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     table_map = _extract_pdf_tables(file_bytes)
     pages: list[str] = []
-    vision_budget = 8  # cap Gemini page renders per submission
+    vision_budget = 4  # cap Gemini page renders per submission (memory + cost)
 
     for i, page in enumerate(doc):
         page_no = i + 1
@@ -153,10 +160,12 @@ def _parse_pdf(file_bytes: bytes, api_key: str | None = None) -> str:
 
         if vision_budget > 0 and _page_needs_vision(page, text):
             try:
-                # Render page so charts/images are visible to Gemini
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                # 1.0x render uses far less RAM than 1.5x on multi-page PDFs
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
                 png_bytes = pix.tobytes("png")
-                description = _describe_visual(png_bytes, "image/png", api_key=api_key)
+                pix = None
+                description = _describe_visual(png_bytes, "image/png", api_key=api_key, provider=provider)
+                png_bytes = None
                 if description:
                     chunks.append(
                         f"[FIGURE / VISUAL on page {page_no} - treat as present in the submission]\n"
@@ -203,7 +212,65 @@ def _docx_image_bytes(file_bytes: bytes, max_images: int = 6) -> list[bytes]:
     return images
 
 
-def _parse_docx(file_bytes: bytes, api_key: str | None = None) -> str:
+_SECTION_TITLE_WORDS = {
+    "introduction", "abstract", "background", "literature", "review", "methodology",
+    "methods", "results", "discussion", "conclusion", "conclusions", "references",
+    "ethics", "ethical", "considerations", "challenges", "solutions", "analysis",
+    "findings", "recommendations", "overview", "impact", "outcomes", "appendix",
+    "solution", "application", "related", "work", "bibliography", "limitations",
+}
+
+
+def _docx_paragraph_as_heading(p, text: str) -> str | None:
+    """
+    Emit a markdown heading when Word styles/formatting mark a section title.
+    Handles Heading 1–9 and common List Paragraph / bold title lines.
+    """
+    if not text or len(text) > 120:
+        return None
+    words = text.split()
+    if not (1 <= len(words) <= 10):
+        return None
+    if text.endswith((".", ",", ";", "?", "!")):
+        return None
+
+    style_name = ""
+    try:
+        style_name = (p.style.name or "").strip().lower() if p.style is not None else ""
+    except Exception:
+        style_name = ""
+
+    is_heading_style = bool(re.match(r"^heading\s*[1-9]$", style_name)) or style_name.startswith("heading")
+    is_list_para = "list" in style_name  # List Paragraph, List Number, etc.
+
+    boldish = False
+    try:
+        runs = list(p.runs or [])
+        if runs:
+            bold_chars = sum(len(r.text or "") for r in runs if r.bold)
+            total_chars = sum(len(r.text or "") for r in runs) or 1
+            boldish = (bold_chars / total_chars) >= 0.6
+    except Exception:
+        boldish = False
+
+    low = text.lower().strip(":")
+    looks_sectional = any(w in _SECTION_TITLE_WORDS for w in re.findall(r"[a-z0-9]+", low))
+    title_case = all(re.match(r"^[A-Z0-9][\w\-/'&]*$", w) for w in words if re.search(r"[A-Za-z]", w))
+
+    if is_heading_style:
+        level = 1
+        m = re.search(r"([1-9])", style_name)
+        if m:
+            level = int(m.group(1))
+        return f"{'#' * min(level, 3)} {text}"
+
+    # Word often uses List Paragraph + bold for section titles instead of Heading styles
+    if (is_list_para or boldish) and (looks_sectional or (title_case and len(words) <= 6)):
+        return f"## {text}"
+    return None
+
+
+def _parse_docx(file_bytes: bytes, api_key: str | None = None, provider: str | None = None) -> str:
     """Extract text from a DOCX (paragraphs, tables, headers/footers, figures)."""
     from docx import Document
     from docx.table import Table
@@ -233,9 +300,11 @@ def _parse_docx(file_bytes: bytes, api_key: str | None = None) -> str:
     for block in doc.element.body:
         tag = block.tag.split("}")[-1] if "}" in block.tag else block.tag
         if tag == "p":
-            text = _para_text(Paragraph(block, doc))
+            para = Paragraph(block, doc)
+            text = _para_text(para)
             if text:
-                parts.append(text)
+                heading = _docx_paragraph_as_heading(para, text)
+                parts.append(heading if heading else text)
         elif tag == "tbl":
             text = _table_text(Table(block, doc))
             if text:
@@ -288,7 +357,7 @@ def _parse_docx(file_bytes: bytes, api_key: str | None = None) -> str:
         mime = "image/png"
         if img[:3] == b"\xff\xd8\xff":
             mime = "image/jpeg"
-        description = _describe_visual(img, mime, api_key=api_key)
+        description = _describe_visual(img, mime, api_key=api_key, provider=provider)
         if description:
             parts.append(
                 f"[FIGURE / VISUAL {idx} - treat as present in the submission]\n{description}"

@@ -23,8 +23,8 @@ serve(async (req) => {
         }
 
         const url = assignmentId
-            ? `https://usflearn.instructure.com/api/v1/courses/${courseId}/assignments/${assignmentId}/submissions?include[]=user&include[]=submission_comments&include[]=submission_history&per_page=100`
-            : `https://usflearn.instructure.com/api/v1/courses/${courseId}/students/submissions?student_ids[]=all&include[]=user&include[]=assignment&include[]=submission_comments&include[]=submission_history&per_page=100`;
+            ? `https://usflearn.instructure.com/api/v1/courses/${courseId}/assignments/${assignmentId}/submissions?include[]=user&include[]=submission_comments&include[]=submission_history&include[]=discussion_entries&per_page=100`
+            : `https://usflearn.instructure.com/api/v1/courses/${courseId}/students/submissions?student_ids[]=all&include[]=user&include[]=assignment&include[]=submission_comments&include[]=submission_history&include[]=discussion_entries&per_page=100`;
 
         let data: any[] = [];
         let currentUrl: string | null = url;

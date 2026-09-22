@@ -5,6 +5,14 @@ import * as Icons from '@/src/components/ui/Icons';
 import ThemeToggle from '@/src/components/ui/ThemeToggle';
 import { canvasAPI } from '@/src/services/canvasAPI';
 import { supabase } from '@/src/lib/supabase';
+import {
+    LLM_PROVIDERS,
+    LlmProviderId,
+    getStoredLlmApiKey,
+    getStoredLlmProvider,
+    gradingApiBase,
+    saveLlmCredentials,
+} from '@/src/lib/llmProviders';
 
 interface CanvasSyncProps {
     onBack: () => void;
@@ -20,8 +28,13 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
     const [result, setResult] = useState<any>(null);
     const [errorDetails, setErrorDetails] = useState<string | null>(null);
     const [token, setToken] = useState(localStorage.getItem('custom_canvas_token') || '');
-    const [geminiKey, setGeminiKey] = useState(localStorage.getItem('custom_gemini_api_key') || '');
+    const [llmProvider, setLlmProvider] = useState<LlmProviderId | ''>(getStoredLlmProvider());
+    const [llmApiKey, setLlmApiKey] = useState(getStoredLlmApiKey());
     const [saveSuccess, setSaveSuccess] = useState(false);
+    const [canvasMsg, setCanvasMsg] = useState<string | null>(null);
+    const [llmMsg, setLlmMsg] = useState<string | null>(null);
+    const [isVerifyingCanvas, setIsVerifyingCanvas] = useState(false);
+    const [isVerifyingLlm, setIsVerifyingLlm] = useState(false);
 
     React.useEffect(() => {
         const fetchKeys = async () => {
@@ -34,9 +47,12 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
                             setToken(stored.canvas_token);
                             localStorage.setItem('custom_canvas_token', stored.canvas_token);
                         }
-                        if (stored.gemini_api_key) {
-                            setGeminiKey(stored.gemini_api_key);
-                            localStorage.setItem('custom_gemini_api_key', stored.gemini_api_key);
+                        if (stored.llm_api_key || stored.gemini_api_key) {
+                            const provider = (stored.llm_provider || 'gemini') as LlmProviderId;
+                            const key = stored.llm_api_key || stored.gemini_api_key || '';
+                            setLlmProvider(provider);
+                            setLlmApiKey(key);
+                            saveLlmCredentials(provider, key);
                         }
                     }
                 }
@@ -47,37 +63,75 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
         fetchKeys();
     }, []);
 
-    const saveToken = async () => {
-        if (token.trim()) {
-            localStorage.setItem('custom_canvas_token', token.trim());
-        } else {
-            localStorage.removeItem('custom_canvas_token');
-        }
-
-        if (geminiKey.trim()) {
-            localStorage.setItem('custom_gemini_api_key', geminiKey.trim());
-        } else {
-            localStorage.removeItem('custom_gemini_api_key');
-        }
+    const verifyCanvas = async () => {
+        setCanvasMsg(null);
+        setIsVerifyingCanvas(true);
+        if (token.trim()) localStorage.setItem('custom_canvas_token', token.trim());
+        else localStorage.removeItem('custom_canvas_token');
 
         try {
+            await canvasAPI.getCourses();
             const { data: { user } } = await supabase.auth.getUser();
             if (user?.email) {
-                await canvasAPI.syncTokenWithBackend(user.email, token.trim(), "", geminiKey.trim());
+                await canvasAPI.syncPreferences(user.email, {
+                    canvas_token: token.trim(),
+                    canvas_token_expiry: "",
+                });
             }
-        } catch (err) {
-            console.warn("Backend sync failed", err);
+            setCanvasMsg('Canvas token verified and saved.');
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 2000);
+        } catch (err: any) {
+            setCanvasMsg(err.message || 'Canvas verification failed');
+        } finally {
+            setIsVerifyingCanvas(false);
         }
+    };
 
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 2000);
+    const verifyLlm = async () => {
+        setLlmMsg(null);
+        setIsVerifyingLlm(true);
+        try {
+            if (!llmProvider || !llmApiKey.trim()) {
+                throw new Error('Select an LLM provider and paste your API key.');
+            }
+            const res = await fetch(`${gradingApiBase()}/api/verify-llm`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider: llmProvider, api_key: llmApiKey.trim() }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok || !body.ok) {
+                throw new Error(body.error || `LLM verify failed (HTTP ${res.status})`);
+            }
+            saveLlmCredentials(llmProvider as LlmProviderId, llmApiKey.trim());
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user?.email) {
+                await canvasAPI.syncPreferences(user.email, {
+                    llm_api_key: llmApiKey.trim(),
+                    llm_provider: llmProvider as string,
+                });
+            }
+            setLlmMsg('LLM key verified and saved.');
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 2000);
+        } catch (err: any) {
+            setLlmMsg(err.message || 'LLM verification failed');
+        } finally {
+            setIsVerifyingLlm(false);
+        }
     };
 
     const clearToken = () => {
         localStorage.removeItem('custom_canvas_token');
         localStorage.removeItem('custom_gemini_api_key');
+        localStorage.removeItem('llm_api_key');
+        localStorage.removeItem('llm_provider');
         setToken('');
-        setGeminiKey('');
+        setLlmApiKey('');
+        setLlmProvider('');
+        setCanvasMsg(null);
+        setLlmMsg(null);
         setSaveSuccess(true);
         setTimeout(() => setSaveSuccess(false), 2000);
     };
@@ -139,29 +193,68 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
                                         placeholder="Paste your Canvas API token here..."
                                         className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm focus:ring-2 focus:ring-[var(--brand-primary)]/20 outline-none transition-all"
                                     />
+                                    <button
+                                        onClick={verifyCanvas}
+                                        disabled={isVerifyingCanvas}
+                                        className="mt-3 px-5 py-2.5 bg-[var(--text-primary)] text-[var(--bg-card)] rounded-[1rem] text-xs font-black uppercase tracking-widest disabled:opacity-50"
+                                    >
+                                        {isVerifyingCanvas ? 'Checking…' : 'Verify Canvas'}
+                                    </button>
+                                    {canvasMsg && (
+                                        <p className={`mt-2 text-xs font-bold ${canvasMsg.includes('verified') ? 'text-emerald-600' : 'text-[var(--color-danger)]'}`}>
+                                            {canvasMsg}
+                                        </p>
+                                    )}
+                                </div>
+                                <div className="border-t-2 border-[var(--border-primary)] pt-4">
+                                    <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-2">LLM Provider</label>
+                                    <select
+                                        value={llmProvider}
+                                        onChange={(e) => setLlmProvider(e.target.value as LlmProviderId)}
+                                        className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm outline-none"
+                                    >
+                                        <option value="">Select provider…</option>
+                                        {LLM_PROVIDERS.map((p) => (
+                                            <option key={p.id} value={p.id}>{p.label}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 <div>
-                                    <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-2">Gemini API Key</label>
+                                    <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-2">LLM API Key</label>
                                     <input 
                                         type="password"
-                                        value={geminiKey}
-                                        onChange={(e) => setGeminiKey(e.target.value)}
-                                        placeholder="Paste your Gemini API key here..."
+                                        value={llmApiKey}
+                                        onChange={(e) => setLlmApiKey(e.target.value)}
+                                        placeholder={
+                                            LLM_PROVIDERS.find((p) => p.id === llmProvider)?.keyHint
+                                            || 'Paste your provider API key...'
+                                        }
                                         className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm focus:ring-2 focus:ring-[var(--brand-primary)]/20 outline-none transition-all"
                                     />
+                                    {llmProvider === 'openrouter_claude' && (
+                                        <p className="mt-2 text-[10px] font-bold text-[var(--text-muted)]">
+                                            Claude via OpenRouter — use an OpenRouter API key.
+                                        </p>
+                                    )}
+                                    <button
+                                        onClick={verifyLlm}
+                                        disabled={isVerifyingLlm}
+                                        className="mt-3 px-5 py-2.5 bg-[var(--brand-primary)] text-white rounded-[1rem] text-xs font-black uppercase tracking-widest disabled:opacity-50"
+                                    >
+                                        {isVerifyingLlm ? 'Checking…' : saveSuccess ? 'Saved!' : 'Verify LLM'}
+                                    </button>
+                                    {llmMsg && (
+                                        <p className={`mt-2 text-xs font-bold ${llmMsg.includes('verified') ? 'text-emerald-600' : 'text-[var(--color-danger)]'}`}>
+                                            {llmMsg}
+                                        </p>
+                                    )}
                                 </div>
                                 <div className="flex gap-3">
-                                    <button
-                                        onClick={saveToken}
-                                        className="px-6 py-3 bg-[var(--brand-primary)] text-white rounded-[1rem] text-xs font-black uppercase tracking-widest transition-all hover:scale-[1.02] active:scale-95 shadow-[var(--shadow-lg)]"
-                                    >
-                                        {saveSuccess ? 'Settings Saved!' : 'Save Connection Settings'}
-                                    </button>
                                     <button
                                         onClick={clearToken}
                                         className="px-6 py-3 bg-[var(--bg-nested)] text-[var(--text-secondary)] rounded-[1rem] text-xs font-black uppercase tracking-widest transition-all hover:bg-[var(--bg-main)] border-2 border-[var(--border-primary)]"
                                     >
-                                        Clear Token
+                                        Clear Saved Keys
                                     </button>
                                 </div>
                             </div>

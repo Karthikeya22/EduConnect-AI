@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Icons from '../ui/Icons';
 import { canvasAPI } from '../../services/canvasAPI';
+import { llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
 
 interface CanvasFile {
   id: number;
@@ -102,11 +103,8 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         formData.append('assignment_id', assignmentId);
         formData.append('file', blob, file.display_name);
 
-        const headers: any = {};
-        const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
-        if (customGeminiKey) {
-          headers['X-Gemini-Api-Key'] = customGeminiKey;
-        }
+        const headers: any = { ...llmAuthHeaders() };
+        requireLlmCredentials();
 
         const res = await fetch(`${API_BASE_URL}/api/ingest/file`, {
           method: 'POST',
@@ -129,11 +127,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         formData.append('assignment_id', assignmentId);
         formData.append('file', file);
 
-        const headers: any = {};
-        const customGeminiKey = localStorage.getItem('custom_gemini_api_key');
-        if (customGeminiKey) {
-          headers['X-Gemini-Api-Key'] = customGeminiKey;
-        }
+        const headers: any = { ...llmAuthHeaders() };
 
         const res = await fetch(`${API_BASE_URL}/api/ingest/file`, {
           method: 'POST',

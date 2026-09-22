@@ -7,7 +7,14 @@ import ThemeToggle from '@/src/components/ui/ThemeToggle';
 import BackgroundParticles from '@/src/components/layout/BackgroundParticles';
 
 import { supabase } from '@/src/lib/supabase';
-import { GoogleGenAI } from "@google/genai";
+import {
+  LLM_PROVIDERS,
+  LlmProviderId,
+  getStoredLlmApiKey,
+  getStoredLlmProvider,
+  gradingApiBase,
+  saveLlmCredentials,
+} from '@/src/lib/llmProviders';
 
 interface Course {
   id: number;
@@ -34,14 +41,17 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
   const [error, setError] = useState('');
   const [customToken, setCustomToken] = useState(localStorage.getItem('custom_canvas_token') || '');
   const [customTokenExpiry, setCustomTokenExpiry] = useState(localStorage.getItem('custom_canvas_token_expiry') || '');
-  const [customGeminiKey, setCustomGeminiKey] = useState(localStorage.getItem('custom_gemini_api_key') || '');
+  const [llmProvider, setLlmProvider] = useState<LlmProviderId | ''>(getStoredLlmProvider());
+  const [llmApiKey, setLlmApiKey] = useState(getStoredLlmApiKey());
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticsData, setDiagnosticsData] = useState<any>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState('');
   
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const [isVerifyingCanvas, setIsVerifyingCanvas] = useState(false);
+  const [isVerifyingLlm, setIsVerifyingLlm] = useState(false);
+  const [canvasVerifyResult, setCanvasVerifyResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const [llmVerifyResult, setLlmVerifyResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
 
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -123,66 +133,84 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
       });
   };
 
-  const handleVerifyAndSave = async () => {
-    setIsVerifying(true);
-    setVerifyResult(null);
+  const handleVerifyCanvas = async () => {
+    setIsVerifyingCanvas(true);
+    setCanvasVerifyResult(null);
 
-    // Save token temporarily to local storage to use it in the Canvas API test
     if (customToken.trim()) localStorage.setItem('custom_canvas_token', customToken.trim());
     else localStorage.removeItem('custom_canvas_token');
 
-    // 1. Verify Canvas
-    try {
-      await canvasAPI.getCourses(); // This uses the newly set local storage token
-    } catch (e: any) {
-      setVerifyResult({ type: 'error', message: `Canvas Verification Failed: ${e.message}` });
-      setIsVerifying(false);
-      return;
-    }
-
-    // 2. Verify Gemini
-    try {
-      const apiKey = customGeminiKey.trim();
-      if (!apiKey) throw new Error("No Gemini API key provided and no default available.");
-      
-      const client = new GoogleGenAI({ apiKey } as any);
-      const res = await (client as any).models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: "Respond with exactly the word 'OK'."
-      });
-      if (!res.text) throw new Error("No response received from Gemini.");
-    } catch (e: any) {
-      setVerifyResult({ type: 'error', message: `Gemini Verification Failed: ${e.message}` });
-      setIsVerifying(false);
-      return;
-    }
-
-    // Finalize save if both passed
     if (customTokenExpiry) {
       localStorage.setItem('custom_canvas_token_expiry', customTokenExpiry);
     } else {
       localStorage.removeItem('custom_canvas_token_expiry');
     }
 
-    if (customGeminiKey.trim()) {
-      localStorage.setItem('custom_gemini_api_key', customGeminiKey.trim());
-    } else {
-      localStorage.removeItem('custom_gemini_api_key');
-    }
-
-    // Persist to backend if user is logged in
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user?.email) {
-        await canvasAPI.syncTokenWithBackend(user.email, customToken.trim(), customTokenExpiry, customGeminiKey.trim());
+      await canvasAPI.getCourses();
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user?.email) {
+          await canvasAPI.syncPreferences(user.email, {
+            canvas_token: customToken.trim(),
+            canvas_token_expiry: customTokenExpiry,
+          });
+        }
+      } catch (err) {
+        console.warn("Canvas backend sync failed, still stored locally", err);
       }
-    } catch (err) {
-      console.warn("Backend sync failed, still stored locally", err);
+      setCanvasVerifyResult({ type: 'success', message: "Canvas token verified and saved." });
+      fetchCourses();
+    } catch (e: any) {
+      setCanvasVerifyResult({ type: 'error', message: `Canvas verification failed: ${e.message}` });
+    } finally {
+      setIsVerifyingCanvas(false);
     }
-    
-    setVerifyResult({ type: 'success', message: "Both keys verified and saved successfully!" });
-    fetchCourses();
-    setIsVerifying(false);
+  };
+
+  const handleVerifyLlm = async () => {
+    setIsVerifyingLlm(true);
+    setLlmVerifyResult(null);
+
+    try {
+      if (!llmProvider) throw new Error("Select an LLM provider.");
+      const apiKey = llmApiKey.trim();
+      if (!apiKey) throw new Error("Paste your LLM API key.");
+
+      const res = await fetch(`${gradingApiBase()}/api/verify-llm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: llmProvider, api_key: apiKey }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        throw new Error(body.error || `Verification failed (HTTP ${res.status})`);
+      }
+
+      saveLlmCredentials(llmProvider as LlmProviderId, apiKey);
+
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user?.email) {
+          await canvasAPI.syncPreferences(user.email, {
+            llm_api_key: apiKey,
+            llm_provider: llmProvider as string,
+          });
+        }
+      } catch (err) {
+        console.warn("LLM backend sync failed, still stored locally", err);
+      }
+
+      setLlmVerifyResult({ type: 'success', message: "LLM provider key verified and saved." });
+    } catch (e: any) {
+      const raw = e?.message || String(e);
+      const hint = /failed to fetch|networkerror|load failed/i.test(raw)
+        ? ` Cannot reach grading server at ${gradingApiBase()}. Make sure the backend is running (npm run dev / py -m grading_server.app).`
+        : '';
+      setLlmVerifyResult({ type: 'error', message: `LLM verification failed: ${raw}.${hint}` });
+    } finally {
+      setIsVerifyingLlm(false);
+    }
   };
 
   useEffect(() => {
@@ -203,9 +231,12 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
                  localStorage.setItem('custom_canvas_token_expiry', expiry);
               }
             }
-            if (stored.gemini_api_key) {
-              setCustomGeminiKey(stored.gemini_api_key);
-              localStorage.setItem('custom_gemini_api_key', stored.gemini_api_key);
+            if (stored.llm_api_key || stored.gemini_api_key) {
+              const provider = (stored.llm_provider || 'gemini') as LlmProviderId;
+              const key = stored.llm_api_key || stored.gemini_api_key || '';
+              setLlmProvider(provider);
+              setLlmApiKey(key);
+              saveLlmCredentials(provider, key);
             }
           }
         }
@@ -286,7 +317,7 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
               <Icons.IconTarget className="w-4 h-4 text-indigo-500" />
               Canvas API Connection
             </h3>
-            <div className="flex flex-col md:flex-row gap-4 mb-4">
+            <div className="flex flex-col md:flex-row gap-4 mb-3">
               <div className="flex-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">Canvas API Key</label>
                 <input 
@@ -307,42 +338,85 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
                 />
               </div>
             </div>
+            <div className="flex items-center justify-between gap-3 mb-6">
+              <p className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                Canvas: {localStorage.getItem('custom_canvas_token') ? <span className="text-emerald-500">Key saved</span> : <span className="text-red-500">Missing</span>}
+                {localStorage.getItem('custom_canvas_token_expiry') && <span className="ml-2 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 px-2 py-1 rounded-md">Expires: {new Date(localStorage.getItem('custom_canvas_token_expiry')!).toLocaleDateString()}</span>}
+              </p>
+              <button 
+                onClick={handleVerifyCanvas}
+                disabled={isVerifyingCanvas}
+                className="px-5 py-2.5 bg-[var(--text-primary)] text-[var(--bg-card)] text-xs font-black uppercase tracking-widest rounded-[1rem] hover:opacity-90 transition-colors disabled:opacity-50 flex items-center gap-2 shrink-0"
+              >
+                {isVerifyingCanvas ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div> : <Icons.IconCheck className="w-4 h-4" />}
+                {isVerifyingCanvas ? 'Checking…' : 'Verify Canvas'}
+              </button>
+            </div>
+            {canvasVerifyResult && (
+              <div className={`mb-6 p-4 rounded-[1rem] text-xs font-bold ${canvasVerifyResult.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-600 border border-rose-500/20'}`}>
+                {canvasVerifyResult.message}
+              </div>
+            )}
 
-            <div className="flex flex-col md:flex-row gap-4 mb-4">
+            <div className="border-t-2 border-[var(--border-primary)] pt-5 mb-4">
+              <h4 className="text-[10px] font-black uppercase tracking-widest text-[var(--text-primary)] mb-4">LLM Provider</h4>
+            </div>
+
+            <div className="flex flex-col md:flex-row gap-4 mb-3">
+              <div className="md:w-56">
+                <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">Provider</label>
+                <select
+                  value={llmProvider}
+                  onChange={(e) => setLlmProvider(e.target.value as LlmProviderId)}
+                  className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
+                >
+                  <option value="">Select provider…</option>
+                  {LLM_PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
+              </div>
               <div className="flex-1">
-                <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">Gemini API Key</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">LLM API Key</label>
                 <input 
                   type="password" 
-                  value={customGeminiKey}
-                  onChange={(e) => setCustomGeminiKey(e.target.value)}
-                  placeholder="Enter your Gemini API Key"
+                  value={llmApiKey}
+                  onChange={(e) => setLlmApiKey(e.target.value)}
+                  placeholder={
+                    LLM_PROVIDERS.find((p) => p.id === llmProvider)?.keyHint
+                    || 'Paste your provider API key'
+                  }
                   className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
                 />
+                {llmProvider === 'openrouter_claude' && (
+                  <p className="mt-2 text-[10px] font-bold text-[var(--text-muted)]">
+                    Claude runs via OpenRouter — paste an OpenRouter API key (not a native Anthropic key).
+                  </p>
+                )}
               </div>
             </div>
             
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <p className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                  Status: {localStorage.getItem('custom_canvas_token') ? <span className="text-emerald-500">Custom Key Active</span> : <span className="text-red-500">Missing Key</span>}
-                  {localStorage.getItem('custom_canvas_token_expiry') && <span className="ml-2 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 px-2 py-1 rounded-md">Expires: {new Date(localStorage.getItem('custom_canvas_token_expiry')!).toLocaleDateString()}</span>}
-                </p>
-                <button 
-                  onClick={handleVerifyAndSave}
-                  disabled={isVerifying}
-                  className="px-6 py-2.5 bg-[var(--brand-primary)] text-white text-xs font-black uppercase tracking-widest rounded-[1rem] hover:brightness-110 transition-colors shadow-[var(--shadow-lg)] disabled:opacity-50 flex items-center gap-2"
-                >
-                  {isVerifying ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div> : <Icons.IconCheck className="w-4 h-4" />}
-                  {isVerifying ? 'Verifying...' : 'Verify & Save Keys'}
-                </button>
-              </div>
-
-              {verifyResult && (
-                <div className={`p-4 rounded-[1rem] text-xs font-bold ${verifyResult.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-600 border border-rose-500/20'}`}>
-                  {verifyResult.message}
-                </div>
-              )}
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <p className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                LLM: {getStoredLlmProvider() && getStoredLlmApiKey()
+                  ? <span className="text-emerald-500">{LLM_PROVIDERS.find(p => p.id === getStoredLlmProvider())?.label || getStoredLlmProvider()} saved</span>
+                  : <span className="text-red-500">Not verified</span>}
+              </p>
+              <button 
+                onClick={handleVerifyLlm}
+                disabled={isVerifyingLlm}
+                className="px-5 py-2.5 bg-[var(--brand-primary)] text-white text-xs font-black uppercase tracking-widest rounded-[1rem] hover:brightness-110 transition-colors shadow-[var(--shadow-lg)] disabled:opacity-50 flex items-center gap-2 shrink-0"
+              >
+                {isVerifyingLlm ? <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin"></div> : <Icons.IconCheck className="w-4 h-4" />}
+                {isVerifyingLlm ? 'Checking…' : 'Verify LLM'}
+              </button>
             </div>
+
+            {llmVerifyResult && (
+              <div className={`p-4 rounded-[1rem] text-xs font-bold ${llmVerifyResult.type === 'success' ? 'bg-emerald-500/10 text-emerald-600 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-600 border border-rose-500/20'}`}>
+                {llmVerifyResult.message}
+              </div>
+            )}
           </div>
 
           {/* API Key Configurator Diagnostics Trigger */}

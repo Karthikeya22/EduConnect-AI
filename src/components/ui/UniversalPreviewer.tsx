@@ -46,6 +46,29 @@ function isBrowserLocalUrl(url: string) {
   return url.startsWith('blob:') || url.startsWith('data:') || url.includes('localhost') || url.includes('127.0.0.1');
 }
 
+/** Show hyperlink text as plain content (Canvas/Word often auto-link URL fragments). */
+function unwrapAnchorsInElement(root: HTMLElement) {
+  root.querySelectorAll('a').forEach((anchor) => {
+    const parent = anchor.parentNode;
+    if (!parent) return;
+    while (anchor.firstChild) {
+      parent.insertBefore(anchor.firstChild, anchor);
+    }
+    parent.removeChild(anchor);
+  });
+}
+
+function unwrapHtmlAnchors(html: string): string {
+  if (!html) return html;
+  try {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    unwrapAnchorsInElement(doc.body);
+    return doc.body.innerHTML;
+  } catch {
+    return html.replace(/<\/?a\b[^>]*>/gi, '');
+  }
+}
+
 async function fetchFileBuffer(url: string): Promise<ArrayBuffer> {
   const cached = fileBufferCache.get(url);
   if (cached) return cached.slice(0);
@@ -394,6 +417,7 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
           renderFootnotes: true,
           useBase64URL: true,
         });
+        if (docxContainerRef.current) unwrapAnchorsInElement(docxContainerRef.current);
 
         if (highlightText && docxContainerRef.current) {
           const needle = highlightText.trim();
@@ -432,7 +456,8 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
             }
           );
           if (cancelled || !docxContainerRef.current) return;
-          docxContainerRef.current.innerHTML = `<div class="docx-mammoth-fallback prose max-w-none p-12 bg-white">${result.value || ''}</div>`;
+          const safeHtml = unwrapHtmlAnchors(result.value || '');
+          docxContainerRef.current.innerHTML = `<div class="docx-mammoth-fallback prose max-w-none p-12 bg-white">${safeHtml}</div>`;
         } catch (fallbackErr: any) {
           if (!cancelled) setError(`Word viewer failed: ${fallbackErr?.message || err?.message || 'Cannot render document'}`);
         }
@@ -745,7 +770,12 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
                 </div>
                 {cell.cellType === 'markdown' ? (
                   <div className="p-4 prose prose-invert prose-sm max-w-none prose-pre:bg-black/40">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{cell.source || '_Empty markdown cell_'}</ReactMarkdown>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{ a: ({ children }) => <span>{children}</span> }}
+                    >
+                      {cell.source || '_Empty markdown cell_'}
+                    </ReactMarkdown>
                   </div>
                 ) : (
                   <pre className="p-4 text-[12px] leading-relaxed font-mono text-emerald-100 overflow-x-auto whitespace-pre">

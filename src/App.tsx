@@ -60,15 +60,62 @@ const LoadingFallback = ({ message = "Loading Hub Module..." }: { message?: stri
     return () => clearTimeout(timer);
   }, []);
 
+  // Inline styles so Brave shields / blocked Tailwind CDN cannot blank this screen.
   return (
-    <div className="h-screen w-full flex flex-col items-center justify-center bg-white dark:bg-[#0B1120] font-['Plus_Jakarta_Sans'] transition-colors duration-500">
-      <div className="w-12 h-12 border-4 border-zinc-200 dark:border-white/10 border-t-indigo-600 dark:border-t-indigo-500 rounded-full animate-spin mb-6"></div>
-      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-zinc-400 dark:text-zinc-500 animate-pulse">{message}</p>
+    <div
+      style={{
+        height: '100vh',
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: '#F4F7FA',
+        fontFamily: '"Plus Jakarta Sans", sans-serif',
+      }}
+    >
+      <div
+        style={{
+          width: 48,
+          height: 48,
+          border: '4px solid #E2E8F0',
+          borderTopColor: '#4F46E5',
+          borderRadius: '9999px',
+          marginBottom: 24,
+          animation: 'edu-spin 0.8s linear infinite',
+        }}
+      />
+      <p
+        style={{
+          fontSize: 10,
+          fontWeight: 900,
+          letterSpacing: '0.3em',
+          textTransform: 'uppercase',
+          color: '#64748B',
+          margin: 0,
+        }}
+      >
+        {message}
+      </p>
       {showReload && (
-        <button onClick={() => window.location.reload()} className="mt-8 px-6 py-3 border border-zinc-200 dark:border-white/10 rounded-xl text-xs font-bold text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white transition-colors">
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            marginTop: 32,
+            padding: '12px 24px',
+            border: '1px solid #E2E8F0',
+            borderRadius: 12,
+            fontSize: 12,
+            fontWeight: 700,
+            color: '#64748B',
+            background: 'transparent',
+            cursor: 'pointer',
+          }}
+        >
           Forced Reload
         </button>
       )}
+      <style>{`@keyframes edu-spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 };
@@ -143,7 +190,14 @@ const App: React.FC = () => {
   useEffect(() => {
     const initSession = async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        // Brave / blocked network can hang getSession — never leave a blank loading screen.
+        const sessionResult = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise<{ data: { session: null } }>((resolve) =>
+            setTimeout(() => resolve({ data: { session: null } }), 4000)
+          ),
+        ]);
+        const session = sessionResult?.data?.session;
         if (session?.user) {
           setUser(session.user);
         }
