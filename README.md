@@ -1,146 +1,111 @@
-<div align="center">
-  <h1>EduConnect AI</h1>
-  <p><strong>Evidence-grounded AI grading and educational scaffolding for Canvas courses.</strong></p>
-  <p>
-    <a href="#demo">Demo</a> ·
-    <a href="#how-it-works">How it works</a> ·
-    <a href="#quick-start">Quick start</a> ·
-    <a href="#trust-and-safety">Trust & safety</a>
-  </p>
-</div>
+# EduConnect AI (EduGenie)
 
-> **Project status:** Early-stage research and development project at the University of South Florida College of Education, VISTA Lab. EduConnect AI provides instructor-reviewable draft grades and feedback; it does not replace educator judgment.
+EduConnect AI is a Canvas-integrated grading assistant that helps instructors generate **evidence-grounded draft grades and feedback** using rubric-aware retrieval and LLM reasoning.
 
-![EduConnect AI](https://github.com/Karthikeya22/EduConnect-AI/blob/main/logo-EduConnect%20AI.png)
+> This system is designed for instructor decision support. Final grading decisions should always remain with educators.
 
-## Overview
+## What this repository contains
 
-EduConnect AI is a Canvas-connected platform designed to reduce grading workload while keeping instructional judgment with the instructor. It evaluates student work against instructor rubrics and course materials, then returns an evidence-backed draft grade, feedback, and a traceable rationale for review.
+- **Frontend (`src/`)**: React + TypeScript app for educator workflows
+- **Grading server (`grading_server/`)**: Flask-based AI grading and ingestion pipeline
+- **Documentation (`docs/`)**: run guides and model/provider notes
+- **Deployment config**: Procfile, Vercel config, Supabase SQL setup scripts
 
-Instead of treating an LLM score as the answer, EduConnect uses a **reasoning-based RAG** workflow: retrieve relevant course context, evaluate rubric criteria individually, anchor claims to submission evidence, run a critique pass, and route uncertain cases to an educator.
+## Tech stack
 
-## Demo
+- React 19 + TypeScript + Vite
+- Python Flask grading service
+- Supabase (Postgres + auth/data)
+- Google Gemini and provider-based BYOK model access
 
-### Product walkthrough
-
-### Product walkthrough
-
-[![Watch the EduConnect AI demo](https://img.youtube.com/vi/1Hw0SclGrQc/maxresdefault.jpg)](https://youtu.be/1Hw0SclGrQc)
-
-▶️ **[Watch the 2-minute EduConnect AI walkthrough](https://youtu.be/1Hw0SclGrQc)**
-
-> Replace the video ID `RJ5QKtY_peQ` above if you publish a new demo. The thumbnail and the link will update together.
-
-## Why EduConnect AI?
-
-Grading often requires educators to spend hours reviewing student work, and feedback can arrive after the material is no longer fresh. Generic AI grading tools can also produce scores that are difficult to inspect or justify.
-
-EduConnect AI is built around a different principle: **a score should be reviewable, attributable to the rubric, and supported by evidence.** The educator remains the final decision-maker.
-
-## Key capabilities
-
-| Capability | What it does |
-|---|---|
-| **Canvas-connected workflow** | Works with course, assignment, submission, rubric, and activity data so instructors do not need to move work into a separate grading process. |
-| **Reasoning-based RAG** | Grounds evaluation in instructor-provided course materials instead of relying only on model recall. |
-| **Criterion-level evaluation** | Breaks a rubric into smaller, reviewable requirements rather than producing one opaque holistic score. |
-| **Evidence anchoring** | Connects scoring decisions to relevant course context and verbatim evidence from the student submission. |
-| **Self-critique and escalation** | Uses a second-pass critique and confidence checks to identify cases that require human review. |
-| **Instructor control** | Lets educators inspect, edit, approve, or override recommendations at any time. |
-| **Learning analytics** | Supports class-level visibility into performance patterns and student activity signals. |
-
-## How it works
-
-```mermaid
-flowchart LR
-    A[Canvas course data\nmaterials, rubrics, submissions] --> B[Ingestion and indexing]
-    B --> C[Retrieve relevant\ncourse context]
-    C --> D[Evaluate each\nrubric criterion]
-    D --> E[Anchor claims to\nsubmission evidence]
-    E --> F[Critique and\nconfidence check]
-    F -->|High confidence| G[Instructor-reviewable\ndraft grade and feedback]
-    F -->|Low confidence| H[Flag for human review]
-    H --> G
-    G --> I[Instructor approves,\nedits, or overrides]
-```
-
-### Five-layer trust architecture
-
-1. **RAG grounding** — Evaluation is tied to instructor-provided course materials.
-2. **Rubric adherence** — Each criterion is assessed separately rather than estimated holistically.
-3. **Evidence anchoring** — The system surfaces supporting excerpts from the submission and relevant course context.
-4. **Self-critique and confidence** — A critique pass checks the proposed reasoning and flags uncertainty.
-5. **Human override** — Instructors retain final authority over every grade and piece of feedback.
-
-## Interface highlights
-
-- **Evaluation Nexus:** Review assignments, submissions, AI-generated draft grades, and evidence in one place.
-- **Educator Hub:** View course-level information and grading workflow status.
-- **Class Ledger:** Monitor student, assignment, and grade trends in a Canvas-synced view.
-- **Clickstream Activity Hub:** Explore course-engagement signals alongside assessment information.
-
-## Technology
-
-The current application uses a modern web stack for AI-assisted educational workflows:
-
-- **Frontend:** React, TypeScript
-- **Backend:** Python, asynchronous FastAPI
-- **AI:** Google Gemini API, multi-model evaluation workflow
-- **Retrieval:** Semantic RAG with PostgreSQL and pgvector
-- **Integrations:** Canvas LMS APIs
-- **Security:** Role-aware access controls and row-level security
-
-## Quick start
-
-### Prerequisites
+## Prerequisites
 
 - Node.js 18+
 - npm
-- A Gemini API key
+- Python 3.11+
+- pip
 
-### Install and run
+## Setup
+
+1. Clone and install frontend dependencies:
+
+   ```bash
+   git clone https://github.com/Karthikeya22/EduConnect-AI.git
+   cd EduConnect-AI
+   npm install
+   ```
+
+2. Create and activate a Python virtual environment, then install backend dependencies:
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # Windows: .venv\Scripts\activate
+   pip install -r grading_server/requirements.txt
+   ```
+
+3. Create a local env file from `.env.example` and replace values with your own:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Required variables include:
+   - `SUPABASE_URL` (or `VITE_SUPABASE_URL`)
+   - `SUPABASE_KEY` (or `VITE_SUPABASE_ANON_KEY`)
+   - `CANVAS_BASE_URL` (or `VITE_CANVAS_BASE_URL`)
+   - LLM credentials provided at request-time (BYOK flow)
+
+## Run locally
+
+### Option A: run services separately (recommended)
+
+Terminal 1 (frontend):
 
 ```bash
-git clone https://github.com/<YOUR_GITHUB_USERNAME>/<YOUR_REPOSITORY_NAME>.git
-cd <YOUR_REPOSITORY_NAME>
-npm install
+npm run dev:frontend
 ```
 
-Create `.env.local` in the project root:
+Terminal 2 (grading server):
 
 ```bash
-GEMINI_API_KEY=your_gemini_api_key
+python -m grading_server.app
 ```
 
-Start the development server:
+### Option B: run combined dev script
 
 ```bash
 npm run dev
 ```
 
-Open the local URL shown in your terminal, typically `http://localhost:5173`.
+> `npm run dev` uses `py -m grading_server.app` for the backend command, which is mainly Windows-friendly.
 
-> Never commit `.env.local` or API keys. Add `.env.local` to `.gitignore`.
+## Useful scripts
 
-## Trust and safety
+- `npm run dev` – frontend + backend together
+- `npm run dev:frontend` – frontend only
+- `npm run dev:backend` – backend only (Windows-oriented command)
+- `npm run build` – production frontend build
+- `npm run lint` – TypeScript type-check
 
-EduConnect AI is designed as decision support, not autonomous grading. Its output should always be reviewed by an authorized instructor before grades or feedback are released to students.
+## Testing and validation
 
-Known limitations include incomplete course materials, assignments with visual-only content, and calibration differences across courses or rubrics. Low-confidence cases should be routed to human review. Formal studies of grading agreement and reliability are ongoing/planned.
+- Frontend checks: `npm run lint`
+- Backend tests: `pytest grading_server/tests` (if test dependencies are installed)
 
-## Research context
+## Documentation index
 
-EduConnect AI is being developed through the University of South Florida College of Education's VISTA Lab under the leadership of Professor Bo Pei. The project focuses on context-aware grading, educational scaffolding, and transparent AI support for educators.
+- `docs/README.md`
+- `docs/RUN_GUIDE.md`
+- `grading_server/README.md`
 
 ## Contributing
 
-This is a research project. If you are collaborating on the project, please create a branch, make focused changes, and open a pull request with a concise description of the change and any testing performed.
+1. Create a feature branch
+2. Keep changes focused and small
+3. Run relevant checks before submitting
+4. Open a pull request with a clear summary
 
 ## Contact
 
-**Project lead:** Dr. Bo Pei — [bpei@usf.edu](mailto:bpei@usf.edu)  
-**Developer:** Karthikeya Moturi — [GitHub](https://github.com/Karthikeya22) · [LinkedIn](https://www.linkedin.com/in/km22)
-
----
-
-<p align="center">Built to help educators spend less time on repetitive grading and more time supporting learning.</p>
+- Project lead: Dr. Bo Pei
+- Developer: [Karthikeya Moturi](https://github.com/Karthikeya22)
