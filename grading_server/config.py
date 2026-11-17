@@ -51,8 +51,16 @@ CANVAS_BASE_URL: str = os.getenv(
 FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5557"))
 # Werkzeug debugger allows code execution; opt-in only, never implied by environment.
 FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-# Dev server bind; loopback unless explicitly overridden. Gunicorn (Procfile) is unaffected.
-FLASK_HOST: str = os.getenv("FLASK_HOST", "127.0.0.1")
+# `python -m grading_server.app` is what Render runs. Render scans 0.0.0.0, so a
+# loopback bind makes the deploy time out with "no open ports". Local runs stay
+# on loopback. Gunicorn in the Procfile binds 0.0.0.0 itself and ignores this.
+def _default_flask_host() -> str:
+    if os.getenv("RENDER") or os.getenv("RAILWAY_ENVIRONMENT"):
+        return "0.0.0.0"
+    return "127.0.0.1"
+
+
+FLASK_HOST: str = os.getenv("FLASK_HOST") or _default_flask_host()
 # Browser origins allowed by CORS. CORS is not authentication.
 CORS_ORIGINS: list[str] = [
     o.strip()

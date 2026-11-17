@@ -48,3 +48,14 @@ def test_dev_server_defaults_are_contained():
             assert fresh.FLASK_HOST == "127.0.0.1"
         finally:
             importlib.reload(config)
+
+
+def test_render_dev_server_binds_public_interface():
+    with patch.dict("os.environ", {"RENDER": "true", "PORT": "10000"}, clear=True):
+        import importlib
+        try:
+            fresh = importlib.reload(config)
+            assert fresh.FLASK_HOST == "0.0.0.0"
+            assert fresh.FLASK_DEBUG is False
+        finally:
+            importlib.reload(config)
