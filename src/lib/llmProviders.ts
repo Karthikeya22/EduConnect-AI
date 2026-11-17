@@ -24,7 +24,12 @@ export const LLM_PROVIDERS: LlmProviderOption[] = [
     label: 'Claude (via OpenRouter)',
     keyHint: 'Requires an OpenRouter API key (Claude is routed through OpenRouter)',
   },
-  { id: 'nvidia', label: 'NVIDIA', keyHint: 'Paste your NVIDIA NGC / NIM API key' },
+  {
+    id: 'nvidia',
+    label: 'NVIDIA',
+    keyHint:
+      'build.nvidia.com key with Public API Endpoints. Enable Nemotron 3.5 Lightning (text), Nemotron 3.5 Embed, and Nemotron 3 Nano Omni (image/audio/video).',
+  },
   { id: 'deepseek', label: 'DeepSeek', keyHint: 'Paste your DeepSeek API key' },
   { id: 'kimi', label: 'Kimi', keyHint: 'Paste your Moonshot / Kimi API key' },
 ];

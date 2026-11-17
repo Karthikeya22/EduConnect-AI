@@ -5,10 +5,11 @@
  * passes extracted content to the RAG grader for multi-model evaluation.
  */
 
-import { gradeSubmission, type EnhancedGradeResult } from '@/src/grader/rag_grader';
+import { gradeSubmission, AiGradingUnavailableError, type EnhancedGradeResult } from '@/src/grader/rag_grader';
 
 // Re-export the enhanced result type for consumers
 export type { EnhancedGradeResult };
+export { AiGradingUnavailableError };
 
 // Backward-compatible interface (original fields only)
 export interface AIGradeResult {
@@ -141,17 +142,10 @@ export const aiAPI = {
       return result;
 
     } catch (pipelineErr) {
-      console.error('[aiAPI] RAG pipeline failed entirely, falling back to basic grading:', pipelineErr);
-
-      // Fallback: if the entire pipeline fails, return a basic result
-      return {
-        suggestedGrade: Math.round(maxPoints * 0.8),
-        strengths: ["Submission shows effort.", "Followed instructions adequately."],
-        improvements: ["Could provide more detail.", "Make sure to double check requirements."],
-        feedback: "Good work overall. Please see the areas of improvement for next time.",
-        personalizedNote: "Keep up the hard work!",
-        tags: ["Needs more detail", "Good attempt"]
-      };
+      console.error('[aiAPI] RAG pipeline failed:', pipelineErr);
+      // Never invent a grade when the pipeline fails.
+      if (pipelineErr instanceof AiGradingUnavailableError) throw pipelineErr;
+      throw new AiGradingUnavailableError('pipeline_failed', pipelineErr);
     }
   }
 };

@@ -1,0 +1,14 @@
+# Disposable Postgres + pgvector for DB-integration tests. Local only; holds artificial fixtures.
+#   docker compose -f grading_server/tests/pgvector/docker-compose.yml up -d
+#   set EDUCONNECT_PG_URL=postgresql://postgres:postgres@127.0.0.1:54329/postgres
+#   py -m pytest grading_server/tests/pgvector -q
+#   docker compose -f grading_server/tests/pgvector/docker-compose.yml down -v
+services:
+  pg:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data

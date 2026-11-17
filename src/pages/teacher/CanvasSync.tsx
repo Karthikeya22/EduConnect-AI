@@ -1,3 +1,4 @@
+import { authErrorMessage, gradingAuthHeaders, syncCanvasMemberships } from '../../lib/gradingApi';
 import React, { useState } from 'react';
 import AppSidebar from '@/src/components/layout/AppSidebar';
 import { AppPath } from '@/src/App';
@@ -22,12 +23,18 @@ interface CanvasSyncProps {
     currentPath: AppPath;
 }
 
+const DEFAULT_CANVAS_BASE_URL =
+    import.meta.env.VITE_CANVAS_BASE_URL || 'https://usflearn.instructure.com';
+
 const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<any>(null);
     const [errorDetails, setErrorDetails] = useState<string | null>(null);
     const [token, setToken] = useState(localStorage.getItem('custom_canvas_token') || '');
+    const [canvasBaseUrl, setCanvasBaseUrl] = useState(
+        localStorage.getItem('canvas_base_url') || DEFAULT_CANVAS_BASE_URL,
+    );
     const [llmProvider, setLlmProvider] = useState<LlmProviderId | ''>(getStoredLlmProvider());
     const [llmApiKey, setLlmApiKey] = useState(getStoredLlmApiKey());
     const [saveSuccess, setSaveSuccess] = useState(false);
@@ -70,6 +77,10 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
         else localStorage.removeItem('custom_canvas_token');
 
         try {
+            const normalizedCanvasBaseUrl = canvasBaseUrl.trim();
+            if (!normalizedCanvasBaseUrl) throw new Error('Enter your Canvas base URL.');
+            localStorage.setItem('canvas_base_url', normalizedCanvasBaseUrl);
+            const membershipSync = await syncCanvasMemberships(normalizedCanvasBaseUrl);
             await canvasAPI.getCourses();
             const { data: { user } } = await supabase.auth.getUser();
             if (user?.email) {
@@ -78,7 +89,7 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
                     canvas_token_expiry: "",
                 });
             }
-            setCanvasMsg('Canvas token verified and saved.');
+            setCanvasMsg(`Connected — ${membershipSync.count} courses where Canvas lists you as teacher/TA.`);
             setSaveSuccess(true);
             setTimeout(() => setSaveSuccess(false), 2000);
         } catch (err: any) {
@@ -97,12 +108,12 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
             }
             const res = await fetch(`${gradingApiBase()}/api/verify-llm`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...(await gradingAuthHeaders()) },
                 body: JSON.stringify({ provider: llmProvider, api_key: llmApiKey.trim() }),
             });
             const body = await res.json().catch(() => ({}));
             if (!res.ok || !body.ok) {
-                throw new Error(body.error || `LLM verify failed (HTTP ${res.status})`);
+                throw new Error(authErrorMessage(body) || body.error || `LLM verify failed (HTTP ${res.status})`);
             }
             saveLlmCredentials(llmProvider as LlmProviderId, llmApiKey.trim());
             const { data: { user } } = await supabase.auth.getUser();
@@ -185,6 +196,16 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
 
                             <div className="space-y-4">
                                 <div>
+                                    <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-2">Canvas Base URL</label>
+                                    <input
+                                        type="url"
+                                        value={canvasBaseUrl}
+                                        onChange={(e) => setCanvasBaseUrl(e.target.value)}
+                                        placeholder={DEFAULT_CANVAS_BASE_URL}
+                                        className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm focus:ring-2 focus:ring-[var(--brand-primary)]/20 outline-none transition-all"
+                                    />
+                                </div>
+                                <div>
                                     <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-400 mb-2">Canvas API Access Token</label>
                                     <input 
                                         type="password"
@@ -201,7 +222,7 @@ const CanvasSync: React.FC<CanvasSyncProps> = (props) => {
                                         {isVerifyingCanvas ? 'Checking…' : 'Verify Canvas'}
                                     </button>
                                     {canvasMsg && (
-                                        <p className={`mt-2 text-xs font-bold ${canvasMsg.includes('verified') ? 'text-emerald-600' : 'text-[var(--color-danger)]'}`}>
+                                        <p className={`mt-2 text-xs font-bold ${canvasMsg.startsWith('Connected') ? 'text-emerald-600' : 'text-[var(--color-danger)]'}`}>
                                             {canvasMsg}
                                         </p>
                                     )}

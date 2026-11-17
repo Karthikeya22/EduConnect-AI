@@ -39,6 +39,28 @@ export function isDocCourseFile(f: CanvasCourseFile): boolean {
   return n.endsWith('.pdf') || n.endsWith('.docx') || n.endsWith('.txt') || n.endsWith('.pptx');
 }
 
+export type CourseFileStatusRow = {
+  canvas_file_id: string | number;
+  status?: string;
+  updated_at?: string | null;
+};
+
+export function sourceUpdatedAt(f: CanvasCourseFile): string {
+  return f.updated_at || f.created_at || '';
+}
+
+// Doc files with no ready registry row for the same Canvas updated_at (absent, failed, or stale).
+export function selectFilesNeedingIngest(
+  files: CanvasCourseFile[],
+  statusRows: CourseFileStatusRow[]
+): CanvasCourseFile[] {
+  const byId = new Map(statusRows.map((r) => [String(r.canvas_file_id), r]));
+  return files.filter(isDocCourseFile).filter((f) => {
+    const row = byId.get(String(f.id));
+    return !row || row.status !== 'ready' || (row.updated_at || '') !== sourceUpdatedAt(f);
+  });
+}
+
 export function selectPhaseFiles(
   files: CanvasCourseFile[],
   assignmentTitle: string,

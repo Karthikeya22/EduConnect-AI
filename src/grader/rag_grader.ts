@@ -15,6 +15,20 @@ import { buildGradingPrompt, buildReflectionCritiquePrompt, type LinguisticProfi
 import { evaluateIntegrityAndQuality, type IntegrityEvaluation } from './human_evaluator';
 import { getStudentKnowledgeGraph, updateStudentKnowledgeGraph, type KnowledgeGraphInsight } from './graph_rag';
 
+/** Thrown instead of inventing a grade when the dormant client-side pipeline cannot grade. */
+export class AiGradingUnavailableError extends Error {
+  readonly code = 'AI_GRADING_UNAVAILABLE';
+  constructor(readonly reason: 'pipeline_failed' | 'grading_model_failed' | 'no_grade_returned', readonly cause?: unknown) {
+    super(`AI_GRADING_UNAVAILABLE: ${reason}`);
+    this.name = 'AiGradingUnavailableError';
+  }
+}
+
+function requireGrade(g: unknown): number {
+  if (typeof g === 'number' && Number.isFinite(g)) return g;
+  throw new AiGradingUnavailableError('no_grade_returned');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enhanced Grade Result (extends the original AIGradeResult)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -173,23 +187,7 @@ export async function gradeSubmission(
     gradingResult = JSON.parse(cleanText);
   } catch (err) {
     console.error('[RAGGrader] Stage 3 grading failed:', err);
-    gradingResult = {
-      suggestedGrade: Math.round(maxPoints * 0.75),
-      strengths: [
-        'Demonstrates a solid understanding of the core concepts related to the chosen topic.',
-        'The submission is structured logically, making it relatively easy to follow the arguments.'
-      ],
-      improvements: [
-        'Needs further elaboration on key methodology to strengthen the overall argument and prove the thesis.',
-        'Consider expanding on the literature review to better situate the research within the context of existing academic work.'
-      ],
-      deductionRationale: 'Standard deduction applied due to grading model timeout/fallback. Marks deducted for lack of advanced integration of concepts.',
-      feedback: 'Good attempt overall. Review the assignment requirements and course materials to strengthen your response and add more critical depth.',
-      personalizedNote: 'Keep working at it — consistent effort leads to improvement.',
-      tags: ['System Error Fallback', 'Needs more detail'],
-      conceptualGaps: [],
-      ragSourcesUsed: []
-    };
+    throw new AiGradingUnavailableError('grading_model_failed', err);
   }
   stages.push({
     name: 'RAG-Enhanced Grading',
@@ -294,7 +292,7 @@ export async function gradeSubmission(
 
   return {
     // Original fields
-    suggestedGrade: gradingResult.suggestedGrade ?? Math.round(maxPoints * 0.75),
+    suggestedGrade: requireGrade(gradingResult.suggestedGrade),
     strengths: gradingResult.strengths ?? [],
     improvements: gradingResult.improvements ?? [],
     deductionRationale: gradingResult.deductionRationale ?? '',

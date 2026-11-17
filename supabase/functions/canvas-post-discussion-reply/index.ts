@@ -1,23 +1,27 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { CANVAS_WRITES_ENABLED, corsFor, guard } from '../_shared/guard.ts'
+import { denoGuardDeps } from '../_shared/deno_deps.ts'
 
-const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-canvas-token',
-}
 
 serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return new Response('ok', { headers: corsHeaders, status: 200 })
+    if (!CANVAS_WRITES_ENABLED && req.method !== 'OPTIONS') {
+        return new Response(JSON.stringify({ error: 'CANVAS_WRITES_DISABLED' }), {
+            status: 403,
+            headers: { ...corsFor(req, denoGuardDeps.getEnv), 'Content-Type': 'application/json' },
+        })
     }
+    const g = await guard(req, denoGuardDeps, { course: true })
+    if (g instanceof Response) return g
+    const corsHeaders = g.cors
 
     try {
-        const CANVAS_API_TOKEN = req.headers.get('x-canvas-token') || Deno.env.get('CANVAS_API_TOKEN')
+        const CANVAS_API_TOKEN = g.canvasToken
 
         if (!CANVAS_API_TOKEN) {
             throw new Error('CANVAS_API_TOKEN not set')
         }
 
-        const { courseId, topicId, message, entryId } = await req.json()
+        const { courseId, topicId, message, entryId } = g.body
         if (!courseId || !topicId || !message) {
             throw new Error('courseId, topicId, and message are required')
         }

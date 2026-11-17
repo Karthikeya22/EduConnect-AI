@@ -217,7 +217,7 @@ function ClickstreamAnalyticsInner({ onBack, onNavigateTo, onLogout, currentPath
 
     try {
       const [views, activity] = await Promise.allSettled([
-        canvasAPI.getPageViews(studentId),
+        activeCourse ? canvasAPI.getPageViews(String(activeCourse.id), studentId) : Promise.resolve(null),
         activeCourse ? canvasAPI.getStudentCourseActivity(activeCourse.id, studentId) : Promise.resolve(null),
       ]);
 

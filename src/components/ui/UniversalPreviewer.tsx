@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import * as Icons from '@/src/components/ui/Icons';
 import { Skeleton } from '@/src/components/ui/Skeleton';
+import { activeCourseId, authErrorMessage, gradingAuthHeaders } from '@/src/lib/gradingApi';
+import { gradingApiBase } from '@/src/lib/llmProviders';
 
 interface UniversalPreviewerProps {
   url: string;
@@ -40,8 +42,6 @@ interface NotebookCell {
 /** In-memory file cache so switching students/files doesn't re-download. */
 const fileBufferCache = new Map<string, ArrayBuffer>();
 const inflightFetches = new Map<string, Promise<ArrayBuffer>>();
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
-
 function isBrowserLocalUrl(url: string) {
   return url.startsWith('blob:') || url.startsWith('data:') || url.includes('localhost') || url.includes('127.0.0.1');
 }
@@ -77,25 +77,19 @@ async function fetchFileBuffer(url: string): Promise<ArrayBuffer> {
   if (existing) return (await existing).slice(0);
 
   const promise = (async () => {
-    const token = localStorage.getItem('custom_canvas_token') || '';
     // Canvas CDN URLs block browser CORS — always proxy remote files through our API.
-    const fetchUrl = isBrowserLocalUrl(url)
+    const local = isBrowserLocalUrl(url);
+    const fetchUrl = local
       ? url
-      : `${API_BASE_URL}/api/proxy-file?url=${encodeURIComponent(url)}`;
-
-    const headers: Record<string, string> = {};
-    if (!isBrowserLocalUrl(url) && token) {
-      headers['X-Canvas-Token'] = token;
-    } else if (token && isBrowserLocalUrl(url)) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
+      : `${gradingApiBase()}/api/proxy-file?course_id=${encodeURIComponent(activeCourseId())}&url=${encodeURIComponent(url)}`;
+    const headers: Record<string, string> = local ? {} : await gradingAuthHeaders();
 
     const response = await fetch(fetchUrl, { headers });
     if (!response.ok) {
       let detail = `HTTP ${response.status}`;
       try {
         const errJson = await response.clone().json();
-        if (errJson?.error) detail = errJson.error;
+        if (errJson?.error) detail = authErrorMessage(errJson) || errJson.error;
       } catch {
         /* ignore */
       }
@@ -172,6 +166,9 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
     return (m?.[1] || fromName || '').replace(/[^a-z0-9]/g, '');
   }, [filename, url]);
 
+  const isAudio = ['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma'].includes(ext);
+  const isVideo = ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi'].includes(ext);
+
   const formatLabel = useMemo(() => {
     if (['pdf'].includes(ext)) return 'PDF';
     if (['docx', 'doc'].includes(ext)) return 'Word';
@@ -179,8 +176,10 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
     if (['xlsx', 'xls', 'csv'].includes(ext)) return 'Excel';
     if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return 'Image';
     if (ext === 'ipynb') return 'Notebook';
+    if (isAudio) return 'Audio';
+    if (isVideo) return 'Video';
     return 'File';
-  }, [ext]);
+  }, [ext, isAudio, isVideo]);
 
   const displayName = useMemo(() => {
     try {
@@ -236,6 +235,29 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
             return;
           }
           setPdfObjectUrl(objectUrl); // reuse blob URL slot for images
+          return;
+        }
+
+        if (['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma', 'mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi'].includes(ext)) {
+          const mime =
+            ext === 'mp3' ? 'audio/mpeg' :
+            ext === 'wav' ? 'audio/wav' :
+            ext === 'm4a' ? 'audio/mp4' :
+            ext === 'ogg' ? 'audio/ogg' :
+            ext === 'flac' ? 'audio/flac' :
+            ext === 'mp4' || ext === 'm4v' ? 'video/mp4' :
+            ext === 'mov' ? 'video/quicktime' :
+            ext === 'webm' ? 'video/webm' :
+            ext === 'mkv' ? 'video/x-matroska' :
+            ext === 'avi' ? 'video/x-msvideo' :
+            `application/octet-stream`;
+          const blob = new Blob([arrayBuffer], { type: mime });
+          const objectUrl = URL.createObjectURL(blob);
+          if (cancelled) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+          }
+          setPdfObjectUrl(objectUrl);
           return;
         }
 
@@ -499,6 +521,48 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
           >
             Retry preview
           </button>
+        </div>
+      );
+    }
+
+    // 0. Audio / Video native players
+    if (isAudio && pdfObjectUrl) {
+      return (
+        <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-zinc-950 p-8" data-testid="audio-preview">
+          <div className="text-[10px] font-black uppercase tracking-widest text-zinc-400">{displayName}</div>
+          <audio controls src={pdfObjectUrl} className="w-full max-w-xl" preload="metadata">
+            Your browser does not support audio playback.
+          </audio>
+          <a
+            href={pdfObjectUrl}
+            download={displayName}
+            className="text-[10px] font-black uppercase tracking-widest text-indigo-400 hover:text-indigo-300"
+          >
+            Download audio
+          </a>
+        </div>
+      );
+    }
+    if (isVideo && pdfObjectUrl) {
+      return (
+        <div className="h-full w-full flex flex-col bg-zinc-950" data-testid="video-preview">
+          <div className="p-2 border-b border-white/5 text-[10px] font-black uppercase tracking-widest text-zinc-400 truncate">
+            {displayName}
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4 min-h-0">
+            <video controls src={pdfObjectUrl} className="max-w-full max-h-full rounded-lg shadow-2xl" preload="metadata">
+              Your browser does not support video playback.
+            </video>
+          </div>
+          <div className="p-2 border-t border-white/5 flex justify-end">
+            <a
+              href={pdfObjectUrl}
+              download={displayName}
+              className="text-[10px] font-black uppercase tracking-widest text-indigo-400 hover:text-indigo-300"
+            >
+              Download video
+            </a>
+          </div>
         </div>
       );
     }

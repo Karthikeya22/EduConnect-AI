@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'https://pxvwdjrraronjlumwljv.supabase.co';
-const supabaseAnonKey = 'sb_publishable_nPwHDZEKALJdyqg7XaCSFQ_lrcsv-3o';
+const supabaseUrl = (process.env.SUPABASE_URL ?? (() => { throw new Error('Set SUPABASE_URL'); })());
+const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY ?? (() => { throw new Error('Set SUPABASE_ANON_KEY'); })());
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 async function run() {

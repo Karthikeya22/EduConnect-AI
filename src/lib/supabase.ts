@@ -1,7 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://pxvwdjrraronjlumwljv.supabase.co';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_nPwHDZEKALJdyqg7XaCSFQ_lrcsv-3o';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set (see .env.example).');
+}
 
 const realSupabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
@@ -292,7 +295,11 @@ async function handleCanvasError(response: Response): Promise<{ data: any; error
   return { data: null, error: { message: `Canvas API Error: ${parsedError}` } };
 }
 
+export const GRADE_PUBLICATION_DISABLED = 'GRADE_PUBLICATION_DISABLED';
+const publicationDisabled = () => ({ data: null, error: { message: GRADE_PUBLICATION_DISABLED } });
+
 async function executeMockFunction(name: string, options?: any): Promise<{ data: any; error: any }> {
+  if (name === 'canvas-post-grade') return publicationDisabled();
   console.log(`[Mock Edge Function Proxy] "${name}" invoked with:`, options);
   const customToken = options?.headers?.['x-canvas-token'] || localStorage.getItem('custom_canvas_token');
   const body = options?.body || {};
@@ -429,24 +436,6 @@ async function executeMockFunction(name: string, options?: any): Promise<{ data:
         return await handleCanvasError(response);
       }
 
-      if (name === 'canvas-post-grade') {
-        const response = await fetch(`/canvas-api/api/v1/courses/${courseId}/assignments/${assignmentId}/submissions/${studentId}`, {
-          method: 'PUT',
-          headers: { 
-            'Authorization': `Bearer ${customToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ 
-            submission: { posted_grade: body.grade.toString() },
-            comment: body.comment ? { text_comment: body.comment } : undefined
-          })
-        });
-        if (response.ok) {
-          return { data: { success: true }, error: null };
-        }
-        return await handleCanvasError(response);
-      }
-
       if (name === 'canvas-get-dashboard-stats') {
         const coursesResponse = await fetch(`/canvas-api/api/v1/courses/${courseId}/todo`, {
           headers: { 'Authorization': `Bearer ${customToken}` }
@@ -550,13 +539,85 @@ async function executeMockFunction(name: string, options?: any): Promise<{ data:
       ];
       break;
 
-    case 'canvas-get-submissions':
-      data = [
-        { id: 'sub-1', assignment_id: 'canvas-assign-1', user_id: 'stu-1', user: { short_name: "Alexander Martinez" }, submission_type: "online_upload", body: "Mock code submission content...", url: "#", submitted_at: new Date(Date.now() - 6*24*60*60*1000).toISOString(), score: 95 },
-        { id: 'sub-2', assignment_id: 'canvas-assign-1', user_id: 'stu-2', user: { short_name: "Sarah Chen" }, submission_type: "online_upload", body: "Mock code submission content...", url: "#", submitted_at: new Date(Date.now() - 6*24*60*60*1000).toISOString(), score: 98 },
-        { id: 'sub-3', assignment_id: 'canvas-assign-2', user_id: 'stu-4', user: { short_name: "Elena Rostova" }, submission_type: "online_upload", body: "Mock code submission content...", url: "#", submitted_at: new Date(Date.now() - 12*60*60*1000).toISOString(), score: null }
+    case 'canvas-get-submissions': {
+      const allSubs = [
+        {
+          id: 'sub-1',
+          assignment_id: 'canvas-assign-1',
+          user_id: 'stu-1',
+          user: { short_name: 'Alexander Martinez' },
+          submission_type: 'online_upload',
+          body:
+            'Lab 1 HDFS setup: I created /user/amartinez/labs/lab1, uploaded sample logs with hdfs dfs -put, verified block replication with fsck, and listed file sizes with hdfs dfs -du -h.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+          score: 95,
+        },
+        {
+          id: 'sub-2',
+          assignment_id: 'canvas-assign-1',
+          user_id: 'stu-2',
+          user: { short_name: 'Sarah Chen' },
+          submission_type: 'online_upload',
+          body:
+            'Completed HDFS directory setup. Used hdfs dfs -mkdir -p, put a 200MB CSV, confirmed 3x replication, and documented NameNode vs DataNode roles briefly.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+          score: 98,
+        },
+        {
+          id: 'sub-3',
+          assignment_id: 'canvas-assign-2',
+          user_id: 'stu-4',
+          user: { short_name: 'Elena Rostova' },
+          submission_type: 'online_upload',
+          body:
+            'MapReduce WordCount with a custom Combiner that sums partial counts per map task before shuffle. Combiner class extends Reducer; tested on a small corpus.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString(),
+          score: null,
+        },
+        {
+          id: 'sub-l3-1',
+          assignment_id: 'canvas-assign-3',
+          user_id: 'stu-1',
+          user: { short_name: 'Alexander Martinez' },
+          submission_type: 'online_upload',
+          body:
+            'Lab 3 Spark join: loaded customers and orders as DataFrames, used broadcast join for the small customer dimension, wrote parquet output, and measured stage time. Sampling: stratified sampling of orders by region with fraction 0.1.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+          score: 95,
+        },
+        {
+          id: 'sub-l3-2',
+          assignment_id: 'canvas-assign-3',
+          user_id: 'stu-2',
+          user: { short_name: 'Sarah Chen' },
+          submission_type: 'online_upload',
+          body:
+            'Implemented Spark Core RDD join between clicks and sessions, cached intermediate RDDs, and ingested JSON logs with spark.read.json. Included unit tests for key skew handling.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+          score: 98,
+        },
+        {
+          id: 'sub-l3-3',
+          assignment_id: 'canvas-assign-3',
+          user_id: 'stu-4',
+          user: { short_name: 'Elena Rostova' },
+          submission_type: 'online_upload',
+          body:
+            'Started Lab 3 but only configured SparkSession. Did not finish the join or data ingestion steps yet.',
+          url: '#',
+          submitted_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+          score: null,
+        },
       ];
+      const want = String(assignmentId || body?.assignment_id || '');
+      data = want ? allSubs.filter((s) => String(s.assignment_id) === want) : allSubs;
       break;
+    }
 
     case 'canvas-get-discussions':
       data = [
@@ -610,10 +671,6 @@ async function executeMockFunction(name: string, options?: any): Promise<{ data:
 
     case 'canvas-post-discussion-reply':
       data = { success: true, id: 'entry-' + Math.random().toString(36).substring(7) };
-      break;
-
-    case 'canvas-post-grade':
-      data = { success: true };
       break;
 
     case 'canvas-get-modules':
@@ -859,6 +916,8 @@ export const supabase = {
 
   functions: {
     async invoke(name: string, options?: any) {
+      // Grade publication is contained server-side too; never reach the Edge or mock proxy.
+      if (name === 'canvas-post-grade') return publicationDisabled();
       try {
         const res = await realSupabase.functions.invoke(name, options);
         if (res.error) {

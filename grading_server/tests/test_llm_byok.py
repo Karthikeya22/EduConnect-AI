@@ -10,11 +10,15 @@ from grading_server.utils.llm_registry import (
     EMBEDDING_DIM,
     get_provider,
     list_providers,
-    normalize_embedding,
     PROVIDERS,
 )
 from grading_server.utils import llm_client
 from grading_server.utils.byok import resolve_llm_credentials
+from grading_server.utils.embedding_space import (
+    EmbeddingDimensionError,
+    space_for_provider,
+    validate_embeddings,
+)
 
 
 def test_all_providers_listed():
@@ -35,10 +39,12 @@ def test_claude_via_openrouter_uses_openrouter_base():
     assert cfg.openrouter_headers is True
 
 
-def test_normalize_embedding_pad_and_truncate():
-    assert len(normalize_embedding([1.0, 2.0], 4)) == 4
-    assert normalize_embedding([1.0, 2.0], 4)[2:] == [0.0, 0.0]
-    assert len(normalize_embedding(list(range(1000)), EMBEDDING_DIM)) == EMBEDDING_DIM
+def test_embeddings_are_validated_not_padded_or_truncated():
+    space = space_for_provider("openai")
+    for wrong in ([1.0, 2.0], [0.1] * 1000):
+        with pytest.raises(EmbeddingDimensionError):
+            validate_embeddings([wrong], 1, space)
+    assert len(validate_embeddings([[0.1] * EMBEDDING_DIM], 1, space)[0]) == EMBEDDING_DIM
 
 
 def test_unknown_provider_raises():
@@ -85,18 +91,37 @@ def test_verify_llm_reports_step_on_embed_fail():
         assert "Embedding verification failed" in str(ei.value)
 
 
-def test_compat_embed_requests_dimensions_when_supported():
+def test_verify_llm_nvidia_403_explains_build_key():
+    with patch.object(
+        llm_client,
+        "chat_text",
+        side_effect=RuntimeError(
+            'LLM HTTP 403 https://integrate.api.nvidia.com/v1/chat/completions: '
+            '{"status":403,"title":"Forbidden","detail":"Authorization failed"}'
+        ),
+    ):
+        with pytest.raises(RuntimeError) as ei:
+            llm_client.verify_llm("nvidia", '  "nvapi-test"  ')
+        msg = str(ei.value)
+        assert "Chat verification failed" in msg
+        assert "build.nvidia.com" in msg
+        assert "Public API Endpoints" in msg
+
+
+def test_compat_embed_requests_dimensions_and_rejects_wrong_size():
     captured = {}
+    returned = {"dim": 1536}
 
     def fake_http(method, url, *, api_key, body=None, extra_headers=None, timeout=90.0):
         captured["body"] = body
-        return {
-            "data": [{"index": 0, "embedding": [0.5] * 1536}]
-        }
+        return {"data": [{"index": 0, "embedding": [0.5] * returned["dim"]}]}
 
     with patch.object(llm_client, "_http_json", side_effect=fake_http):
-        vecs = llm_client.embed_texts(["hi"], provider="openai", api_key="sk")
-    assert captured["body"]["dimensions"] == EMBEDDING_DIM
+        with pytest.raises(EmbeddingDimensionError):
+            llm_client.embed_texts(["hi"], provider="openai", api_key="sk", task="document")
+        assert captured["body"]["dimensions"] == EMBEDDING_DIM
+        returned["dim"] = EMBEDDING_DIM
+        vecs = llm_client.embed_texts(["hi"], provider="openai", api_key="sk", task="document")
     assert len(vecs[0]) == EMBEDDING_DIM
 
 
@@ -105,3 +130,23 @@ def test_providers_have_chat_embed_vision_models():
         assert cfg.chat_model, pid
         assert cfg.embedding_model, pid
         assert cfg.vision_model, pid
+
+
+def test_gemini_client_sets_http_timeout():
+    """Hung Gemini SDK calls without timeout wedge asyncio.to_thread workers."""
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    with patch("google.genai.Client", FakeClient):
+        llm_client._gemini_client("test-key")
+
+    assert "http_options" in captured
+    opts = captured["http_options"]
+    timeout_ms = getattr(opts, "timeout", None)
+    if timeout_ms is None and isinstance(opts, dict):
+        timeout_ms = opts.get("timeout")
+    assert timeout_ms is not None
+    assert float(timeout_ms) >= 30_000  # at least 30s (SDK uses milliseconds)

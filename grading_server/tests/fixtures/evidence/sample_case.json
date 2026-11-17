@@ -1,0 +1,21 @@
+{
+  "submission_text": "Intro.\n\nWe used stratified sampling with n=50.\n\nConclusion.",
+  "presented_chunk_texts": ["Intro."],
+  "verdicts": [
+    {
+      "criterion_id": "c1",
+      "criterion_name": "Methods",
+      "dimension": "content",
+      "score": 1,
+      "max_score": 10,
+      "status": "partial",
+      "justification": "Student does not demonstrate sampling.",
+      "evidence_anchor": "not found",
+      "missing_keywords": ["sampling"],
+      "required_concepts": ["sampling"],
+      "covered_concepts": [],
+      "supporting_materials": []
+    }
+  ],
+  "rubric_criteria": []
+}

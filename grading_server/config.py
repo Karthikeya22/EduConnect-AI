@@ -36,6 +36,11 @@ GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("VITE_GEMI
 # ── Supabase ──────────────────────────────────────────────────────────────────
 SUPABASE_URL: str = _require("SUPABASE_URL", "VITE_SUPABASE_URL")
 SUPABASE_KEY: str = _require("SUPABASE_KEY", "VITE_SUPABASE_ANON_KEY")
+# Server-only key for narrowly scoped trusted operations such as Canvas
+# membership sync. Never expose this through a VITE_* variable.
+SUPABASE_SERVICE_ROLE_KEY: str | None = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or None
+# Only for projects still on the legacy HS256 shared secret; asymmetric keys use the project JWKS.
+SUPABASE_JWT_SECRET: str | None = os.getenv("SUPABASE_JWT_SECRET") or None
 
 # ── Canvas ────────────────────────────────────────────────────────────────────
 CANVAS_BASE_URL: str = os.getenv(
@@ -44,11 +49,31 @@ CANVAS_BASE_URL: str = os.getenv(
 
 # ── Server ────────────────────────────────────────────────────────────────────
 FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5557"))
-# Default off on Render/Railway/Fly; on locally unless FLASK_DEBUG is set.
-_default_debug = "false" if os.getenv("RENDER") or os.getenv("RAILWAY_ENVIRONMENT") else "true"
-FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", _default_debug).lower() == "true"
+# Werkzeug debugger allows code execution; opt-in only, never implied by environment.
+FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+# Dev server bind; loopback unless explicitly overridden. Gunicorn (Procfile) is unaffected.
+FLASK_HOST: str = os.getenv("FLASK_HOST", "127.0.0.1")
+# Browser origins allowed by CORS. CORS is not authentication.
+CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001,https://edu-connect-ai-three.vercel.app",
+    ).split(",")
+    if o.strip()
+]
 
 # ── Model Config ──────────────────────────────────────────────────────────────
 GEMINI_GRADING_MODEL: str = os.getenv("GEMINI_GRADING_MODEL", "models/gemini-2.5-flash")
 GEMINI_EMBEDDING_MODEL: str = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
 GEMINI_LITE_MODEL: str = os.getenv("GEMINI_LITE_MODEL", "models/gemini-2.5-flash")
+
+# ── Evidence protocol (Teacher Hub is automatic; no instructor mode picker) ───
+# coverage_recovery = verify + bounded recovery when an omission penalty is proposed.
+# Set EDUCONNECT_EVIDENCE_MODE=baseline|verification_only for operator ablations.
+# Client override only if EDUCONNECT_ALLOW_CLIENT_EVIDENCE_MODE=1 (local research).
+EDUCONNECT_EVIDENCE_MODE: str = os.getenv("EDUCONNECT_EVIDENCE_MODE", "coverage_recovery")
+EDUCONNECT_ALLOW_CLIENT_EVIDENCE_MODE: bool = (
+    os.getenv("EDUCONNECT_ALLOW_CLIENT_EVIDENCE_MODE", "false").lower()
+    in ("1", "true", "yes", "on")
+)

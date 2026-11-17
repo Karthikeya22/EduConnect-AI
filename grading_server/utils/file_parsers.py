@@ -61,10 +61,10 @@ def _describe_visual(
                 image_bytes, mime_type, provider=provider, api_key=api_key
             )
         except Exception as vision_err:
-            print(f"[VISUAL EXTRACT] Vision call failed ({vision_err}); skipping figure")
+            print(f"[VISUAL EXTRACT] Vision call failed ({vision_err}); skipping figure", flush=True)
             return ""
     except Exception as e:
-        print(f"[VISUAL EXTRACT] Error: {e}")
+        print(f"[VISUAL EXTRACT] Error: {e}", flush=True)
         return ""
 
 

@@ -1,4 +1,4 @@
-import { supabase } from '@/src/lib/supabase';
+import { supabase, GRADE_PUBLICATION_DISABLED } from '@/src/lib/supabase';
 
 export const canvasAPI = {
     getCustomHeaders() {
@@ -171,24 +171,10 @@ export const canvasAPI = {
         }
     },
 
-    async postGrade(courseId: string, assignmentId: string, studentId: string, grade: number | string, comment: string) {
-        try {
-            const { data, error } = await supabase.functions.invoke('canvas-post-grade', {
-                body: { courseId, assignmentId, studentId, grade, comment },
-                headers: this.getCustomHeaders()
-            });
-            if (error) {
-                const msg = data?.error || error.message || "Failed to post grade";
-                console.error("Canvas API postGrade Error:", msg, { data, error });
-                throw new Error(msg);
-            }
-            if (!data) throw new Error("No data returned from postGrade");
-            if (data?.error) throw new Error(data.error);
-            return data;
-        } catch (e: any) {
-            console.error("canvasAPI.postGrade critical failure:", e);
-            throw e;
-        }
+    // Grade publication is disabled (Rule #1). No approval gate exists yet, so this
+    // must not invoke anything.
+    async postGrade(_courseId: string, _assignmentId: string, _studentId: string, _grade: number | string, _comment: string): Promise<never> {
+        throw new Error(GRADE_PUBLICATION_DISABLED);
     },
 
     async getDashboardStats(courseId: string) {
@@ -231,10 +217,10 @@ export const canvasAPI = {
         }
     },
 
-    async getPageViews(studentId: string, startTime?: string, endTime?: string) {
+    async getPageViews(courseId: string, studentId: string, startTime?: string, endTime?: string) {
         try {
             const { data, error } = await supabase.functions.invoke('canvas-get-page-views', {
-                body: { studentId, startTime, endTime },
+                body: { courseId, studentId, startTime, endTime },
                 headers: this.getCustomHeaders()
             });
             if (error) {

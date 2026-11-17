@@ -6,15 +6,39 @@ Used by both POST /api/ingest and POST /api/ingest/file endpoints.
 
 from __future__ import annotations
 import asyncio
+import hashlib
 import traceback
+import uuid
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from grading_server.utils.authz import trusted_lms_host
 from grading_server.utils.supabase_client import get_supabase
 from grading_server.utils.llm_client import embed_texts as llm_embed_texts
 from grading_server.utils.llm_registry import get_provider
+from grading_server.utils.embedding_space import (
+    INDEX_VERSION,
+    EmbeddingProvenanceError,
+    EmbeddingSpace,
+    space_for_provider,
+)
 
 
+# Changing chunk_size/overlap requires bumping embedding_space.INDEX_VERSION.
 _splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+
+META_TABLE = "assignment_embedding_meta"
+CHUNKS_TABLE = "course_material_chunks"
+_RPC_MISSING_MARKERS = ("pgrst202", "could not find the function")
+
+
+def course_file_scope_key(course_id: str, canvas_file_id: str) -> str:
+    return f"course:{course_id}:file:{canvas_file_id}"
+
+
+def assignment_scope_key(course_id: str, assignment_id: str) -> str:
+    """Course-qualified so new data never collides with legacy, unowned 'assignment:<id>' rows."""
+    return f"course:{course_id}:assignment:{assignment_id}"
 
 _SCHEMA_MISSING_MARKERS = (
     "pgrst205",
@@ -31,45 +55,72 @@ def _is_schema_missing_error(err: Exception) -> bool:
     return any(marker in msg for marker in _SCHEMA_MISSING_MARKERS)
 
 
-def embed_texts(texts: list[str], api_key: str | None = None, provider: str | None = None) -> list[list[float]]:
+def embed_texts(
+    texts: list[str],
+    api_key: str | None = None,
+    provider: str | None = None,
+    task: str = "document",
+) -> list[list[float]]:
     """Module-level embed helper (patchable in tests)."""
     if not provider or not api_key:
         raise ValueError("BYOK required: provider and api_key are required for embeddings")
-    return llm_embed_texts(texts, provider=provider, api_key=api_key)
+    return llm_embed_texts(texts, provider=provider, api_key=api_key, task=task)
 
 
 async def _embed(texts: list[str], *, provider: str, api_key: str) -> list[list[float]]:
-    return await asyncio.to_thread(embed_texts, texts, api_key, provider)
+    return await asyncio.to_thread(embed_texts, texts, api_key, provider, "document")
 
 
-async def set_embedding_meta(
+async def activate_embedding_batch(
     *,
     scope_key: str,
-    embedding_provider: str,
-    assignment_id: str | None = None,
-    course_id: str | None = None,
-) -> None:
-    """Persist which provider produced embeddings for this scope."""
+    space: EmbeddingSpace,
+    provider: str,
+    rows: list[dict],
+    assignment_id: str | None,
+    course_id: str | None,
+    canvas_file_id: str | None,
+    source_updated_at: str | None = None,
+    extra_config: dict | None = None,
+) -> str:
+    """Atomically replace a scope's chunks and record provenance (single DB transaction).
+
+    Any failure raises; the RPC rolls back, so previously active data is untouched.
+    Nothing is deleted from Python. The RPC serializes activations per scope and
+    rejects one whose source_updated_at is older than the active one (STALE_ACTIVATION).
+    """
+    if len(rows) != len({r["chunk_index"] for r in rows}):
+        raise ValueError("duplicate chunk_index in batch")
+    batch_id = str(uuid.uuid4())
+    cfg = get_provider(provider)
+    config = {**(extra_config or {}), **space.config(), "index_version": INDEX_VERSION, "lms_host": trusted_lms_host()}
+    if source_updated_at:
+        config["source_updated_at"] = source_updated_at
+    params = {
+        "p_scope_key": scope_key,
+        "p_batch_id": batch_id,
+        "p_space_id": space.space_id,
+        "p_index_version": INDEX_VERSION,
+        "p_config": config,
+        "p_embedding_provider": cfg.id,
+        "p_embedding_model": cfg.embedding_model,
+        "p_lms_host": trusted_lms_host(),
+        "p_assignment_id": assignment_id,
+        "p_course_id": course_id,
+        "p_canvas_file_id": canvas_file_id,
+        "p_rows": rows,
+    }
+    sb = get_supabase()
     try:
-        cfg = get_provider(embedding_provider)
-        sb = get_supabase()
-        row = {
-            "scope_key": scope_key,
-            "assignment_id": assignment_id,
-            "course_id": course_id,
-            "embedding_provider": cfg.id,
-            "embedding_model": cfg.embedding_model,
-        }
-
-        def _upsert():
-            sb.table("assignment_embedding_meta").upsert(
-                row, on_conflict="scope_key"
-            ).execute()
-
-        await asyncio.to_thread(_upsert)
+        await asyncio.to_thread(lambda: sb.rpc("activate_embedding_batch", params).execute())
     except Exception as e:
-        if not _is_schema_missing_error(e):
-            print(f"[embedding_meta] upsert failed: {e}")
+        if any(m in str(e).lower() for m in _RPC_MISSING_MARKERS) or _is_schema_missing_error(e):
+            raise EmbeddingProvenanceError(
+                "Run grading_server/migrations/2026_10_31_embedding_provenance.sql before ingesting.",
+                code="EMBEDDING_MIGRATION_REQUIRED",
+            ) from e
+        raise
+    return batch_id
 
 
 async def get_embedding_meta(scope_key: str) -> dict | None:
@@ -94,32 +145,104 @@ async def get_embedding_meta(scope_key: str) -> dict | None:
         return None
 
 
-async def assert_embedding_provider_compatible(
+def _load_provenance_sync(assignment_id: str, course_id: str) -> tuple[list[dict], bool]:
+    """Metadata rows retrieval can combine (this assignment + the course's files, plus the
+    legacy course row) and whether any visible chunk in the course lacks provenance."""
+    sb = get_supabase()
+    cid = str(course_id)
+    own = assignment_scope_key(cid, str(assignment_id))
+    rows = sb.table(META_TABLE).select("scope_key,space_id,index_version").eq("course_id", cid).execute().data or []
+    metas = [
+        m for m in rows
+        if m.get("scope_key") in (own, f"course:{cid}") or str(m.get("scope_key", "")).startswith(f"course:{cid}:file:")
+    ]
+    legacy = sb.table(CHUNKS_TABLE).select("id").eq("course_id", cid).is_(
+        "embedding_space_id", "null"
+    ).limit(1).execute().data or []
+    return metas, bool(legacy)
+
+
+async def assert_embedding_space_compatible(
     *,
     assignment_id: str,
-    course_id: str | None,
-    provider: str,
-) -> None:
-    """
-    Raise RuntimeError with code REINGEST_REQUIRED if stored embeddings
-    were produced by a different provider.
-    """
-    keys = [f"assignment:{assignment_id}"]
-    if course_id:
-        keys.append(f"course:{course_id}")
+    course_id: str,
+    space: EmbeddingSpace,
+) -> str:
+    """Gate grading on stored-vector provenance across assignment and course scopes.
 
-    for key in keys:
-        meta = await get_embedding_meta(key)
-        if not meta:
-            continue
-        stored = (meta.get("embedding_provider") or "").strip().lower()
-        if stored and stored != provider.strip().lower():
-            raise RuntimeError(
-                "REINGEST_REQUIRED:"
-                f"Course materials were embedded with '{stored}', but grading "
-                f"is using '{provider}'. Re-ingest materials with the current "
-                "provider before grading."
-            )
+    Returns "active" (all stored data is in `space`) or "no_corpus" (nothing stored).
+    Raises EmbeddingProvenanceError: UNKNOWN_PROVENANCE (legacy metadata or chunks
+    without a recorded space), REINGEST_REQUIRED (different space or index version),
+    EMBEDDING_MIGRATION_REQUIRED (provenance columns absent). Provider/model strings
+    are never used to certify data.
+    """
+    try:
+        metas, has_legacy_chunks = await asyncio.to_thread(_load_provenance_sync, str(assignment_id), course_id)
+    except Exception as e:
+        if _is_schema_missing_error(e):
+            raise EmbeddingProvenanceError(
+                "Provenance columns are missing; apply the embedding provenance migration.",
+                code="EMBEDDING_MIGRATION_REQUIRED",
+            ) from e
+        raise
+    if has_legacy_chunks or any(not m.get("space_id") for m in metas):
+        raise EmbeddingProvenanceError(
+            "Stored course materials have no recorded embedding space. Re-ingest them before grading.",
+            code="UNKNOWN_PROVENANCE",
+        )
+    mismatched = [m["scope_key"] for m in metas if m["space_id"] != space.space_id or m.get("index_version") != INDEX_VERSION]
+    if mismatched:
+        raise EmbeddingProvenanceError(
+            f"Materials in {', '.join(sorted(mismatched))} were embedded in a different space or index version. "
+            "Re-ingest them with the current provider before grading.",
+            code="REINGEST_REQUIRED",
+        )
+    return "active" if metas else "no_corpus"
+
+
+def course_cache_is_fresh(
+    registry_row: dict | None,
+    meta: dict | None,
+    *,
+    course_id: str,
+    canvas_file_id: str,
+    updated_at: str,
+    space: EmbeddingSpace,
+) -> bool:
+    """Skip re-embedding only when the stored file is provably the same source in the same space."""
+    if not registry_row or not meta:
+        return False
+    return (
+        registry_row.get("status") == "ready"
+        and (registry_row.get("updated_at") or "") == updated_at
+        and str(registry_row.get("course_id")) == str(course_id)
+        and str(registry_row.get("canvas_file_id")) == str(canvas_file_id)
+        and meta.get("scope_key") == course_file_scope_key(course_id, canvas_file_id)
+        and meta.get("space_id") == space.space_id
+        and meta.get("index_version") == INDEX_VERSION
+        and bool(trusted_lms_host())
+        and meta.get("lms_host") == trusted_lms_host()
+    )
+
+
+def assignment_content_hash(text: str | None, source_name: str) -> str:
+    return hashlib.sha256(f"{source_name}\x00{text or ''}".encode("utf-8")).hexdigest()
+
+
+def assignment_cache_is_fresh(meta: dict | None, *, scope_key: str, content_hash: str, space: EmbeddingSpace) -> bool:
+    """Skip re-embedding assignment text only when the same text is active in the same space."""
+    if not meta:
+        return False
+    cfg = meta.get("embedding_config") or {}
+    return (
+        meta.get("scope_key") == scope_key
+        and cfg.get("content_hash") == content_hash
+        and meta.get("space_id") == space.space_id
+        and meta.get("index_version") == INDEX_VERSION
+        and bool(meta.get("active_batch_id"))
+        and bool(trusted_lms_host())
+        and meta.get("lms_host") == trusted_lms_host()
+    )
 
 
 async def ingest_course_material(
@@ -130,15 +253,20 @@ async def ingest_course_material(
     source_name: str = "Course Material",
     api_key: str | None = None,
     provider: str | None = None,
+    course_id: str | None = None,
 ) -> dict:
     """
-    Full ingestion pipeline:
+    Full ingestion pipeline (every row is scoped to course_id + assignment_id):
     1. Chunk + embed course material text
     2. Upsert rubric criteria
     3. Optionally embed + upsert exemplars
     """
     if not provider or not api_key:
         raise ValueError("BYOK required: provider and api_key are required for ingest")
+    if not course_id:
+        raise ValueError("course_id is required: ingested data is course-scoped")
+    course_id = str(course_id)
+    space = space_for_provider(provider)
 
     sb = get_supabase()
 
@@ -146,32 +274,41 @@ async def ingest_course_material(
     if not chunks and course_material_text:
         chunks = [course_material_text[:1000]]
 
+    scope_key = assignment_scope_key(course_id, str(assignment_id))
+    content_hash = assignment_content_hash(course_material_text, source_name)
     chunks_stored = 0
-    if chunks:
+    text_cached = bool(chunks) and assignment_cache_is_fresh(
+        await get_embedding_meta(scope_key), scope_key=scope_key, content_hash=content_hash, space=space
+    )
+    if text_cached:
+        chunks_stored = len(chunks)
+    elif chunks:
         chunk_embeddings = await _embed(chunks, provider=provider, api_key=api_key)
+        if len(chunk_embeddings) != len(chunks):
+            raise ValueError(f"embedded {len(chunk_embeddings)} of {len(chunks)} chunks")
 
         chunk_rows = []
         for i, (text, emb) in enumerate(zip(chunks, chunk_embeddings)):
             chunk_rows.append({
-                "assignment_id": assignment_id,
+                "assignment_id": str(assignment_id),
+                "course_id": course_id,
+                "canvas_file_id": None,
                 "chunk_text": text,
                 "chunk_index": i,
                 "source_title": f"{source_name} (chunk {i + 1}/{len(chunks)})",
                 "embedding": emb,
             })
 
-        def _write_assignment_chunks():
-            try:
-                sb.table("course_material_chunks").delete().eq(
-                    "assignment_id", str(assignment_id)
-                ).is_("canvas_file_id", "null").execute()
-            except Exception:
-                sb.table("course_material_chunks").delete().eq(
-                    "assignment_id", str(assignment_id)
-                ).execute()
-            sb.table("course_material_chunks").insert(chunk_rows).execute()
-
-        await asyncio.to_thread(_write_assignment_chunks)
+        await activate_embedding_batch(
+            scope_key=scope_key,
+            space=space,
+            provider=provider,
+            rows=chunk_rows,
+            assignment_id=str(assignment_id),
+            course_id=course_id,
+            canvas_file_id=None,
+            extra_config={"content_hash": content_hash},
+        )
         chunks_stored = len(chunk_rows)
 
     criteria_stored = 0
@@ -181,6 +318,7 @@ async def ingest_course_material(
             criteria_rows.append({
                 "criterion_id": str(c.get("criterion_id") or c.get("id") or f"crit_{i}"),
                 "assignment_id": str(assignment_id),
+                "course_id": course_id,
                 "title": str(c.get("title") or f"Criterion {i}"),
                 "description": str(c.get("description", "")),
                 "max_score": int(c.get("max_score", 10)),
@@ -189,7 +327,7 @@ async def ingest_course_material(
 
         await asyncio.to_thread(
             lambda: sb.table("rubric_criteria")
-                .upsert(criteria_rows, on_conflict="assignment_id,criterion_id")
+                .upsert(criteria_rows, on_conflict="course_id,assignment_id,criterion_id")
                 .execute()
         )
         criteria_stored = len(criteria_rows)
@@ -206,6 +344,7 @@ async def ingest_course_material(
             exemplar_rows.append({
                 "criterion_id": ex["criterion_id"],
                 "assignment_id": assignment_id,
+                "course_id": course_id,
                 "submission_text": ex["submission_text"],
                 "score": int(ex["score"]),
                 "max_score": int(ex["max_score"]),
@@ -215,41 +354,43 @@ async def ingest_course_material(
 
         await asyncio.to_thread(
             lambda: sb.table("exemplars")
-                .upsert(exemplar_rows, on_conflict="assignment_id,criterion_id,score")
+                .upsert(exemplar_rows, on_conflict="course_id,assignment_id,criterion_id,score")
                 .execute()
         )
         exemplars_stored = len(exemplar_rows)
 
-    await set_embedding_meta(
-        scope_key=f"assignment:{assignment_id}",
-        embedding_provider=provider,
-        assignment_id=str(assignment_id),
-    )
-
     return {
         "status": "success",
+        "skipped": text_cached,
+        "cached": text_cached,
         "chunks_stored": chunks_stored,
         "criteria_stored": criteria_stored,
         "exemplars_stored": exemplars_stored,
         "embedding_provider": provider,
+        "embedding_space_id": space.space_id,
+        "index_version": INDEX_VERSION,
     }
 
 
-async def delete_assignment_data(assignment_id: str) -> dict:
+async def delete_assignment_data(assignment_id: str, course_id: str) -> dict:
     """
-    Delete all stored chunks, criteria, and exemplars for a given assignment.
-    Returns counts of deleted items.
+    Delete this assignment's description chunks, criteria, and exemplars within one course.
+    Shared course-file chunks (canvas_file_id set) are never touched here.
     """
+    if not assignment_id or not course_id or str(assignment_id).startswith("course:"):
+        raise ValueError("delete requires a real assignment_id and its course_id")
     sb = get_supabase()
+    aid, cid = str(assignment_id), str(course_id)
 
     def _delete():
-        ex_resp = sb.table("exemplars").delete().eq("assignment_id", assignment_id).execute()
-        ch_resp = sb.table("course_material_chunks").delete().eq("assignment_id", assignment_id).execute()
-        cr_resp = sb.table("rubric_criteria").delete().eq("assignment_id", assignment_id).execute()
+        ex_resp = sb.table("exemplars").delete().eq("assignment_id", aid).eq("course_id", cid).execute()
+        ch_resp = (
+            sb.table("course_material_chunks").delete()
+            .eq("assignment_id", aid).eq("course_id", cid).is_("canvas_file_id", "null").execute()
+        )
+        cr_resp = sb.table("rubric_criteria").delete().eq("assignment_id", aid).eq("course_id", cid).execute()
         try:
-            sb.table("assignment_embedding_meta").delete().eq(
-                "scope_key", f"assignment:{assignment_id}"
-            ).execute()
+            sb.table("assignment_embedding_meta").delete().eq("scope_key", assignment_scope_key(cid, aid)).execute()
         except Exception:
             pass
         return {
@@ -315,13 +456,17 @@ async def ingest_course_file(
     """Ingest one Canvas file into course-scoped chunk cache, or skip if fresh."""
     if not provider or not api_key:
         raise ValueError("BYOK required: provider and api_key are required for ingest")
+    space = space_for_provider(provider)
 
     updated_at = updated_at or ""
+    scope_key = course_file_scope_key(course_id, canvas_file_id)
     existing = await lookup_course_file(course_id, canvas_file_id)
-    if existing and existing.get("status") == "ready" and (existing.get("updated_at") or "") == updated_at:
-        meta = await get_embedding_meta(f"course:{course_id}")
-        stored = (meta or {}).get("embedding_provider")
-        if not stored or stored == provider:
+    if existing and existing.get("status") == "ready":
+        meta = await get_embedding_meta(scope_key)
+        if course_cache_is_fresh(
+            existing, meta,
+            course_id=course_id, canvas_file_id=canvas_file_id, updated_at=updated_at, space=space,
+        ):
             return {
                 "status": "success",
                 "skipped": True,
@@ -329,7 +474,6 @@ async def ingest_course_file(
                 "chunks_stored": int(existing.get("chunk_count") or 0),
             }
 
-    sb = get_supabase()
     aid = f"course:{course_id}"
 
     async def _legacy_fallback() -> dict:
@@ -340,6 +484,7 @@ async def ingest_course_file(
             source_name=filename,
             api_key=api_key,
             provider=provider,
+            course_id=str(course_id),
         )
         return {**result, "skipped": False, "cached": False, "course_cache": False}
 
@@ -367,6 +512,8 @@ async def ingest_course_file(
             raise ValueError("No text extracted from file")
 
         embeddings = await _embed(chunks, provider=provider, api_key=api_key)
+        if len(embeddings) != len(chunks):
+            raise ValueError(f"embedded {len(embeddings)} of {len(chunks)} chunks")
         chunk_rows = []
         for i, (text, emb) in enumerate(zip(chunks, embeddings)):
             chunk_rows.append({
@@ -379,19 +526,22 @@ async def ingest_course_file(
                 "embedding": emb,
             })
 
-        def _write():
-            sb.table("course_material_chunks").delete().eq("course_id", str(course_id)).eq(
-                "canvas_file_id", str(canvas_file_id)
-            ).execute()
-            sb.table("course_material_chunks").insert(chunk_rows).execute()
-
         try:
-            await asyncio.to_thread(_write)
+            await activate_embedding_batch(
+                scope_key=scope_key,
+                space=space,
+                provider=provider,
+                rows=chunk_rows,
+                assignment_id=str(assignment_id) if assignment_id else None,
+                course_id=str(course_id),
+                canvas_file_id=str(canvas_file_id),
+                source_updated_at=updated_at or None,
+            )
         except Exception as e:
-            if not _is_schema_missing_error(e):
+            if "STALE_ACTIVATION" not in str(e):
                 raise
-            print(f"[course_cache] chunk columns unavailable, falling back to assignment scope: {e}")
-            return await _legacy_fallback()
+            # A newer version of this file is already active; keep it and its registry row.
+            return {"status": "success", "skipped": True, "cached": False, "superseded": True, "chunks_stored": 0}
 
         from datetime import datetime, timezone
         await _upsert_registry({
@@ -404,18 +554,14 @@ async def ingest_course_file(
             "last_error": None,
             "ingested_at": datetime.now(timezone.utc).isoformat(),
         })
-        await set_embedding_meta(
-            scope_key=f"course:{course_id}",
-            embedding_provider=provider,
-            course_id=str(course_id),
-            assignment_id=str(assignment_id) if assignment_id else None,
-        )
         return {
             "status": "success",
             "skipped": False,
             "cached": False,
             "chunks_stored": len(chunk_rows),
             "embedding_provider": provider,
+            "embedding_space_id": space.space_id,
+            "index_version": INDEX_VERSION,
         }
     except Exception as e:
         traceback.print_exc()
@@ -450,3 +596,26 @@ async def list_course_file_status(course_id: str) -> list[dict]:
     except Exception as e:
         print(f"[course_cache] status failed: {e}")
         return []
+
+
+def plan_removed_file_reconciliation(
+    course_id: str,
+    registry_rows: list[dict],
+    canvas_file_ids: list[str] | None,
+    listing_complete: bool,
+) -> dict:
+    """
+    Decide which cached course files Canvas no longer lists. Planning only: nothing is deleted here.
+
+    A failed, partial (unfinished pagination) or permission-limited listing proves nothing about
+    deletion, so the result is status 'unknown' with no candidates. Removal of a candidate is a
+    separate, per-file, course-scoped step (course:<cid>:file:<fid>) that the owner approves.
+    """
+    if canvas_file_ids is None or not listing_complete:
+        return {"status": "unknown", "course_id": str(course_id), "removed_candidates": []}
+    listed = {str(f) for f in canvas_file_ids}
+    candidates = sorted(
+        str(r["canvas_file_id"]) for r in registry_rows
+        if str(r.get("course_id")) == str(course_id) and str(r.get("canvas_file_id")) not in listed
+    )
+    return {"status": "complete", "course_id": str(course_id), "removed_candidates": candidates}

@@ -1,4 +1,4 @@
-import { selectPhaseFiles, CanvasCourseFile } from './courseFileRanker';
+import { selectPhaseFiles, selectFilesNeedingIngest, CanvasCourseFile } from './courseFileRanker';
 
 const files: CanvasCourseFile[] = [
   { id: 1, display_name: 'unrelated_notes.pdf', updated_at: '2026-01-01T00:00:00Z' },
@@ -15,4 +15,17 @@ if (phaseA.length !== 5) throw new Error(`expected 5 phaseA, got ${phaseA.length
 if (!phaseA.some(f => String(f.id) === '2')) throw new Error('rubric match missing from phaseA');
 if (!phaseA.some(f => String(f.id) === '5')) throw new Error('instructions match missing from phaseA');
 if (phaseA.length + phaseB.length !== files.length) throw new Error('partition incomplete');
+
+const needing = selectFilesNeedingIngest(
+  [...files, { id: 8, display_name: 'video.mp4', updated_at: '2026-01-01T00:00:00Z' }],
+  [
+    { canvas_file_id: '1', status: 'ready', updated_at: '2026-01-01T00:00:00Z' }, // fresh -> skip
+    { canvas_file_id: 2, status: 'failed', updated_at: '2026-01-02T00:00:00Z' },  // failed -> retry
+    { canvas_file_id: '3', status: 'ready', updated_at: '2025-12-01T00:00:00Z' }, // stale -> re-ingest
+  ]
+).map(f => String(f.id)).sort();
+const expectedNeeding = ['2', '3', '4', '5', '6', '7'];
+if (JSON.stringify(needing) !== JSON.stringify(expectedNeeding)) {
+  throw new Error(`selectFilesNeedingIngest: expected ${expectedNeeding}, got ${needing}`);
+}
 console.log('courseFileRanker.test.ts PASS');

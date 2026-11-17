@@ -1,18 +1,19 @@
 import path from 'path';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-export default defineConfig(({ mode }) => {
-    const env = loadEnv(mode, '.', '');
+export default defineConfig(() => {
     return {
       server: {
         port: 3000,
-        host: '0.0.0.0',
+        host: '127.0.0.1',
         proxy: {
           '/canvas-api': {
             target: 'https://usflearn.instructure.com',
             changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/canvas-api/, '')
+            rewrite: (path) => path.replace(/^\/canvas-api/, ''),
+            // Research build is read-only against Canvas: non-GET requests get 404, never forwarded.
+            bypass: (req) => (req.method === 'GET' || req.method === 'HEAD' ? undefined : false)
           },
           '/grading-api': {
             target: 'http://127.0.0.1:5557',
@@ -22,9 +23,10 @@ export default defineConfig(({ mode }) => {
         }
       },
       plugins: [react()],
+      // Server-side keys must never be inlined into the client bundle.
       define: {
-        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.API_KEY': 'undefined',
+        'process.env.GEMINI_API_KEY': 'undefined'
       },
       resolve: {
         alias: {

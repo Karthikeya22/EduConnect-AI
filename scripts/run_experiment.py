@@ -6,7 +6,7 @@ import google.genai as genai
 from google.genai import types
 
 # Setup API Key for Vanilla Gemini
-API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyD3dbTxDZQFqxFTSPcEPSnIaJAtUPk77SE")
+API_KEY = os.environ["GEMINI_API_KEY"]
 client = genai.Client(api_key=API_KEY)
 
 # Assignment / Course setup

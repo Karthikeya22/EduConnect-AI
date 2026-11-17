@@ -2,6 +2,7 @@
 import asyncio
 from unittest.mock import MagicMock, patch
 import grading_server.ingest_service as ingest_service
+from grading_server.utils.embedding_space import INDEX_VERSION, space_for_provider
 
 
 def test_lookup_course_file_returns_row():
@@ -10,23 +11,31 @@ def test_lookup_course_file_returns_row():
         {"course_id": "c1", "canvas_file_id": "f1", "updated_at": "2026-01-01", "status": "ready"}
     ]
     with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
-        row = asyncio.get_event_loop().run_until_complete(
+        row = asyncio.new_event_loop().run_until_complete(
             ingest_service.lookup_course_file("c1", "f1")
         )
     assert row["status"] == "ready"
     assert row["updated_at"] == "2026-01-01"
 
 
-def test_ingest_course_file_skips_when_ready_and_same_updated_at():
+def test_ingest_course_file_skips_only_when_source_space_and_index_match():
     fake_sb = MagicMock()
     # lookup path
     fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
         {"course_id": "c1", "canvas_file_id": "f1", "updated_at": "t1", "status": "ready", "chunk_count": 3}
     ]
+    meta = {
+        "scope_key": "course:c1:file:f1",
+        "space_id": space_for_provider("openai").space_id,
+        "index_version": INDEX_VERSION,
+        "lms_host": ingest_service.trusted_lms_host(),
+        # Provider string alone no longer certifies a cache hit.
+        "embedding_provider": "openai",
+    }
     with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
-        with patch.object(ingest_service, "get_embedding_meta", return_value={"embedding_provider": "openai"}):
+        with patch.object(ingest_service, "get_embedding_meta", return_value=meta):
             with patch.object(ingest_service, "embed_texts") as emb:
-                result = asyncio.get_event_loop().run_until_complete(
+                result = asyncio.new_event_loop().run_until_complete(
                     ingest_service.ingest_course_file(
                         course_id="c1",
                         canvas_file_id="f1",
@@ -40,6 +49,52 @@ def test_ingest_course_file_skips_when_ready_and_same_updated_at():
                 emb.assert_not_called()
     assert result["skipped"] is True
     assert result["cached"] is True
+
+
+def _assignment_ingest(meta, text="alpha beta gamma " * 100, provider="openai"):
+    fake_sb = MagicMock()
+    with patch.object(ingest_service, "get_supabase", return_value=fake_sb), \
+            patch.object(ingest_service, "get_embedding_meta", return_value=meta), \
+            patch.object(ingest_service, "embed_texts", side_effect=lambda t, *a, **k: [[0.1] * 768 for _ in t]) as emb:
+        res = asyncio.new_event_loop().run_until_complete(ingest_service.ingest_course_material(
+            assignment_id="a1", course_material_text=text, rubric_criteria=[{"criterion_id": "c1", "title": "T"}],
+            api_key="sk", provider=provider, course_id="k1",
+        ))
+    activations = [c for c in fake_sb.rpc.call_args_list if c.args[0] == "activate_embedding_batch"]
+    return res, emb, activations, fake_sb
+
+
+def _active_meta(text="alpha beta gamma " * 100, provider="openai"):
+    return {
+        "scope_key": "course:k1:assignment:a1",
+        "space_id": space_for_provider(provider).space_id,
+        "index_version": INDEX_VERSION,
+        "active_batch_id": "b1",
+        "lms_host": ingest_service.trusted_lms_host(),
+        "embedding_config": {"content_hash": ingest_service.assignment_content_hash(text, "Course Material")},
+    }
+
+
+def test_assignment_ingest_records_content_hash_then_skips_same_text():
+    res, emb, acts, _ = _assignment_ingest(None)
+    assert emb.called and len(acts) == 1 and res["skipped"] is False
+    cfg = acts[0].args[1]["p_config"]
+    assert cfg["content_hash"] == ingest_service.assignment_content_hash("alpha beta gamma " * 100, "Course Material")
+
+    res, emb, acts, sb = _assignment_ingest(_active_meta())
+    emb.assert_not_called()
+    assert acts == [] and res["skipped"] is True and res["cached"] is True
+    assert any(c.args == ("rubric_criteria",) for c in sb.table.call_args_list)  # rubric still upserted
+
+
+def test_assignment_ingest_reembeds_when_text_or_space_changes():
+    _, emb, acts, _ = _assignment_ingest(_active_meta(), text="different text " * 80)
+    assert emb.called and len(acts) == 1
+    _, emb, acts, _ = _assignment_ingest(_active_meta(provider="openai"), provider="gemini")
+    assert emb.called and len(acts) == 1
+    stale = {**_active_meta(), "index_version": "old"}
+    _, emb, _, _ = _assignment_ingest(stale)
+    assert emb.called
 
 
 def test_ingest_course_file_falls_back_when_schema_missing():
@@ -81,21 +136,42 @@ def test_ingest_course_file_stamps_course_scoped_assignment_id():
 
     with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
         with patch.object(ingest_service, "embed_texts", return_value=[[0.1] * 768]):
-            with patch.object(ingest_service, "set_embedding_meta", return_value=None):
-                result = asyncio.new_event_loop().run_until_complete(
-                    ingest_service.ingest_course_file(
-                        course_id="c1",
-                        canvas_file_id="f1",
-                        updated_at="t2",
-                        filename="syllabus.pdf",
-                        course_material_text="hello world",
-                        assignment_id="a1",
-                        provider="openai",
-                        api_key="sk-test",
-                    )
+            result = asyncio.new_event_loop().run_until_complete(
+                ingest_service.ingest_course_file(
+                    course_id="c1",
+                    canvas_file_id="f1",
+                    updated_at="t2",
+                    filename="syllabus.pdf",
+                    course_material_text="hello world",
+                    assignment_id="a1",
+                    provider="openai",
+                    api_key="sk-test",
                 )
+            )
 
     assert result["chunks_stored"] == 1
-    inserted = fake_sb.table.return_value.insert.call_args[0][0]
-    assert inserted[0]["assignment_id"] == "course:c1"
-    assert inserted[0]["course_id"] == "c1"
+    name, params = fake_sb.rpc.call_args[0]
+    assert name == "activate_embedding_batch"
+    assert params["p_scope_key"] == "course:c1:file:f1"
+    assert params["p_rows"][0]["assignment_id"] == "course:c1"
+    assert params["p_rows"][0]["course_id"] == "c1"
+    fake_sb.table.return_value.insert.assert_not_called()
+
+
+def test_ingest_course_file_reembeds_when_meta_only_matches_provider():
+    fake_sb = MagicMock()
+    fake_sb.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+        {"course_id": "c1", "canvas_file_id": "f1", "updated_at": "t1", "status": "ready", "chunk_count": 3}
+    ]
+    legacy_meta = {"scope_key": "course:c1", "embedding_provider": "openai"}
+    with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
+        with patch.object(ingest_service, "get_embedding_meta", return_value=legacy_meta):
+            with patch.object(ingest_service, "embed_texts", return_value=[[0.1] * 768]) as emb:
+                result = asyncio.new_event_loop().run_until_complete(
+                    ingest_service.ingest_course_file(
+                        course_id="c1", canvas_file_id="f1", updated_at="t1", filename="a.pdf",
+                        course_material_text="hello world", provider="openai", api_key="sk-test",
+                    )
+                )
+    emb.assert_called_once()
+    assert result["cached"] is False

@@ -38,9 +38,10 @@ CREATE INDEX IF NOT EXISTS idx_cmc_course
 CREATE INDEX IF NOT EXISTS idx_cmc_course_file
     ON public.course_material_chunks(course_id, canvas_file_id);
 
--- Drop old unique if present, then add partial uniques
+-- Drop old unique if present (constraint or index form), then add partial uniques
 ALTER TABLE public.course_material_chunks
     DROP CONSTRAINT IF EXISTS uq_cmc_assignment_chunk;
+DROP INDEX IF EXISTS public.uq_cmc_assignment_chunk;
 
 DROP INDEX IF EXISTS uq_cmc_course_file_chunk;
 CREATE UNIQUE INDEX uq_cmc_course_file_chunk

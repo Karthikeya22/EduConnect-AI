@@ -2,7 +2,9 @@
 Provider registry for BYOK multi-provider LLM support.
 
 Every offered provider must support chat + embeddings + vision.
-Embeddings are normalized to EMBEDDING_DIM (768) for pgvector.
+Optional audio_model / video_model enable BYOK transcription of A/V submissions
+(see utils/media_extract.py). Embeddings must natively be EMBEDDING_DIM (768)
+for pgvector; they are validated, never resized (see utils/embedding_space.py).
 """
 
 from __future__ import annotations
@@ -24,12 +26,27 @@ class ProviderConfig:
     chat_model: str
     embedding_model: str
     vision_model: str
-    """If True, OpenAI-compatible /embeddings accepts dimensions=768."""
+    # Optional media models (empty = that modality not supported for BYOK extract).
+    audio_model: str = ""
+    video_model: str = ""
     supports_embedding_dimensions: bool = True
-    """Shown in UI when this preset needs a different vendor's key."""
+    requires_embed_input_type: bool = False
     key_hint: str = ""
-    """OpenRouter HTTP-Referer / X-Title optional branding."""
     openrouter_headers: bool = False
+
+    def resolve_audio_model(self) -> str:
+        return (self.audio_model or self.vision_model or self.chat_model).strip()
+
+    def resolve_video_model(self) -> str:
+        return (self.video_model or self.vision_model or self.chat_model).strip()
+
+    @property
+    def supports_audio(self) -> bool:
+        return bool(self.audio_model) or self.id == "gemini"
+
+    @property
+    def supports_video(self) -> bool:
+        return bool(self.video_model) or self.id == "gemini"
 
 
 PROVIDERS: dict[str, ProviderConfig] = {
@@ -52,6 +69,8 @@ PROVIDERS: dict[str, ProviderConfig] = {
         chat_model="models/gemini-2.5-flash",
         embedding_model="models/gemini-embedding-001",
         vision_model="models/gemini-2.5-flash",
+        audio_model="models/gemini-2.5-flash",
+        video_model="models/gemini-2.5-flash",
         supports_embedding_dimensions=True,
         key_hint="Paste your Google AI Studio / Gemini API key",
     ),
@@ -84,12 +103,21 @@ PROVIDERS: dict[str, ProviderConfig] = {
         label="NVIDIA",
         kind="openai_compat",
         api_base="https://integrate.api.nvidia.com/v1",
-        chat_model="meta/llama-3.2-90b-vision-instruct",
-        embedding_model="nvidia/nv-embedqa-e5-v5",
-        vision_model="meta/llama-3.2-90b-vision-instruct",
-        # NIM embed models often ignore dimensions=; we normalize to 768.
-        supports_embedding_dimensions=False,
-        key_hint="Paste your NVIDIA NGC / NIM API key",
+        # Text grading / critique (fast instruct NIM).
+        chat_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        # Hosted Matryoshka embeddings @ 768-d.
+        embedding_model="nvidia/nemotron-3.5-embed-1b",
+        # Omni NIM: image + audio + video + text (replaces retired llama-3.2-*-vision endpoints).
+        vision_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        audio_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        video_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        supports_embedding_dimensions=True,
+        requires_embed_input_type=True,
+        key_hint=(
+            "Paste a build.nvidia.com API key with Public API Endpoints. "
+            "Enable Nemotron 3.5 Lightning (chat), Nemotron 3.5 Embed, and "
+            "Nemotron 3 Nano Omni (vision/audio/video) for this account."
+        ),
     ),
     "deepseek": ProviderConfig(
         id="deepseek",
@@ -136,15 +164,11 @@ def list_providers() -> list[dict]:
             "chat_model": p.chat_model,
             "embedding_model": p.embedding_model,
             "vision_model": p.vision_model,
+            "audio_model": p.audio_model or None,
+            "video_model": p.video_model or None,
+            "supports_audio": p.supports_audio,
+            "supports_video": p.supports_video,
         }
         for p in PROVIDERS.values()
     ]
 
-
-def normalize_embedding(vec: list[float], dim: int = EMBEDDING_DIM) -> list[float]:
-    """Truncate or zero-pad to exactly `dim` floats for pgvector compatibility."""
-    if len(vec) == dim:
-        return vec
-    if len(vec) > dim:
-        return vec[:dim]
-    return vec + [0.0] * (dim - len(vec))

@@ -1,20 +1,17 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { guard } from '../_shared/guard.ts'
+import { denoGuardDeps } from '../_shared/deno_deps.ts'
 
 const CANVAS_BASE_URL = "https://usflearn.instructure.com"
 
-const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-canvas-token',
-}
-
 serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return new Response('ok', { headers: corsHeaders, status: 200 })
-    }
+    const g = await guard(req, denoGuardDeps, { course: true })
+    if (g instanceof Response) return g
+    const corsHeaders = g.cors
 
     try {
-        const { courseId } = await req.json()
-        const CANVAS_API_TOKEN = req.headers.get('x-canvas-token') || Deno.env.get('CANVAS_API_TOKEN')
+        const { courseId } = g.body
+        const CANVAS_API_TOKEN = g.canvasToken
 
         if (!CANVAS_API_TOKEN) {
             throw new Error('CANVAS_API_TOKEN is not set')

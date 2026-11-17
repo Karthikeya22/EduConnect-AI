@@ -1,17 +1,15 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { guard } from '../_shared/guard.ts'
+import { denoGuardDeps } from '../_shared/deno_deps.ts'
 
-const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-canvas-token',
-}
 
 serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return new Response('ok', { headers: corsHeaders, status: 200 })
-    }
+    const g = await guard(req, denoGuardDeps, { course: true })
+    if (g instanceof Response) return g
+    const corsHeaders = g.cors
 
     try {
-        const CANVAS_API_TOKEN = req.headers.get('x-canvas-token') || Deno.env.get('CANVAS_API_TOKEN')
+        const CANVAS_API_TOKEN = g.canvasToken
 
         if (!CANVAS_API_TOKEN) {
             return new Response(
@@ -20,7 +18,7 @@ serve(async (req) => {
             )
         }
 
-        const { studentId, startTime, endTime } = await req.json()
+        const { studentId, startTime, endTime } = g.body
         if (!studentId) {
              return new Response(
                 JSON.stringify({ error: 'studentId is required.' }),
@@ -46,8 +44,13 @@ serve(async (req) => {
             throw new Error(`Canvas API responded with ${res.status}: ${res.statusText}. Details: ${errorText}`);
         }
 
-        const data = await res.json()
-        
+        // Canvas page views are user-wide; only views inside the authorized course are returned.
+        const coursePath = `/courses/${g.body.courseId}`
+        const all = await res.json()
+        const data = Array.isArray(all)
+            ? all.filter((v: any) => typeof v?.url === 'string' && new RegExp(`${coursePath}(/|$|\\?)`).test(v.url))
+            : []
+
         return new Response(
             JSON.stringify(data),
             { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },

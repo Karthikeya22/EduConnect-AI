@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Icons from '../ui/Icons';
 import { canvasAPI } from '../../services/canvasAPI';
-import { llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
+import { gradingApiBase, llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
+import { gradingAuthHeaders } from '../../lib/gradingApi';
 
 interface CanvasFile {
   id: number;
@@ -9,6 +10,15 @@ interface CanvasFile {
   url: string;
   size: number;
   updated_at: string;
+  folder_id?: number;
+  'content-type'?: string;
+}
+
+const INGEST_EXTS = ['.pdf', '.docx', '.txt', '.pptx'];
+
+function isIngestibleName(name: string): boolean {
+  const n = (name || '').toLowerCase();
+  return INGEST_EXTS.some((ext) => n.endsWith(ext));
 }
 
 interface CourseMaterialsModalProps {
@@ -47,14 +57,14 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         setLoading(true);
         const data = await canvasAPI.getCourseFiles(courseId);
         if (Array.isArray(data)) {
-          // Filter for documents
-          const docFiles = data.filter(f => 
-            f.display_name.endsWith('.pdf') || 
-            f.display_name.endsWith('.docx') || 
-            f.display_name.endsWith('.txt') ||
-            f.display_name.endsWith('.pptx')
+          // Show every Canvas file returned (all folders). Ingest still only for supported docs.
+          const sorted = [...data].sort((a, b) =>
+            String(a.display_name || '').localeCompare(String(b.display_name || '')),
           );
-          setFiles(docFiles);
+          setFiles(sorted);
+          const ingestible = sorted.filter((f) => isIngestibleName(f.display_name));
+          // Pre-select ingestible docs so teachers don't miss nested materials.
+          setSelectedFiles(new Set(ingestible.map((f) => f.id)));
         } else {
           setFiles([]);
         }
@@ -67,12 +77,15 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     fetchFiles();
   }, [courseId]);
 
-  const toggleFile = (id: number) => {
+  const toggleFile = (id: number, ingestible: boolean) => {
+    if (!ingestible) return;
     const newSet = new Set(selectedFiles);
     if (newSet.has(id)) newSet.delete(id);
     else newSet.add(id);
     setSelectedFiles(newSet);
   };
+
+  const ingestibleCount = files.filter((f) => isIngestibleName(f.display_name)).length;
 
   const handleLocalFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -85,7 +98,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
   };
 
   const handleIngest = async () => {
-    const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5557';
+    const apiBase = gradingApiBase();
     setIsIngesting(true);
     setError(null);
     const canvasFilesToIngest = files.filter(f => selectedFiles.has(f.id));
@@ -101,12 +114,13 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         const blob = await canvasAPI.downloadCanvasFile(file.url);
         const formData = new FormData();
         formData.append('assignment_id', assignmentId);
+        formData.append('course_id', courseId);
         formData.append('file', blob, file.display_name);
 
-        const headers: any = { ...llmAuthHeaders() };
+        const headers: any = { ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
         requireLlmCredentials();
 
-        const res = await fetch(`${API_BASE_URL}/api/ingest/file`, {
+        const res = await fetch(`${apiBase}/api/ingest/file`, {
           method: 'POST',
           headers,
           body: formData
@@ -125,11 +139,12 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         
         const formData = new FormData();
         formData.append('assignment_id', assignmentId);
+        formData.append('course_id', courseId);
         formData.append('file', file);
 
-        const headers: any = { ...llmAuthHeaders() };
+        const headers: any = { ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
 
-        const res = await fetch(`${API_BASE_URL}/api/ingest/file`, {
+        const res = await fetch(`${apiBase}/api/ingest/file`, {
           method: 'POST',
           headers,
           body: formData
@@ -182,9 +197,16 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
           {/* Canvas Files Section */}
           <div className="space-y-3">
-            <h3 className="text-sm font-bold text-zinc-900 dark:text-white uppercase tracking-wider flex items-center">
-              <Icons.IconGrid className="w-4 h-4 mr-2 text-zinc-400" />
-              Canvas Course Files
+            <h3 className="text-sm font-bold text-zinc-900 dark:text-white uppercase tracking-wider flex items-center justify-between gap-2">
+              <span className="flex items-center">
+                <Icons.IconGrid className="w-4 h-4 mr-2 text-zinc-400" />
+                Canvas Course Files
+              </span>
+              {!loading && files.length > 0 && (
+                <span className="normal-case tracking-normal font-medium text-zinc-500">
+                  {files.length} total · {ingestibleCount} ingestible
+                </span>
+              )}
             </h3>
             
             {loading ? (
@@ -193,25 +215,41 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               </div>
             ) : files.length === 0 ? (
               <div className="text-sm text-zinc-500 italic py-6 text-center">
-                No supported documents (PDF, DOCX, TXT, PPTX) found in this course.
+                No files found in this course Files tree (all folders).
               </div>
             ) : (
               <div className="border border-zinc-200 dark:border-white/10 rounded-xl overflow-hidden divide-y divide-zinc-200 dark:divide-white/10 max-h-[300px] overflow-y-auto custom-scrollbar">
-                {files.map(file => (
-                  <label key={file.id} className="flex items-center p-3 hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer transition-colors group">
+                {files.map(file => {
+                  const ingestible = isIngestibleName(file.display_name);
+                  return (
+                  <label
+                    key={file.id}
+                    className={`flex items-center p-3 transition-colors group ${
+                      ingestible
+                        ? 'hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer'
+                        : 'opacity-60 cursor-not-allowed'
+                    }`}
+                    title={ingestible ? undefined : 'Not ingestible for RAG (use PDF, DOCX, TXT, or PPTX)'}
+                  >
                     <input 
                       type="checkbox" 
                       checked={selectedFiles.has(file.id)}
-                      onChange={() => toggleFile(file.id)}
-                      className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500 bg-white dark:bg-zinc-800"
+                      disabled={!ingestible}
+                      onChange={() => toggleFile(file.id, ingestible)}
+                      className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500 bg-white dark:bg-zinc-800 disabled:opacity-40"
                     />
                     <Icons.IconFile className="w-5 h-5 ml-3 mr-3 text-zinc-400 group-hover:text-indigo-400 transition-colors" />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-zinc-900 dark:text-zinc-200 truncate">{file.display_name}</div>
-                      <div className="text-[10px] text-zinc-500">{(file.size / 1024 / 1024).toFixed(2)} MB • {new Date(file.updated_at).toLocaleDateString()}</div>
+                      <div className="text-[10px] text-zinc-500">
+                        {((file.size || 0) / 1024 / 1024).toFixed(2)} MB
+                        {file.updated_at ? ` • ${new Date(file.updated_at).toLocaleDateString()}` : ''}
+                        {!ingestible ? ' • preview only' : ''}
+                      </div>
                     </div>
                   </label>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

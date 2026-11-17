@@ -4,6 +4,7 @@ import math
 import re
 import tempfile
 import asyncio
+import threading
 import time
 import traceback
 from typing import TypedDict, Literal
@@ -31,7 +32,7 @@ tempfile.tempdir = workspace_tmp
 if workspace_dir not in sys.path:
     sys.path.insert(0, workspace_dir)
 
-from flask import Flask, request, jsonify
+from flask import Flask, g, request, jsonify
 from flask_cors import CORS
 from langgraph.graph import StateGraph, END
 
@@ -41,8 +42,22 @@ from grading_server.utils.llm_client import chat_json, chat_text, embed_texts
 from grading_server.utils.byok import resolve_llm_credentials, byok_required_response
 from grading_server.utils.llm_registry import list_providers, get_provider
 from grading_server.utils.file_parsers import parse_submission, _parse_pdf, _parse_docx, _parse_pptx
-from grading_server.config import GEMINI_LITE_MODEL, GEMINI_GRADING_MODEL, FLASK_PORT, CANVAS_BASE_URL
-from grading_server.models import CriterionVerdict, CritiqueResult, GradingOutput
+from grading_server.config import GEMINI_LITE_MODEL, GEMINI_GRADING_MODEL, FLASK_PORT, CANVAS_BASE_URL, CORS_ORIGINS
+from grading_server.utils.authz import require_access, trusted_lms_host
+from grading_server.models import (
+    CriterionVerdict,
+    CritiqueResult,
+    GradingOutput,
+    _coerce_str_list,
+    is_legacy_result,
+)
+from grading_server.utils.embedding_space import (
+    INDEX_VERSION,
+    EmbeddingError,
+    EmbeddingProvenanceError,
+    EmbeddingSpaceUnsupported,
+    space_for_provider,
+)
 
 # Legacy aliases used in a few call sites
 def call_gemini(prompt, model=GEMINI_GRADING_MODEL, temperature=0.2, max_tokens=8192,
@@ -82,7 +97,14 @@ if sys.platform == "win32":
         pass
 
 app = Flask(__name__)
-CORS(app)
+# Browser origin allowlist only; every data route is separately guarded by require_access.
+CORS(app, origins=CORS_ORIGINS, allow_headers=[
+    "Authorization", "Content-Type", "X-Canvas-Token", "X-LLM-Provider", "X-LLM-Api-Key", "X-Gemini-Api-Key",
+])
+
+from grading_server.copilot.routes import copilot_bp
+
+app.register_blueprint(copilot_bp)
 
 # Windows consoles default to cp1252; avoid UnicodeEncodeError on emoji/math symbols in logs
 try:
@@ -97,6 +119,11 @@ class GradingState(TypedDict):
     student_id: str
     submission_text: str
     assignment_context: str
+    assignment_name: str
+    assignment_description: str
+    points_possible: float | None
+    approved_template_id: str | None
+    explicit_outcomes: list[str]
     submission_genre: str
     submission_filenames: list[str]
     genre_signals: dict
@@ -111,9 +138,22 @@ class GradingState(TypedDict):
     final_output: dict
     loop_count: int
     force_flag_for_human: bool
+    deep_retrieve: bool
+    moe: bool
+    grade_started_at: float
     custom_gemini_key: str | None
     llm_provider: str | None
     llm_api_key: str | None
+    experiment_mode: str
+    evidence_block: dict
+    extraction_failed: bool
+    extraction_limitations: list[str]
+    evidence_adapters: object
+    recovery_overrides: dict
+    is_proposal: bool
+    evidence_chat_json: object
+    assessment_policy: dict | None
+    policy_lookup_status: str | None
 
 
 def _llm_creds(state: dict) -> tuple[str | None, str | None]:
@@ -124,8 +164,8 @@ def _llm_creds(state: dict) -> tuple[str | None, str | None]:
     return provider, api_key
 
 
-def _embed_sync(texts: list[str], provider: str, api_key: str):
-    return embed_texts(texts, provider=provider, api_key=api_key)
+def _embed_sync(texts: list[str], provider: str, api_key: str, task: str):
+    return embed_texts(texts, provider=provider, api_key=api_key, task=task)
 
 # Common assignment section labels used for placement checks
 _SECTION_HINTS = [
@@ -195,6 +235,12 @@ def _detect_submission_genre(
 
     if _has_ext(".pptx", ".ppt"):
         return "presentation"
+    if _has_ext(".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma") or sample.startswith("[audio transcript]"):
+        return "audio"
+    if _has_ext(".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi") or (
+        "[video transcript]" in sample or "[video visual notes]" in sample
+    ):
+        return "video"
     if _has_ext(".ipynb"):
         return "notebook"
     if _has_ext(".py", ".java", ".cpp", ".c", ".h", ".js", ".ts", ".tsx", ".jsx", ".r", ".sql", ".cs", ".go", ".rb", ".swift", ".kt"):
@@ -245,12 +291,26 @@ def _analyze_genre_signals(genre: str, text: str, sections: list[dict] | None = 
     sample = text or ""
     low = sample.lower()
 
-    apa_cites = len(re.findall(r"\([A-Z][A-Za-z\-]+(?:\s+et\s+al\.)?,?\s*\d{4}[a-z]?\)", sample))
+    # Parenthetical APA: (Smith, 2020) / (Smith et al., 2020)
+    apa_paren = len(re.findall(r"\([A-Z][A-Za-z\-]+(?:\s+et\s+al\.)?,?\s*\d{4}[a-z]?\)", sample))
+    # Narrative APA: Smith (2020) / Smith et al. (2020) / Tang and Hew (2022)
+    apa_narrative = len(
+        re.findall(
+            r"\b[A-Z][A-Za-z\-]+(?:\s+et\s+al\.|\s+and\s+[A-Z][A-Za-z\-]+)?\s*\(\d{4}[a-z]?\)",
+            sample,
+        )
+    )
+    apa_cites = apa_paren + apa_narrative
     num_cites = len(re.findall(r"\[[0-9]{1,3}\]", sample))
     has_refs = any(
-        any(k in t for k in ("reference", "bibliography", "works cited"))
+        any(k in t for k in ("reference", "bibliography", "works cited", "works cited"))
         for t in titles
-    ) or bool(re.search(r"(?im)^\s*#*\s*(references|bibliography|works cited)\b", sample))
+    ) or bool(
+        re.search(
+            r"(?im)^\s*#*\s*(references|bibliography|works\s+cited|reference\s+list)\b",
+            sample,
+        )
+    )
 
     canonical = (
         "abstract", "introduction", "method", "result", "discussion",
@@ -280,7 +340,9 @@ def _analyze_genre_signals(genre: str, text: str, sections: list[dict] | None = 
     }
 
 
-def _genre_grading_guide(genre: str, signals: dict, dimension: str) -> str:
+def _genre_grading_guide(
+    genre: str, signals: dict, dimension: str, *, is_proposal: bool = False
+) -> str:
     """Method-appropriate standards by deliverable type (still subordinate to rubric)."""
     sig_lines = (
         f"Observed signals: sections={signals.get('section_count', 0)} "
@@ -300,6 +362,35 @@ def _genre_grading_guide(genre: str, signals: dict, dimension: str) -> str:
         "- Do not invent formatting rules absent from assignment/rubric, but DO apply the normal "
         "professional conventions for this deliverable type when judging quality/completeness.\n"
     )
+
+    if genre == "audio":
+        return common + (
+            "Audio / oral submission expectations:\n"
+            "- Grade from the transcript (and any timestamped claims). Spoken clarity and coverage of rubric points matter.\n"
+            "- Do not require written section headings unless the rubric asks for a script/outline.\n"
+            "- Mark gaps when the transcript lacks required concepts; treat [inaudible] as missing evidence for that span.\n\n"
+        )
+    if genre == "video":
+        return common + (
+            "Video / presentation recording expectations:\n"
+            "- Use both [VIDEO TRANSCRIPT] (spoken) and [VIDEO VISUAL NOTES] (slides/demo on screen) when present.\n"
+            "- Credit on-screen evidence (slides, UI demos) as real student content.\n"
+            "- Nonverbal delivery (eye contact, gesture) is soft context only — do not hard-zero on delivery alone "
+            "unless the rubric explicitly requires it; flag for human review when uncertain.\n\n"
+        )
+
+    if is_proposal:
+        return common + (
+            "PROPOSAL / PLANNED-SYSTEM expectations (overrides completed-study Methods/Results norms):\n"
+            "- Methods-like criteria: credit a clear planned approach, named algorithms/tools, and "
+            "how the student would execute steps (e.g. 'I would begin…', 'I would use…').\n"
+            "- Results / pipeline / evaluation criteria: credit a concrete evaluation plan "
+            "(metrics, validation approach, what outputs would mean) — do NOT require completed runs, "
+            "observed metrics, trained-model outputs, or finished pipeline execution.\n"
+            "- Discussion/insights: credit reasoned expected outcomes and decision logic for the plan.\n"
+            "- Do not set status=missing solely because empirical results were not yet produced.\n"
+            "- Placement: planning prose under a Methods/Approach heading is correctly placed for a proposal.\n\n"
+        )
 
     if genre == "research_paper":
         return common + (
@@ -481,6 +572,33 @@ def _evidence_anchor_in_submission(anchor: str, submission: str) -> bool:
     return False
 
 
+# Common rubric jargon → student phrasing. Used only to credit demonstrated work,
+# never to invent new mandatory requirements.
+_CONCEPT_ALIASES: dict[str, tuple[str, ...]] = {
+    "gap analysis": ("research gap", "identify the gap", "gap for", "literature gap"),
+    "theoretical framing": ("theoretical framework", "theoretical", "theory grounded", "self-determination"),
+    "prior interventions": ("prior work", "prior studies", "prior tutoring", "previous studies", "existing interventions"),
+    "synthesis": ("synthesize", "synthesizes", "synthesis of", "we synthesize"),
+    "expected outcomes": ("we expect", "anticipated", "expected to", "projected"),
+    "methodology": ("methods", "we used", "we fine-tune", "procedure"),
+}
+
+
+def _concept_alias_hit(req_lower: str, hay: str) -> bool:
+    for key, aliases in _CONCEPT_ALIASES.items():
+        if key in req_lower or req_lower in key:
+            if any(a in hay for a in aliases):
+                return True
+    # Generic: majority of stemmed content tokens from the requirement appear in text.
+    toks = [_light_stem(t) for t in re.findall(r"[a-z0-9]+", req_lower) if len(t) > 2]
+    if len(toks) >= 2:
+        hay_toks = set(_content_tokens(hay))
+        hit = sum(1 for t in toks if t in hay_toks)
+        if hit / len(toks) >= 0.5:
+            return True
+    return False
+
+
 def _infer_covered_concepts(required: list, covered: list, haystack: str) -> list[str]:
     """Fill covered_concepts from submission/evidence text when the LLM left them empty/sparse."""
     req_list = [str(r).strip() for r in (required or []) if str(r).strip()]
@@ -506,7 +624,37 @@ def _infer_covered_concepts(required: list, covered: list, haystack: str) -> lis
         ):
             covered_out.append(req)
             covered_set.add(rl)
+            continue
+        if _concept_alias_hit(rl, hay):
+            covered_out.append(req)
+            covered_set.add(rl)
     return covered_out
+
+
+def _reconcile_covered_concepts(
+    covered: list,
+    missing: list,
+    *,
+    has_evidence: bool,
+) -> list[str]:
+    """Drop 'demonstrated' claims that contradict missing keywords or lack of evidence."""
+    if not has_evidence:
+        return []
+    miss = {str(m).strip().lower() for m in (missing or []) if str(m).strip()}
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in covered or []:
+        cl = str(c).strip()
+        if not cl:
+            continue
+        low = cl.lower()
+        if low in seen:
+            continue
+        if low in miss or any(low in m or m in low for m in miss if len(m) >= 4):
+            continue
+        out.append(cl)
+        seen.add(low)
+    return out
 
 
 def _is_academic_integrity_criterion(title: str = "", desc: str = "", criterion_id: str = "") -> bool:
@@ -615,7 +763,11 @@ def _justification_claims_full_credit(just: str) -> bool:
 
 
 def _is_proposal_style_submission(text: str, assignment_context: str = "") -> bool:
-    """Heuristic: conceptual/proposed system vs completed empirical ML study."""
+    """Heuristic: conceptual/proposed system vs completed empirical ML study.
+
+    Student proposals often use "I would…" / "I will…" planning voice rather than
+    "we propose". Count that voice so they are not graded as unfinished lab runs.
+    """
     blob = f"{(assignment_context or '')[:4000]}\n{(text or '')[:12000]}".lower()
     proposal_hits = sum(
         1
@@ -632,6 +784,12 @@ def _is_proposal_style_submission(text: str, assignment_context: str = "") -> bo
             "as a proposal",
             "proposal-stage",
             "to be implemented",
+            "i would",
+            "i will",
+            "i plan to",
+            "would begin",
+            "would use",
+            "how i would",
         )
         if s in blob
     )
@@ -649,39 +807,22 @@ def _is_proposal_style_submission(text: str, assignment_context: str = "") -> bo
             "we implemented",
             "hyperparameter",
             "cross-validation",
+            "ran the pipeline",
+            "pipeline output",
+            "after running",
         )
         if s in blob
     )
+    # Planning voice is enough even with one explicit proposal phrase.
+    if proposal_hits >= 3 and empirical_hits <= 2:
+        return True
     return proposal_hits >= 2 and empirical_hits <= 1
 
 
-_EMPIRICAL_ML_KEYWORDS = {
-    "data pre-processing",
-    "data preprocessing",
-    "data splitting",
-    "train-test split",
-    "supervised technique",
-    "unsupervised technique",
-    "hyperparameter tuning",
-    "labeled dataset",
-    "feature engineering",
-    "model training",
-    "cross-validation",
-}
+def _filter_proposal_missing_keywords(keywords, is_proposal: bool) -> list:
+    from grading_server.proposal_filters import filter_proposal_empirical_checklist
 
-
-def _filter_proposal_missing_keywords(keywords: list, is_proposal: bool) -> list:
-    if not is_proposal or not keywords:
-        return list(keywords or [])
-    out = []
-    for kw in keywords:
-        low = str(kw).strip().lower()
-        if low in _EMPIRICAL_ML_KEYWORDS:
-            continue
-        if any(e in low for e in ("pre-process", "preprocess", "data split", "supervised", "unsupervised", "hyperparameter")):
-            continue
-        out.append(kw)
-    return out
+    return filter_proposal_empirical_checklist(keywords, is_proposal)
 
 
 def _criterion_theme(name: str) -> str | None:
@@ -711,7 +852,7 @@ def _dedupe_overlapping_ai_penalties(verdicts: list[dict]) -> list[dict]:
         return verdicts
     rubric = [v for v in verdicts if not v.get("ai_generated")]
     for v in verdicts:
-        if not v.get("ai_generated"):
+        if not v.get("ai_generated") or v.get("score") is None:
             continue
         theme = _criterion_theme(str(v.get("criterion_name") or ""))
         if not theme:
@@ -756,7 +897,7 @@ def _soften_challenges_ethics_double_count(verdicts: list[dict]) -> list[dict]:
         ),
         None,
     )
-    if not ethical or not challenges:
+    if not ethical or not challenges or ethical.get("score") is None or challenges.get("score") is None:
         return verdicts
     e_max = int(ethical.get("max_score") or 0)
     e_score = int(ethical.get("score") or 0)
@@ -793,11 +934,11 @@ def _apply_genre_criterion_caps(
     criterion_desc: str,
 ) -> dict:
     """Extra numeric pressure when genre signals contradict format/citation/structure criteria."""
-    max_score = int(v.get("max_score") or 0)
-    if max_score <= 0:
+    max_score = _as_points(v.get("max_score"))
+    if max_score <= 0 or v.get("score") is None:
         return v
     blob = f"{criterion_title} {criterion_desc}".lower()
-    score = int(v.get("score") or 0)
+    score = _as_points(v.get("score"))
     notes: list[str] = []
     integrity_crit = _is_academic_integrity_criterion(criterion_title, criterion_desc, str(v.get("criterion_id") or ""))
 
@@ -986,9 +1127,26 @@ def _resolve_section_for_criterion(sections: list[dict], hint: str | None) -> di
     return None
 
 
-def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
+def _as_points(value, default: float = 0.0) -> float:
+    """Numeric points without silent int truncation of fractional maxima."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if v != v or v in (float("inf"), float("-inf")):
+        return float(default)
+    return v
+
+
+def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     """Enforce status/score sync, evidence/placement/material/concept caps."""
-    raw_score = max(0, min(int(v.get("score", 0) or 0), max_score))
+    max_score = _as_points(max_score)
+    if v.get("score") is None:
+        # Not assessed: no score exists to cap, and it must never become 0.
+        v["status"] = "not_assessable"
+        v["max_score"] = max_score
+        return v
+    raw_score = max(0.0, min(_as_points(v.get("score", 0)), max_score))
     score = raw_score
     status = str(v.get("status", "partial") or "partial").lower()
     if status not in ("full", "partial", "missing"):
@@ -1006,6 +1164,8 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
         anchor = "not found"
     anchor_missing = anchor.lower() in ("", "not found", "n/a", "none")
     notes: list[str] = []
+    _guard_raw = raw_score
+    _guard_cid = str(v.get("criterion_id") or "")
 
     integrity_crit = _is_academic_integrity_criterion(
         str(v.get("criterion_name") or v.get("title") or ""),
@@ -1053,7 +1213,23 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
     if alignment not in ("supports", "neutral", "contradicts"):
         alignment = "neutral"
     v["material_alignment"] = alignment
-    if alignment == "contradicts":
+    # Soft RAG conflict: if the student quote supports a positive/full narrative,
+    # do not demolish the mark — retrieval mismatches are fallible.
+    if (
+        alignment == "contradicts"
+        and not anchor_missing
+        and not hard_fail
+        and not denies_credit
+        and (claims_full or positive_just)
+        and "contradict" not in just_text.lower()
+        and "conflict" not in just_text.lower()
+    ):
+        alignment = "neutral"
+        v["material_alignment"] = "neutral"
+        teacher_notes.append(
+            "Retrieved-material conflict was not applied as a hard cap; student evidence supports the awarded credit."
+        )
+    elif alignment == "contradicts":
         cap = max(0, math.ceil(max_score * 0.60))
         if max_score > 0:
             cap = min(cap, max_score - 1)
@@ -1065,15 +1241,20 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
 
     required = v.get("required_concepts") or []
     covered = v.get("covered_concepts") or []
-    if isinstance(required, list) and len(required) > 0 and not integrity_crit:
-        haystack = " ".join(
-            [
-                submission_text,
-                "" if anchor_missing else anchor,
-            ]
-        )
+    has_evidence = not anchor_missing
+    # Never invent "demonstrated" coverage when there is no verifiable student quote,
+    # and never keep a concept that the same verdict also lists as missing.
+    if isinstance(required, list) and len(required) > 0 and not integrity_crit and has_evidence:
+        haystack = " ".join([submission_text, anchor])
         covered = _infer_covered_concepts(required, covered, haystack)
-        v["covered_concepts"] = covered
+    covered = _reconcile_covered_concepts(
+        covered, v.get("missing_keywords") or [], has_evidence=has_evidence
+    )
+    # Demonstrated list must match what concept scoring counts — drop LLM fluff
+    # that is not a required rubric concept (was confusing teachers).
+    covered = _covered_matching_required(covered, required if isinstance(required, list) else [])
+    v["covered_concepts"] = covered
+    if isinstance(required, list) and len(required) > 0 and not integrity_crit:
         covered_set = {str(x).strip().lower() for x in covered if str(x).strip()}
         req_list = [str(r).strip() for r in required if str(r).strip()]
         hit = 0
@@ -1082,7 +1263,6 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
             if rl in covered_set or any(rl in c or c in rl for c in covered_set):
                 hit += 1
         coverage = hit / max(1, len(req_list))
-        has_evidence = not anchor_missing
         # Strong praise (or explicit full-credit language) must not be demoted by an
         # auto concept-match rate — that produced false 14/20-style caps on glowing write-ups.
         if (
@@ -1138,23 +1318,45 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
         if status == "missing" and score > 0:
             status = "partial"
 
+    # Score-safe missing rule: never wipe awarded points because status lagged behind.
+    # Recovery / reassess can raise score while leaving status=missing; run_output re-guards.
+    if status == "missing" and score > 0:
+        status = "full" if max_score and score >= max_score else "partial"
+
     if status == "missing":
         score = 0
     elif status == "full":
-        if score < max_score:
+        # Fractional maxima (inferred equal-split policies): an integer near the max
+        # with status=full is full credit — do not force perpetual partial.
+        if max_score > 0 and score + 1e-9 >= max_score:
+            score = max_score
+        elif (
+            max_score > 0
+            and not anchor_missing
+            and score >= math.floor(max_score)
+            and (max_score - score) < 1.0 + 1e-9
+        ):
+            score = max_score
+        elif score < max_score:
             status = "partial"
         else:
             score = max_score
     elif status == "partial":
         if max_score > 0 and score >= max_score:
-            score = max_score - 1
-            teacher_notes.append("Partial status cannot receive full points.")
+            # On 1-pt criteria, max-1 would hard-zero a credited answer.
+            if max_score > 1:
+                score = max_score - 1
+                teacher_notes.append("Partial status cannot receive full points.")
+            else:
+                score = max_score
         if score <= 0:
             if anchor_missing and not (integrity_crit and positive_just):
                 status = "missing"
                 score = 0
             elif max_score > 1:
                 score = 1
+            elif max_score > 0 and not anchor_missing:
+                score = max_score  # preserve the only available credit point when evidenced
 
     if teacher_notes:
         just = (v.get("justification") or "").strip()
@@ -1166,32 +1368,57 @@ def _apply_verdict_score_guards(v: dict, max_score: int) -> dict:
     v["status"] = status
     v["evidence_anchor"] = "not found" if anchor_missing else anchor
     v["max_score"] = max_score
+    # #region agent log
+    if score != _guard_raw or anchor_missing:
+        try:
+            import json as _json, time as _time
+            from pathlib import Path as _Path
+            _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log").open("a", encoding="utf-8").write(_json.dumps({
+                "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "B",
+                "location": "app.py:_apply_verdict_score_guards",
+                "message": "guard changed or missing anchor",
+                "data": {
+                    "cid": _guard_cid,
+                    "raw": _guard_raw,
+                    "final": score,
+                    "status": status,
+                    "anchor_missing": anchor_missing,
+                    "notes": teacher_notes[:4],
+                },
+                "timestamp": int(_time.time() * 1000),
+            }) + "\n")
+        except Exception:
+            pass
+    # #endregion
     return v
 
 
 def _holistic_consistency_nudge(verdicts: list[dict]) -> tuple[list[dict], bool]:
-    """Nudge near-full scores down when many criteria look thinly evidenced."""
+    """Nudge near-full scores down when many criteria lack verifiable evidence.
+
+    Short justifications alone are not "thin" — only missing/short anchors,
+    ungrounded full marks, or placement failures count. Otherwise solid quotes
+    get flagged for human review and docked for no good reason.
+    """
     if not verdicts:
         return verdicts, False
-    real = [v for v in verdicts if not v.get("ai_generated")]
+    real = [v for v in verdicts if not v.get("ai_generated") and v.get("score") is not None]
     if len(real) < 2:
         return verdicts, False
 
     near_full = 0
     thin = 0
     for v in real:
-        max_s = int(v.get("max_score") or 0)
-        score = int(v.get("score") or 0)
+        max_s = _as_points(v.get("max_score"))
+        score = _as_points(v.get("score"))
         if max_s <= 0:
             continue
         ratio = score / max_s
         anchor = (v.get("evidence_anchor") or "").strip().lower()
-        just = v.get("justification") or ""
         weak = anchor in ("", "not found", "n/a", "none") or len(anchor) < 25
-        vague = len(just) < 80
         if ratio >= 0.9:
             near_full += 1
-            if weak or vague or v.get("ungrounded_full") or v.get("placement_issue"):
+            if weak or v.get("ungrounded_full") or v.get("placement_issue"):
                 thin += 1
 
     force_flag = False
@@ -1209,6 +1436,26 @@ def _holistic_consistency_nudge(verdicts: list[dict]) -> tuple[list[dict], bool]
                 ).strip()
     return verdicts, force_flag
 
+
+def _covered_matching_required(covered: list, required: list) -> list[str]:
+    """Keep only demonstrated concepts that correspond to a required rubric concept."""
+    req_list = [str(r).strip() for r in (required or []) if str(r).strip()]
+    if not req_list:
+        return [str(c).strip() for c in (covered or []) if str(c).strip()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in covered or []:
+        cl = str(c).strip()
+        if not cl:
+            continue
+        low = cl.lower()
+        if low in seen:
+            continue
+        if any(low == r.lower() or low in r.lower() or r.lower() in low for r in req_list):
+            out.append(cl)
+            seen.add(low)
+    return out
+
 # Node 1: Ingest (Sync)
 async def run_ingest(state: GradingState) -> dict:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -1225,7 +1472,7 @@ async def run_ingest(state: GradingState) -> dict:
         api_key,
         provider,
     )
-    e_res = await asyncio.to_thread(_embed_sync, chunks, provider, api_key)
+    e_res = await asyncio.to_thread(_embed_sync, chunks, provider, api_key, "document")
     
     concepts = []
     if isinstance(c_res, list):
@@ -1235,77 +1482,150 @@ async def run_ingest(state: GradingState) -> dict:
         
     return {"chunks": chunks, "chunk_embeddings": e_res, "submission_concepts": concepts}
 
-# Node 2: Retrieve — Semantic Vector Search + Exemplars
+class RubricStoreUnavailable(RuntimeError):
+    """Rubric/exemplar tables could not be read; /api/grade returns 503 with no draft."""
+
+
+class RubricInvalid(RuntimeError):
+    """Instructor rubric exists but is unusable; requires explicit instructor decision (no silent fallback)."""
+
+    def __init__(self, message: str, validation_errors: list | None = None):
+        super().__init__(message)
+        self.validation_errors = list(validation_errors or [])
+
+
+def _policy_store_for_client(sb):
+    """Prefer persisted assessment_policies when migrated; otherwise process-local freeze store."""
+    from grading_server.assessment_policy.store import SupabasePolicyStore, get_default_store
+
+    try:
+        sb.table("assessment_policies").select("policy_id").limit(0).execute()
+        return SupabasePolicyStore(sb)
+    except Exception:
+        # shortcut: table may be unmigrated; in-memory freeze still serializes concurrent requests in-process.
+        return get_default_store()
+
+
+# Node 2: Retrieve — Semantic Vector Search + Exemplars (+ assignment-level policy resolve)
 async def run_retrieve(state: GradingState) -> dict:
     import numpy as np
 
     def _db():
+        from grading_server.assessment_policy import resolve_assessment_policy
+
         sb = get_supabase()
         aid = state["assignment_id"]
-        embeddings = state.get("chunk_embeddings", [])
+        cid = str(state.get("course_id") or "")
+
+        def fetch_rows():
+            return (
+                sb.table("rubric_criteria")
+                .select("*")
+                .eq("assignment_id", aid)
+                .eq("course_id", cid)
+                .execute()
+                .data
+                or []
+            )
 
         try:
-            # 1. Fetch rubric criteria for this assignment
-            rubric = sb.table("rubric_criteria").select("*").eq("assignment_id", aid).execute().data or []
-
-            # 3. Fetch exemplars for few-shot grading context
-            exemplars_raw = sb.table("exemplars").select("*").eq("assignment_id", aid).execute().data or []
-            # Group exemplars by criterion_id
-            exemplars_by_criterion = {}
-            for ex in exemplars_raw:
-                cid = ex.get("criterion_id", "")
-                if cid not in exemplars_by_criterion:
-                    exemplars_by_criterion[cid] = []
-                exemplars_by_criterion[cid].append(ex)
-
-            # 4. Generate Adaptive Quality Evaluation Criteria
-            if rubric:
-                try:
-                    from grading_server.utils.gemini_client import call_gemini
-                    
-                    quality_prompt = (
-                        "Based on the following assignment rubric, generate exactly 2 core Quality & Academic Integrity evaluation criteria tailored to this specific assignment type. "
-                        "IMPORTANT: The Academic Integrity criterion MUST be highly lenient and give the student the benefit of the doubt by default. It should ONLY flag genuine, obvious integrity concerns (e.g., direct blatant plagiarism) and must NOT penalize stylistic or structural similarities. "
-                        "CRITICAL: Do NOT create criteria that duplicate existing rubric titles or scopes. "
-                        "If the rubric already has Methodology/Methods, Literature Review, Ethical Considerations, Challenges, Results/Outcomes, etc., "
-                        "do NOT invent another Methodology Soundness / Methods Rigor / Ethics Quality criterion that would re-score the same gap. "
-                        "Prefer complementary axes such as Overall Coherence/Writing Quality and Academic Integrity / Citation Honesty. "
-                        "For programming assignments, prefer Code Quality and Best Practices only when those are not already in the rubric.\n\n"
-                        f"Existing Rubric Titles: {[r.get('title') for r in rubric]}\n"
-                    )
-                    provider, api_key = _llm_creds(state)
-                    quality_res = call_gemini(
-                        quality_prompt,
-                        model=GEMINI_LITE_MODEL,
-                        response_schema=DynamicCriteria,
-                        api_key=api_key,
-                        provider=provider,
-                    )
-                    new_criteria = quality_res.get("criteria", [])
-                    for nc in new_criteria:
-                        nc_dict = dict(nc)
-                        nc_dict["assignment_id"] = aid
-                        nc_dict["title"] = f"{nc_dict.get('title', 'Criterion')} (AI-Generated)"
-                        nc_dict["ai_generated"] = True
-                        rubric.append(nc_dict)
-                    print(f"[RAG] Injected {len(new_criteria)} adaptive quality criteria.")
-                except Exception as e:
-                    print(f"[RAG] Failed to inject dynamic quality criteria: {e}")
-
-            print(f"[RAG] Retrieved: {len(rubric)} criteria, {len(exemplars_raw)} exemplars")
-            return rubric, exemplars_by_criterion
+            exemplars_raw = (
+                sb.table("exemplars")
+                .select("*")
+                .eq("assignment_id", aid)
+                .eq("course_id", cid)
+                .execute()
+                .data
+                or []
+            )
         except Exception as e:
-            print(f"[RAG] Retrieve error: {e}")
-            return [], [], {}
+            print(f"[RAG] Exemplar retrieve error: {e}")
+            raise RubricStoreUnavailable(str(e)) from e
 
-    r, ex = await asyncio.to_thread(_db)
-    return {"rubric_criteria": r, "exemplars": ex, "relevant_chunks": []}
+        store = _policy_store_for_client(sb)
+        resolution = resolve_assessment_policy(
+            course_id=cid,
+            assignment_id=str(aid),
+            fetch_instructor_rubric=fetch_rows,
+            assignment_name=str(state.get("assignment_name") or ""),
+            assignment_description=str(state.get("assignment_description") or ""),
+            explicit_outcomes=list(state.get("explicit_outcomes") or []),
+            points_possible=state.get("points_possible"),
+            approved_template_id=state.get("approved_template_id"),
+            created_by=None,
+            store=store,
+            submission_text=None,  # never feed student work into policy generation
+        )
+        if resolution.error_code == "RUBRIC_STORE_UNAVAILABLE":
+            raise RubricStoreUnavailable(resolution.error_message or "rubric store unavailable")
+        if resolution.error_code == "RUBRIC_INVALID":
+            raise RubricInvalid(
+                resolution.error_message or "invalid rubric",
+                resolution.lookup.validation_errors,
+            )
 
-from pydantic import BaseModel
+        rubric = list(resolution.rubric_criteria)
+        policy = resolution.policy.model_dump() if resolution.policy else None
+        lookup_status = resolution.lookup.status
+
+        exemplars_by_criterion = {}
+        for ex in exemplars_raw:
+            ecid = ex.get("criterion_id", "")
+            exemplars_by_criterion.setdefault(ecid, []).append(ex)
+
+        # Adaptive quality criteria only supplement a real instructor rubric — never invent a fallback.
+        if lookup_status == "instructor_rubric_found" and rubric:
+            try:
+                quality_prompt = (
+                    "Based on the following assignment rubric, generate exactly 2 core Quality & Academic Integrity evaluation criteria tailored to this specific assignment type. "
+                    "IMPORTANT: The Academic Integrity criterion MUST be highly lenient and give the student the benefit of the doubt by default. It should ONLY flag genuine, obvious integrity concerns (e.g., direct blatant plagiarism) and must NOT penalize stylistic or structural similarities. "
+                    "CRITICAL: Do NOT create criteria that duplicate existing rubric titles or scopes. "
+                    "If the rubric already has Methodology/Methods, Literature Review, Ethical Considerations, Challenges, Results/Outcomes, etc., "
+                    "do NOT invent another Methodology Soundness / Methods Rigor / Ethics Quality criterion that would re-score the same gap. "
+                    "Prefer complementary axes such as Overall Coherence/Writing Quality and Academic Integrity / Citation Honesty. "
+                    "For programming assignments, prefer Code Quality and Best Practices only when those are not already in the rubric.\n\n"
+                    f"Existing Rubric Titles: {[r.get('title') for r in rubric]}\n"
+                )
+                provider, api_key = _llm_creds(state)
+                quality_res = call_gemini(
+                    quality_prompt,
+                    model=GEMINI_LITE_MODEL,
+                    response_schema=DynamicCriteria,
+                    api_key=api_key,
+                    provider=provider,
+                )
+                new_criteria = quality_res.get("criteria", [])
+                for nc in new_criteria:
+                    nc_dict = dict(nc)
+                    nc_dict["assignment_id"] = aid
+                    nc_dict["title"] = f"{nc_dict.get('title', 'Criterion')} (AI-Generated)"
+                    nc_dict["ai_generated"] = True
+                    rubric.append(nc_dict)
+                print(f"[RAG] Injected {len(new_criteria)} adaptive quality criteria.")
+            except Exception as e:
+                print(f"[RAG] Failed to inject dynamic quality criteria: {e}")
+
+        print(
+            f"[RAG] Retrieved: {len(rubric)} criteria, {len(exemplars_raw)} exemplars, "
+            f"policy_lookup={lookup_status}, policy_origin={(policy or {}).get('origin')}"
+        )
+        return rubric, exemplars_by_criterion, policy, lookup_status
+
+    r, ex, policy, lookup_status = await asyncio.to_thread(_db)
+    return {
+        "rubric_criteria": r,
+        "exemplars": ex,
+        "relevant_chunks": [],
+        "assessment_policy": policy,
+        "policy_lookup_status": lookup_status,
+    }
+
+from pydantic import BaseModel, field_validator
 from typing import Literal
 
 class LLMGradingPayload(BaseModel):
-    score: int
+    # float so fractional policy maxima are not silently int-truncated at parse time
+    score: float
     justification: str
     evidence_anchor: str
     status: Literal['full', 'partial', 'missing']
@@ -1316,6 +1636,17 @@ class LLMGradingPayload(BaseModel):
     material_alignment: Literal['supports', 'neutral', 'contradicts'] = 'neutral'
     placement_ok: bool = True
 
+    @field_validator(
+        "missing_keywords",
+        "supporting_materials",
+        "covered_concepts",
+        "required_concepts",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_lists(cls, value):
+        return _coerce_str_list(value)
+
 class DecomposedCriterion(BaseModel):
     sub_queries: list[str]
 
@@ -1324,7 +1655,10 @@ async def _decompose_criterion(
     criterion_desc: str,
     api_key: str | None = None,
     provider: str | None = None,
+    deep: bool = False,
 ) -> list[str]:
+    if not deep:
+        return [f"{criterion_title}: {criterion_desc}"]
     prompt = f"""
 You are an expert grading assistant. Your task is to decompose the following grading rubric criterion into 2 to 4 specific, verifiable sub-questions. These sub-questions will be used as search queries to retrieve relevant course materials.
 Focus on the core factual, conceptual, or structural requirements of the criterion.
@@ -1350,72 +1684,84 @@ Decompose this into 2-4 sub-queries. Return them as a JSON list of strings.
         print(f"[Decompose Error] {e}")
         return [f"{criterion_title}: {criterion_desc}"]
 
+RAG_USABLE_SIMILARITY = 0.28
+RAG_STRONG_SIMILARITY = 0.45
+# Cap concurrent provider embeds / grade LLMs. Use threading.Semaphore — Flask
+# async views create a fresh event loop per request, so asyncio.Semaphore bound
+# at import/"first use" raises "bound to a different event loop" and drops scores.
+_EMBED_CONCURRENCY = threading.Semaphore(2)
+# Cap concurrent criterion grading LLM calls. Unbounded gather + no Gemini HTTP
+# timeout starved the default to_thread pool and left /api/grade hung for minutes.
+_GRADE_LLM_CONCURRENCY = 3
+_GRADE_LLM_SEM = threading.Semaphore(_GRADE_LLM_CONCURRENCY)
+
+_RETRIEVAL_UNAVAILABLE_CTX = {
+    "infrastructure_error": (
+        "(Course material retrieval FAILED due to a system error. This is NOT evidence about the student. "
+        "Grade from the rubric, assignment context, and submission only. Set material_alignment='neutral'.)"
+    ),
+    "no_corpus": (
+        "(No course material is indexed for this assignment. Grade from the rubric, assignment context, "
+        "and submission only. Set material_alignment='neutral'.)"
+    ),
+    "no_useful_matches": (
+        "(No sufficiently relevant course material was found for this criterion. Grade from the rubric, "
+        "assignment context, and submission only. Set material_alignment='neutral'.)"
+    ),
+}
+
+
 async def _multihop_retrieve(
     sub_queries: list[str],
     assignment_id: str,
     api_key: str | None = None,
     course_id: str | None = None,
     provider: str | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], str]:
+    """Return (chunks, retrieval_status). Chunks are non-empty only when status is "ok".
+
+    Status: ok | no_useful_matches (top similarity < 0.28) | no_corpus (search
+    succeeded with 0 rows) | infrastructure_error (embedding or search failed).
+    There is no unranked fallback: unrelated chunks must not be presented as
+    semantic retrieval.
+    """
     if not sub_queries:
-        return []
+        return [], "no_useful_matches"
     try:
-        embeddings = await asyncio.to_thread(_embed_sync, sub_queries, provider, api_key)
+        space = space_for_provider(provider)
+
+        def _embed_capped():
+            with _EMBED_CONCURRENCY:
+                return _embed_sync(sub_queries, provider, api_key, "query")
+
+        embeddings = await asyncio.to_thread(_embed_capped)
     except Exception as e:
         print(f"[Embed Error] {e}")
-        return []
+        return [], "infrastructure_error"
     
-    def _db():
-        sb = get_supabase()
-        all_chunks = []
-        for vec in embeddings:
-            if not vec: continue
-            try:
-                params = {
-                    "query_embedding": vec,
-                    "match_count": 5,
-                    "filter_assignment_id": assignment_id,
-                }
-                if course_id:
-                    params["filter_course_id"] = course_id
-                try:
-                    chunks = sb.rpc("match_course_material_chunks", params).execute().data or []
-                except Exception as rpc_err:
-                    # Live DB may still have the 3-arg RPC (migration not applied).
-                    # Retry without filter_course_id so retrieval still works.
-                    err_text = str(rpc_err)
-                    if course_id and ("PGRST202" in err_text or "filter_course_id" in err_text or "Could not find the function" in err_text):
-                        legacy = {
-                            "query_embedding": vec,
-                            "match_count": 5,
-                            "filter_assignment_id": assignment_id,
-                        }
-                        chunks = sb.rpc("match_course_material_chunks", legacy).execute().data or []
-                    else:
-                        raise
-                all_chunks.extend(chunks)
-            except Exception as e:
-                print(f"[Vector Search Error] {e}")
-        if not all_chunks:
-            # Last-resort: return any stored chunks for this assignment (no similarity)
-            try:
-                fallback = (
-                    sb.table("course_material_chunks")
-                    .select("id, chunk_text, source_title, chunk_index")
-                    .eq("assignment_id", assignment_id)
-                    .limit(8)
-                    .execute()
-                    .data
-                    or []
-                )
-                for row in fallback:
-                    row.setdefault("similarity", 0.0)
-                all_chunks.extend(fallback)
-            except Exception as e:
-                print(f"[Vector Search Fallback Error] {e}")
-        return all_chunks
-    
-    chunks = await asyncio.to_thread(_db)
+    def _search(vec):
+        if not vec:
+            raise ValueError("empty query embedding")
+        # v2 only returns active-batch chunks whose space/index match; legacy rows stay quarantined.
+        # No fallback to the unfiltered v1 RPC: a missing v2 is an infrastructure error.
+        params = {
+            "query_embedding": vec,
+            "match_count": 5,
+            "filter_assignment_id": assignment_id,
+            "filter_course_id": course_id,
+            "filter_space_id": space.space_id,
+            "filter_index_version": INDEX_VERSION,
+        }
+        return get_supabase().rpc("match_course_material_chunks_v2", params).execute().data or []
+
+    try:
+        results = await asyncio.gather(*(asyncio.to_thread(_search, v) for v in embeddings))
+        chunks = [row for rows in results for row in rows]
+    except Exception as e:
+        print(f"[Vector Search Error] {e}")
+        return [], "infrastructure_error"
+    if not chunks:
+        return [], "no_corpus"
     seen = set()
     unique_chunks = []
     for c in chunks:
@@ -1423,7 +1769,9 @@ async def _multihop_retrieve(
         if cid not in seen:
             seen.add(cid)
             unique_chunks.append(c)
-    return unique_chunks
+    if max(float(c.get("similarity") or 0) for c in unique_chunks) < RAG_USABLE_SIMILARITY:
+        return [], "no_useful_matches"
+    return unique_chunks, "ok"
 
 # Parallel Grade Helper — Context-Aware with Semantic RAG + Exemplars
 async def _gp(
@@ -1442,6 +1790,7 @@ async def _gp(
     section_map_reliable: bool = True,
     is_proposal: bool = False,
     peer_rubric_titles: list[str] | None = None,
+    retrieval_status: str = "ok",
 ):
     criterion_title = c.get('title', c.get('criterion_id', 'Unknown'))
     criterion_desc = c.get('description', '')
@@ -1449,6 +1798,42 @@ async def _gp(
     genre_signals = genre_signals or {"genre": submission_genre}
     peer_rubric_titles = peer_rubric_titles or []
     title_lower = criterion_title.lower()
+
+    # Heuristic for dimension if defaulted to 'content'
+    dimension = c.get('dimension', 'content')
+    if any(kw in title_lower for kw in ['structure', 'format', 'grammar', 'organization', 'presentation', 'style', 'mechanic', 'writing', 'citation', 'reference', 'formatting']):
+        dimension = 'structure'
+
+    def _not_assessable(failure_kind: str, justification: str) -> dict:
+        return {
+            "criterion_id": c['criterion_id'],
+            "criterion_name": c.get('title', c['criterion_id']),
+            "dimension": dimension,
+            "score": None,
+            "max_score": max_score,
+            "status": "not_assessable",
+            "failure_kind": failure_kind,
+            "retrieval_status": retrieval_status,
+            "justification": justification,
+            "evidence_anchor": "not found",
+            "ai_generated": c.get("ai_generated", False),
+            "material_alignment": "neutral",
+        }
+
+    # Opt-in per criterion; the default (submission_sufficient) grades from the submission alone.
+    # requires_reference needs usable evidence ("ok"), not merely a successful search. The
+    # usable cut-off (RAG_USABLE_SIMILARITY) is a heuristic, not calibrated per corpus/model.
+    if c.get("evidence_policy") == "requires_reference" and retrieval_status != "ok":
+        reason = {
+            "no_corpus": "no course reference material is indexed",
+            "no_useful_matches": "no sufficiently relevant course reference material was found",
+            "infrastructure_error": "course reference retrieval failed (system error)",
+        }.get(retrieval_status, retrieval_status)
+        return _not_assessable(
+            "reference_unavailable",
+            f"Not assessed: this criterion requires course reference material, and {reason}. "
+            "This is a system limitation, not a judgement of the student.",
+        )
 
     # Build exemplar section if available
     exemplar_section = ""
@@ -1470,11 +1855,6 @@ async def _gp(
             "with criterion-relevant depth, correct placement when sections apply, and a strong evidence_anchor.\n\n"
         )
 
-    # Heuristic for dimension if defaulted to 'content'
-    dimension = c.get('dimension', 'content')
-    if any(kw in title_lower for kw in ['structure', 'format', 'grammar', 'organization', 'presentation', 'style', 'mechanic', 'writing', 'citation', 'reference', 'formatting']):
-        dimension = 'structure'
-
     credit_bands = (
         f"=== PARTIAL CREDIT BANDS (max={max_score}) ===\n"
         f"- Mention-only / keyword presence without substance: score ≤ {max(0, math.ceil(max_score * 0.40))}.\n"
@@ -1485,7 +1865,9 @@ async def _gp(
         f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
     )
 
-    genre_block = _genre_grading_guide(submission_genre, genre_signals, dimension)
+    genre_block = _genre_grading_guide(
+        submission_genre, genre_signals, dimension, is_proposal=is_proposal
+    )
 
     scope_notes = ""
     if is_proposal:
@@ -1495,8 +1877,13 @@ async def _gp(
             "trained-model empirical study. Grade methodology for clarity of the planned approach, algorithms/"
             "software named at a design level, and evaluation plan — do NOT require completed train/test splits, "
             "trained-model metrics, preprocessing pipelines, or labeled-dataset results the paper never claimed "
-            "to have finished. missing_keywords must not invent empirical-implementation checklist items "
-            "absent from the rubric for a proposal.\n\n"
+            "to have finished. missing_keywords / required_concepts must not invent empirical-implementation "
+            "checklist items (running the pipeline, pipeline execution, pre-built ML pipeline, hyperparameter "
+            "tuning, supervised/unsupervised technique) absent from a proposal deliverable.\n"
+            "For criteria titled like Running the Pipeline / Result Interpretation / Model Evaluation: award "
+            "partial-to-full credit when the student clearly explains what they would run, which metrics they "
+            "would use, and how they would interpret outputs — status must NOT be missing solely for lacking "
+            "completed empirical results.\n\n"
         )
     if "challenge" in title_lower and any("ethic" in t for t in peer_rubric_titles):
         scope_notes += (
@@ -1583,27 +1970,26 @@ async def _gp(
         f"=== STUDENT SUBMISSION ===\n{txt[:150000]}\n"
     )
     try:
-        r = await asyncio.to_thread(
-            call_gemini,
-            prompt,
-            GEMINI_GRADING_MODEL,
-            0.2,
-            8192,
-            LLMGradingPayload,
-            api_key,
-            provider,
-        )
+        def _grade_llm_capped():
+            with _GRADE_LLM_SEM:
+                return call_gemini(
+                    prompt,
+                    GEMINI_GRADING_MODEL,
+                    0.2,
+                    8192,
+                    LLMGradingPayload,
+                    api_key,
+                    provider,
+                )
+
+        r = await asyncio.to_thread(_grade_llm_capped)
     except Exception as e:
         print(f"[GRADE] Error grading criterion {c.get('criterion_id')}: {e}")
-        r = {
-            "score": 0,
-            "status": "missing",
-            "justification": f"Grading error: {str(e)}",
-            "evidence_anchor": "not found",
-            "missing_keywords": [],
-            "material_alignment": "neutral",
-            "placement_ok": True,
-        }
+        # A processing failure is not evidence about the student: no score, no guards/caps.
+        return _not_assessable(
+            "processing_failed",
+            f"Not assessed: processing failed ({type(e).__name__}). Requires regrade or human review.",
+        )
 
     evidence_anchor = str(r.get('evidence_anchor', '') or '').strip()
 
@@ -1640,8 +2026,8 @@ async def _gp(
         "criterion_id": c['criterion_id'],
         "criterion_name": c.get('title', c['criterion_id']),
         "dimension": dimension,
-        "score": int(r.get('score', 0) or 0),
-        "max_score": max_score,
+        "score": _as_points(r.get("score", 0)),
+        "max_score": _as_points(max_score),
         "status": str(r.get('status', 'partial')),
         "justification": str(r.get('justification', '')),
         "missing_keywords": _filter_proposal_missing_keywords(
@@ -1649,17 +2035,25 @@ async def _gp(
             is_proposal,
         ),
         "evidence_anchor": evidence_anchor or "not found",
-        "supporting_materials": r.get('supporting_materials', []) or [],
-        "covered_concepts": r.get('covered_concepts', []) or [],
-        "required_concepts": r.get('required_concepts', []) or [],
+        "supporting_materials": _coerce_str_list(r.get('supporting_materials', []) or []),
+        "covered_concepts": _coerce_str_list(r.get('covered_concepts', []) or []),
+        "required_concepts": _filter_proposal_missing_keywords(
+            r.get('required_concepts', []) or [],
+            is_proposal,
+        ),
         "ai_generated": c.get("ai_generated", False),
-        "material_alignment": r.get("material_alignment", "neutral") or "neutral",
+        # Without usable retrieval there is nothing to align against; never penalize for it.
+        "material_alignment": (r.get("material_alignment", "neutral") or "neutral") if retrieval_status == "ok" else "neutral",
+        "retrieval_status": retrieval_status,
         "placement_ok": placement_ok,
         "placement_issue": not placement_ok,
         "section_map_reliable": section_map_reliable,
         "submission_text": txt,
         "ungrounded_full": False,
     }
+    # Proposal plans often name a valid alternate method vs slides — do not treat as contradict.
+    if is_proposal and str(v.get("material_alignment") or "").lower() == "contradicts":
+        v["material_alignment"] = "neutral"
     v = _apply_verdict_score_guards(v, max_score)
     return _apply_genre_criterion_caps(
         v,
@@ -1671,6 +2065,9 @@ async def _gp(
 
 # Node 3: Grade (Concurrent) — Semantic RAG + Exemplar-Aware
 async def run_grade(state: GradingState) -> dict:
+    from grading_server.assessment_policy.resolve import formative_observation_verdicts
+    from grading_server.assessment_policy.types import AssessmentPolicy
+
     rubric = state.get("rubric_criteria", [])
     exemplars = state.get("exemplars", {})
     txt = state["submission_text"]
@@ -1687,8 +2084,32 @@ async def run_grade(state: GradingState) -> dict:
     peer_rubric_titles = [str(c.get("title") or c.get("criterion_id") or "") for c in rubric]
     if is_proposal:
         print(f"[GRADE] proposal-style submission detected for {aid}")
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        from pathlib import Path as _Path
+        _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log").open("a", encoding="utf-8").write(_json.dumps({
+            "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "A",
+            "location": "app.py:run_grade:proposal_detect",
+            "message": "proposal-style detection",
+            "data": {"assignment_id": aid, "is_proposal": is_proposal, "text_len": len(txt or "")},
+            "timestamp": int(_time.time() * 1000),
+        }) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    policy_raw = state.get("assessment_policy")
+    if isinstance(policy_raw, dict) and policy_raw.get("formative_only"):
+        policy = AssessmentPolicy.model_validate(policy_raw)
+        return {
+            "verdicts": formative_observation_verdicts(txt, policy),
+            "relevant_chunks": [],
+            "force_flag_for_human": True,
+        }
 
     if not rubric:
+        # Genuine empty path without formative policy (should be rare after resolve).
         return {"verdicts": [], "relevant_chunks": []}
 
     # Map previous critiques by criterion_id if this is a retry loop
@@ -1702,10 +2123,11 @@ async def run_grade(state: GradingState) -> dict:
         provider, api_key = _llm_creds(state)
         # 1. Decompose
         sub_queries = await _decompose_criterion(
-            criterion_title, criterion_desc, api_key=api_key, provider=provider
+            criterion_title, criterion_desc, api_key=api_key, provider=provider,
+            deep=bool(state.get("deep_retrieve")),
         )
         # 2. Multi-Hop Retrieve
-        retrieved_chunks = await _multihop_retrieve(
+        retrieved_chunks, retrieval_status = await _multihop_retrieve(
             sub_queries,
             aid,
             api_key=api_key,
@@ -1714,12 +2136,21 @@ async def run_grade(state: GradingState) -> dict:
         )
 
         # Build context from semantically retrieved course material
-        ctx = "\n---\n".join([
-            f"[Source: {ch.get('source_title', 'Unknown Source').split(' (chunk')[0].strip()}] (Chunk {ch.get('chunk_index', '?')}) (similarity: {round(ch.get('similarity', 0), 2)})\n{ch.get('chunk_text', '')}"
-            for ch in retrieved_chunks[:10]
-        ])
-        if not ctx:
-            ctx = "(No course material retrieved. Grade using the rubric, assignment context, and student submission.)"
+        if retrieval_status == "ok":
+            ctx = "\n---\n".join([
+                f"[Source: {ch.get('source_title', 'Unknown Source').split(' (chunk')[0].strip()}] (Chunk {ch.get('chunk_index', '?')}) (similarity: {round(ch.get('similarity', 0), 2)})\n{ch.get('chunk_text', '')}"
+                for ch in retrieved_chunks[:10]
+            ])
+            top_sim = max(float(ch.get("similarity") or 0) for ch in retrieved_chunks)
+            ctx += (
+                "\n\n=== MATERIAL ALIGNMENT (retrieved course materials are available) ===\n"
+                "Set material_alignment='supports' when the student's claims are consistent with these materials. "
+                "Set 'contradicts' only for a clear factual conflict. "
+                "Set 'neutral' only when these materials do not meaningfully address THIS criterion "
+                f"(top similarity was {round(top_sim, 2)}; treat ≥0.45 as clearly on-topic).\n"
+            )
+        else:
+            ctx = _RETRIEVAL_UNAVAILABLE_CTX[retrieval_status]
 
         hint = _criterion_section_hint(criterion_title, criterion_desc)
         matched = _resolve_section_for_criterion(sections, hint) if section_map_reliable else None
@@ -1771,13 +2202,21 @@ async def run_grade(state: GradingState) -> dict:
             section_map_reliable=section_map_reliable,
             is_proposal=is_proposal,
             peer_rubric_titles=peer_rubric_titles,
+            retrieval_status=retrieval_status,
         )
         return verdict, retrieved_chunks
 
     tasks = [_process_criterion(c) for c in rubric]
     results = list(await asyncio.gather(*tasks))
 
-    verdicts = [res[0] for res in results]
+    # A failed retry must not overwrite an earlier assessed verdict for the same criterion.
+    prev_assessed = {
+        v.get("criterion_id"): v for v in state.get("verdicts", []) or [] if v.get("score") is not None
+    }
+    verdicts = [
+        prev_assessed.get(res[0].get("criterion_id"), res[0]) if res[0].get("score") is None else res[0]
+        for res in results
+    ]
     verdicts = _dedupe_overlapping_ai_penalties(verdicts)
     verdicts = _soften_challenges_ethics_double_count(verdicts)
     all_chunks = []
@@ -1791,18 +2230,54 @@ async def run_grade(state: GradingState) -> dict:
 
     force_flag_for_human = False
     for v in verdicts:
-        if v.get("ungrounded_full") or v.get("placement_issue") or v.get("material_alignment") == "contradicts":
+        if (
+            v.get("score") is None
+            or v.get("ungrounded_full")
+            or v.get("placement_issue")
+            or v.get("material_alignment") == "contradicts"
+            or v.get("retrieval_status") == "infrastructure_error"
+        ):
             force_flag_for_human = True
 
     verdicts, holistic_flag = _holistic_consistency_nudge(verdicts)
     if holistic_flag:
         force_flag_for_human = True
 
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        from pathlib import Path as _Path
+        _p = _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log")
+        _rows = [{
+            "cid": v.get("criterion_id"),
+            "name": (v.get("criterion_name") or v.get("title") or "")[:60],
+            "score": v.get("score"),
+            "max": v.get("max_score"),
+            "status": v.get("status"),
+            "anchor": (str(v.get("evidence_anchor") or "")[:80]),
+            "missing_kw": (v.get("missing_keywords") or [])[:6],
+            "ungrounded_full": bool(v.get("ungrounded_full")),
+            "placement_issue": bool(v.get("placement_issue")),
+            "material_alignment": v.get("material_alignment"),
+            "retrieval_status": v.get("retrieval_status"),
+        } for v in verdicts]
+        _p.open("a", encoding="utf-8").write(_json.dumps({
+            "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "A,B",
+            "location": "app.py:run_grade", "message": "scores after grade+guards+holistic",
+            "data": {"n": len(_rows), "sum": sum((r["score"] or 0) for r in _rows if isinstance(r["score"], int)),
+                     "holistic_flag": holistic_flag, "rows": _rows},
+            "timestamp": int(_time.time() * 1000),
+        }) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
     return {
         "verdicts": verdicts,
         "loop_count": state.get("loop_count", 0) + 1,
         "force_flag_for_human": force_flag_for_human,
         "relevant_chunks": all_chunks,
+        "is_proposal": is_proposal,
     }
 
 # Critique model for structured LLM output
@@ -1814,9 +2289,18 @@ class LLMCritiquePayload(BaseModel):
 
 # Parallel Critique Helper — Actually calls the LLM
 async def _cp(v, api_key=None, provider=None):
+    if v.get("score") is None:
+        return CritiqueResult(
+            criterion_id=v["criterion_id"],
+            is_supported=False,
+            is_justified=False,
+            confidence=0.0,
+            flag_for_human=True,
+            reasoning=f"Not assessed ({v.get('failure_kind') or 'unknown'}); no score to critique.",
+        ).model_dump()
     criterion_title = v.get("criterion_name", v.get("criterion_id", "Unknown"))
-    max_score = int(v.get("max_score") or 0)
-    score = int(v.get("score") or 0)
+    max_score = _as_points(v.get("max_score"))
+    score = _as_points(v.get("score"))
     anchor = str(v.get("evidence_anchor") or "")
     ratio = (score / max_score) if max_score > 0 else 0.0
     prompt = (
@@ -1897,6 +2381,45 @@ async def run_critique(state: GradingState) -> dict:
     if not v: return {"critiques": []}
     return {"critiques": list(await asyncio.gather(*[_cp(item, api_key=api_key, provider=provider) for item in v]))}
 
+def _restore_evidence_lock_if_violated(v: dict) -> dict:
+    """If post-verify guards mutated a locked omission/score/anchor, restore the pinned values.
+
+    Bounded once: does not re-enter the full recovery controller here.
+    """
+    from grading_server.evidence.integrity import lock_violated
+    from grading_server.evidence.types import EvidenceLock
+
+    lock_raw = v.get("evidence_lock")
+    if not lock_raw or not v.get("evidence_verified"):
+        return v
+    try:
+        lock = EvidenceLock.model_validate(lock_raw) if isinstance(lock_raw, dict) else lock_raw
+    except Exception:
+        return v
+    if not lock_violated(v, lock):
+        return v
+    # Invalidate silent mutation of verified omission judgments.
+    restored = dict(v)
+    restored["score"] = lock.score
+    restored["evidence_anchor"] = lock.evidence_anchor
+    claim = dict(restored.get("criterion_claim") or {})
+    claim["claim_type"] = lock.claim_type
+    claim["review_reasons"] = list(
+        dict.fromkeys(
+            list(claim.get("review_reasons") or [])
+            + ["Post-verify mutation reversed; evidence lock rechecked once"]
+        )
+    )
+    restored["criterion_claim"] = claim
+    if lock.score is None:
+        restored["status"] = "not_assessable"
+        restored["failure_kind"] = restored.get("failure_kind") or "processing_failed"
+    elif float(lock.score) == 0:
+        restored["status"] = "missing"
+    restored["evidence_lock_restored"] = True
+    return restored
+
+
 # Node 5: Output — with topic radar, misconception hint, and concepts for Knowledge Graph
 async def run_output(state: GradingState) -> dict:
     raw_verdicts = list(state.get("verdicts", []) or [])
@@ -1907,28 +2430,108 @@ async def run_output(state: GradingState) -> dict:
 
     verts = []
     for v in raw_verdicts:
-        payload = {k: v[k] for k in v if k in CriterionVerdict.model_fields}
         # Ensure guards applied once more with clean status/score
-        guarded = _apply_verdict_score_guards(dict(v), int(v.get("max_score") or 0))
-        payload = {k: guarded.get(k, payload.get(k)) for k in CriterionVerdict.model_fields}
+        guarded = _apply_verdict_score_guards(dict(v), _as_points(v.get("max_score")))
+        # Merge guard outputs back onto the full verdict (keeps evidence_lock / claim).
+        merged = {**dict(v), **{k: guarded.get(k, v.get(k)) for k in guarded}}
+        merged = _restore_evidence_lock_if_violated(merged)
+        payload = {k: merged[k] for k in merged if k in CriterionVerdict.model_fields}
+        # Absent optional fields take model defaults; score stays explicit (None = not assessed).
+        payload = {k: val for k, val in payload.items() if val is not None or k == "score"}
         verts.append(CriterionVerdict(**payload))
+        # Keep restored claim/lock on state-facing list for evidence block consistency
+        v.clear()
+        v.update(merged)
     critiques = [CritiqueResult(**{k: c[k] for k in c if k in CritiqueResult.model_fields}) for c in state.get("critiques", [])]
+
+    policy_raw = state.get("assessment_policy") if isinstance(state.get("assessment_policy"), dict) else None
+    formative_only = bool(policy_raw and policy_raw.get("formative_only"))
 
     # Separate content vs structure scores, excluding AI-generated criteria
     content_verts = [v for v in verts if v.dimension == "content" and not v.ai_generated]
     structure_verts = [v for v in verts if v.dimension == "structure" and not v.ai_generated]
 
-    content_score = sum(v.score for v in content_verts)
-    content_max = sum(v.max_score for v in content_verts)
-    structure_score = sum(v.score for v in structure_verts)
-    structure_max = sum(v.max_score for v in structure_verts)
-    total = content_score + structure_score
+    content_max = sum(_as_points(v.max_score) for v in content_verts)
+    structure_max = sum(_as_points(v.max_score) for v in structure_verts)
     total_max = content_max + structure_max
+
+    # A total exists only when every required criterion was assessed. Otherwise
+    # report a labelled subtotal over assessed criteria, never rescaled to total_max.
+    # Formative-only: observations can be fully processed without inventing a total.
+    required = content_verts + structure_verts
+    failed = [v for v in required if v.score is None]
+    assessed = [v for v in required if v.score is not None]
+    if formative_only:
+        assessment_status = "complete"
+        content_score = structure_score = total = None
+        total_max = 0.0
+        content_max = structure_max = 0.0
+        partial_subtotal = None
+    elif not failed and required:
+        assessment_status = "complete"
+        content_score = sum(_as_points(v.score) for v in content_verts)
+        structure_score = sum(_as_points(v.score) for v in structure_verts)
+        total = content_score + structure_score
+        partial_subtotal = None
+    else:
+        assessment_status = "processing_failed" if not assessed else "partial"
+        content_score = structure_score = total = None
+        partial_subtotal = {
+            "earned": sum(_as_points(v.score) for v in assessed),
+            "assessed_max": sum(_as_points(v.max_score) for v in assessed),
+            "failed_criteria": [v.criterion_name or v.criterion_id for v in failed],
+        }
+
+    # #region agent log
+    try:
+        import json as _json, time as _time
+        from pathlib import Path as _Path
+        _p = _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log")
+        _pre = [{
+            "cid": v.get("criterion_id"),
+            "score_in": v.get("score"),
+            "name": (v.get("criterion_name") or "")[:50],
+        } for v in raw_verdicts]
+        _post = [{
+            "cid": v.criterion_id,
+            "score_out": v.score,
+            "max": v.max_score,
+            "status": v.status,
+            "name": (v.criterion_name or "")[:50],
+        } for v in verts]
+        _p.open("a", encoding="utf-8").write(_json.dumps({
+            "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "D,B",
+            "location": "app.py:run_output", "message": "final aggregation after second guards",
+            "data": {
+                "assessment_status": assessment_status,
+                "total": total,
+                "total_max": total_max,
+                "holistic_flag": holistic_flag,
+                "pre": _pre,
+                "post": _post,
+                "score_deltas": [
+                    {"cid": a["cid"], "in": a["score_in"], "out": b["score_out"]}
+                    for a, b in zip(_pre, _post)
+                    if a.get("score_in") != b.get("score_out")
+                ],
+            },
+            "timestamp": int(_time.time() * 1000),
+        }) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+    _status_rank = ["ok", "no_useful_matches", "no_corpus", "infrastructure_error"]
+    retrieval_status = max(
+        (v.retrieval_status for v in verts if v.retrieval_status),
+        key=_status_rank.index,
+        default="ok",
+    )
 
     # Build topic mastery radar (percentage per criterion)
     topic_mastery_radar = {}
     for v in verts:
-        if v.max_score > 0:
+        if v.max_score > 0 and v.score is not None:
             if getattr(v, "required_concepts", None):
                 depth_score = len(v.covered_concepts) / len(v.required_concepts)
             else:
@@ -1944,9 +2547,17 @@ async def run_output(state: GradingState) -> dict:
         unique_missing = list(dict.fromkeys(all_missing))[:10]  # deduplicate, limit to 10
         misconception_hint = f"The submission may be missing key concepts: {', '.join(unique_missing)}."
 
-    # Check if rubric was available
-    rubric_missing = len(state.get("rubric_criteria", [])) == 0
-    if rubric_missing:
+    # Instructor rubric absent is handled via fallback policy; only flag when no policy/criteria.
+    rubric_missing = (
+        len(state.get("rubric_criteria", [])) == 0
+        and not (policy_raw and policy_raw.get("origin") in ("inferred", "approved_template", "formative"))
+    )
+    if formative_only:
+        misconception_hint = (
+            (policy_raw or {}).get("diagnostic")
+            or "Formative only: supply clearer assignment expectations or an approved template to enable scoring."
+        )
+    elif rubric_missing:
         misconception_hint = "No rubric criteria found for this assignment. Please run Ingest Materials."
 
     # Extract referenced materials
@@ -1968,8 +2579,8 @@ async def run_output(state: GradingState) -> dict:
         (float(ch.get("similarity") or 0) for ch in relevant_chunks),
         reverse=True,
     )
-    strong_match_count = sum(1 for s in sims if s >= 0.45)
-    usable_count = sum(1 for s in sims if s >= 0.28)
+    strong_match_count = sum(1 for s in sims if s >= RAG_STRONG_SIMILARITY)
+    usable_count = sum(1 for s in sims if s >= RAG_USABLE_SIMILARITY)
     top_avg = (sum(sims[:5]) / min(5, len(sims))) if sims else 0.0
 
     if not sims or usable_count == 0:
@@ -1986,36 +2597,86 @@ async def run_output(state: GradingState) -> dict:
     flagged_count = sum(1 for c in critiques if c.flag_for_human)
     majority_flagged = flagged_count >= max(1, (len(critiques) + 1) // 2) if critiques else False
     any_flagged = (
-        state.get("force_flag_for_human", False)
+        assessment_status != "complete"
+        or state.get("force_flag_for_human", False)
         or holistic_flag
         or overall_confidence < 0.65
         or majority_flagged
         or any(not c.is_supported or not c.is_justified for c in critiques)
     )
 
+    from grading_server.evidence.types import EVIDENCE_PROTOCOL_VERSION
+    from grading_server.evidence.mode import validate_experiment_mode
+
+    experiment_mode = validate_experiment_mode(
+        state.get("experiment_mode"), fallback="coverage_recovery"
+    )
+    evidence_block = state.get("evidence_block") or {}
+    policy_meta = {}
+    if policy_raw:
+        from grading_server.assessment_policy.types import AssessmentPolicy
+
+        try:
+            policy_meta = AssessmentPolicy.model_validate(policy_raw).result_metadata()
+        except Exception:
+            policy_meta = {
+                "assessment_policy": policy_raw,
+                "policy_id": policy_raw.get("policy_id"),
+                "policy_version": policy_raw.get("version"),
+                "policy_content_hash": policy_raw.get("content_hash"),
+                "policy_origin": policy_raw.get("origin"),
+                "policy_lifecycle": policy_raw.get("lifecycle"),
+                "policy_provisional": policy_raw.get("lifecycle") == "frozen_provisional",
+                "policy_formative_only": bool(policy_raw.get("formative_only")),
+                "policy_label": None,
+            }
+
+    # Coverage recovery may revise judgments under a frozen policy; never mutate the policy snapshot.
+    if policy_raw and state.get("assessment_policy") is not policy_raw:
+        pass  # policy remains the retrieve-time freeze
+
     out = GradingOutput(
         assignment_id=state["assignment_id"],
         student_id=state["student_id"],
+        assessment_status=assessment_status,
         content_score=content_score,
         content_max=content_max,
         structure_score=structure_score,
         structure_max=structure_max,
         total=total,
         total_max=total_max,
+        partial_subtotal=partial_subtotal,
+        retrieval_status=retrieval_status,
         criteria_verdicts=[v.model_dump() for v in verts],
         topic_mastery_radar=topic_mastery_radar,
         misconception_hint=misconception_hint,
-        flag_for_human=any_flagged,
+        flag_for_human=any_flagged or bool(policy_meta.get("policy_provisional")) or formative_only,
         overall_confidence=round(overall_confidence, 2),
         critiques=state.get("critiques", []),
         referenced_materials=referenced_materials,
         rag_coverage_level=rag_coverage_level,
         strong_match_count=strong_match_count,
+        experiment_mode=experiment_mode,
+        evidence_protocol_version=EVIDENCE_PROTOCOL_VERSION,
+        evidence=evidence_block if isinstance(evidence_block, dict) else None,
+        policy_id=policy_meta.get("policy_id"),
+        policy_version=policy_meta.get("policy_version"),
+        policy_content_hash=policy_meta.get("policy_content_hash"),
+        policy_origin=policy_meta.get("policy_origin"),
+        policy_lifecycle=policy_meta.get("policy_lifecycle"),
+        policy_provisional=bool(policy_meta.get("policy_provisional")),
+        policy_formative_only=bool(policy_meta.get("policy_formative_only")),
+        policy_label=policy_meta.get("policy_label"),
+        assessment_policy=policy_meta.get("assessment_policy"),
     )
     res = out.model_dump()
     res["rubric_missing"] = rubric_missing
+    res["policy_lookup_status"] = state.get("policy_lookup_status")
     # Include submission concepts for Knowledge Graph updates on the frontend
     res["submission_concepts"] = state.get("submission_concepts", [])
+    started = state.get("grade_started_at")
+    if isinstance(started, (int, float)) and started > 0:
+        res["_pipeline_duration_seconds"] = round(time.time() - float(started), 2)
 
     # Save to grading_results table
     try:
@@ -2023,15 +2684,26 @@ async def run_output(state: GradingState) -> dict:
             sb = get_supabase()
             aid = state["assignment_id"]
             sid = state["student_id"]
-            existing = sb.table("grading_results").select("id").eq("assignment_id", aid).eq("student_id", sid).execute().data
+            cid = str(state.get("course_id") or "")
+            existing = (
+                sb.table("grading_results").select("id,result_json")
+                .eq("assignment_id", aid).eq("student_id", sid).eq("course_id", cid).execute().data
+            )
             if existing:
                 row_id = existing[0]["id"]
+                stored = dict(res)
+                prev = existing[0].get("result_json")
+                if is_legacy_result(prev):
+                    stored["superseded_legacy_result"] = prev
+                elif isinstance(prev, dict) and prev.get("superseded_legacy_result"):
+                    stored["superseded_legacy_result"] = prev["superseded_legacy_result"]
                 sb.table("grading_results").update({
-                    "result_json": res
+                    "result_json": stored
                 }).eq("id", row_id).execute()
             else:
                 sb.table("grading_results").insert({
                     "assignment_id": aid,
+                    "course_id": cid,
                     "student_id": sid,
                     "result_json": res
                 }).execute()
@@ -2049,22 +2721,41 @@ def should_continue(state: GradingState):
         return "grade"
     return "output"
 
+def _truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+def after_grade(state: GradingState):
+    # Always run evidence_verify (baseline is a cheap no-op for recovery/semantic).
+    return "evidence_verify"
+
+def after_evidence_verify(state: GradingState):
+    return "critique" if state.get("moe") else "output"
+
 def get_graph():
+    from grading_server.evidence.node import run_evidence_verify
+
     g = StateGraph(GradingState)
     g.add_node("ingest", run_ingest)
     g.add_node("retrieve", run_retrieve)
     g.add_node("grade", run_grade)
+    g.add_node("evidence_verify", run_evidence_verify)
     g.add_node("critique", run_critique)
     g.add_node("output", run_output)
     g.set_entry_point("ingest")
     g.add_edge("ingest", "retrieve")
     g.add_edge("retrieve", "grade")
-    g.add_edge("grade", "critique")
+    g.add_conditional_edges("grade", after_grade, {"evidence_verify": "evidence_verify"})
+    g.add_conditional_edges(
+        "evidence_verify", after_evidence_verify, {"critique": "critique", "output": "output"}
+    )
     g.add_conditional_edges("critique", should_continue, {"grade": "grade", "output": "output"})
     g.add_edge("output", END)
     return g.compile()
 
 @app.route("/api/grade", methods=["POST"])
+@require_access("assignment")
 async def grade_submission():
     s = time.time()
     try:
@@ -2081,9 +2772,17 @@ async def grade_submission():
         custom_gemini_key = llm_api_key  # legacy var name used below for extractors
         submission_filenames: list[str] = []
 
-        # Canvas often stores Harmonize/LTI launch URLs as the body — resolve via Canvas LTI launch
-        external_url = _detect_external_submission_url(submission_text)
-        if external_url:
+        # Canvas often stores Harmonize/LTI launch URLs as the body — resolve via Canvas LTI launch.
+        # Other bare https URLs (Power BI, docs, etc.) use SSRF-safe public fetch.
+        client_external = str(data.get("external_url") or "").strip()
+        lti_url = _detect_external_submission_url(submission_text) or (
+            _detect_external_submission_url(client_external) if client_external else None
+        )
+        public_link_url = None if lti_url else (
+            _detect_any_https_submission_url(submission_text)
+            or _detect_any_https_submission_url(client_external)
+        )
+        if lti_url:
             course_id_for_lti = str(data.get("course_id") or "").strip()
             assignment_id_for_lti = str(data.get("assignment_id") or "").strip()
             canvas_token_for_lti = (
@@ -2097,7 +2796,7 @@ async def grade_submission():
                     _resolve_external_submission_via_canvas,
                     course_id_for_lti,
                     canvas_token_for_lti,
-                    external_url,
+                    lti_url,
                     assignment_id_for_lti or None,
                     True,
                     student_id_for_lti,
@@ -2111,12 +2810,14 @@ async def grade_submission():
                         "error": "EXTERNAL_SUBMISSION_EMPTY",
                         "details": (
                             "Harmonize content could not be extracted for AI grading. "
-                            "Open the submission in Canvas SpeedGrader to review, or ask the student "
-                            "for a file/text copy. "
+                            "Open the submission in Canvas, copy the student post, and paste it into "
+                            "EduConnect (Paste student post for AI grading), then retry. "
                             + (resolved.get("error") or "")
                         ),
                         "speedgrader_url": resolved.get("speedgrader_url"),
+                        "canvas_open_url": resolved.get("canvas_open_url") or resolved.get("speedgrader_url"),
                         "launch_url": resolved.get("launch_url"),
+                        "embed_blocked": resolved.get("embed_blocked", True),
                     }), 400
             except Exception as ext_err:
                 traceback.print_exc()
@@ -2124,6 +2825,22 @@ async def grade_submission():
                     "error": "EXTERNAL_SUBMISSION_FETCH_FAILED",
                     "details": str(ext_err),
                 }), 400
+        elif public_link_url and not submission_text.startswith("[LINK"):
+            from grading_server.utils.safe_url_fetch import fetch_public_link_text
+
+            link_result = await asyncio.to_thread(fetch_public_link_text, public_link_url)
+            if link_result.get("extractable") and (link_result.get("text") or "").strip():
+                submission_text = str(link_result["text"]).strip()
+                print(f"[DEBUG] Public link extract → {len(submission_text)} chars via {link_result.get('method')}")
+            else:
+                submission_text = (
+                    "[LINK SUBMISSION — CONTENT NOT EXTRACTABLE]\n"
+                    f"URL: {public_link_url}\n"
+                    f"Reason: {link_result.get('reason') or 'Remote content unavailable'}\n"
+                    "Interactive dashboards often require sign-in. Grade only pasted student/teacher "
+                    "descriptions if provided; otherwise flag criteria for human review. "
+                    "Do not invent dashboard contents."
+                )
 
         extracted_parts = []
         if request.files:
@@ -2152,6 +2869,17 @@ async def grade_submission():
                         if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
                         elif filename.endswith(".webp"): mime_type = "image/webp"
                         part = _extract_image(file_bytes, mime_type, api_key=llm_api_key, provider=llm_provider)
+                    elif filename.endswith((
+                        ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma",
+                        ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
+                    )):
+                        from grading_server.utils.media_extract import extract_media_for_grading
+                        part = extract_media_for_grading(
+                            file_bytes,
+                            filename=filename,
+                            provider=llm_provider,
+                            api_key=llm_api_key,
+                        ).get("text") or ""
                     if part and part.strip():
                         extracted_parts.append(part.strip())
         
@@ -2228,6 +2956,17 @@ async def grade_submission():
                                 if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
                                 elif filename.endswith(".webp"): mime_type = "image/webp"
                                 return _extract_image(file_bytes, mime_type, api_key=llm_api_key, provider=llm_provider)
+                            if filename.endswith((
+                                ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma",
+                                ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
+                            )):
+                                from grading_server.utils.media_extract import extract_media_for_grading
+                                return extract_media_for_grading(
+                                    file_bytes,
+                                    filename=filename,
+                                    provider=llm_provider,
+                                    api_key=llm_api_key,
+                                ).get("text") or ""
                             if is_ooxml:
                                 try:
                                     return _extract_docx(file_bytes, api_key=llm_api_key, provider=llm_provider)
@@ -2239,6 +2978,8 @@ async def grade_submission():
                         _code_exts = (
                             ".pdf", ".docx", ".pptx", ".ppt", ".txt", ".ipynb",
                             ".png", ".jpg", ".jpeg", ".webp",
+                            ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma",
+                            ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi",
                             ".py", ".java", ".cpp", ".c", ".h", ".js", ".ts", ".tsx", ".jsx",
                             ".r", ".sql", ".cs", ".go", ".rb", ".swift", ".kt", ".md",
                         )
@@ -2294,6 +3035,18 @@ async def grade_submission():
                 assign_desc[:4000] if assign_desc else "",
             ) if p
         )
+        points_possible = data.get("points_possible")
+        try:
+            points_possible = float(points_possible) if points_possible is not None else None
+        except (TypeError, ValueError):
+            points_possible = None
+        explicit_outcomes = data.get("explicit_outcomes") or data.get("learning_outcomes") or []
+        if isinstance(explicit_outcomes, str):
+            explicit_outcomes = [explicit_outcomes]
+        explicit_outcomes = [str(x).strip() for x in explicit_outcomes if str(x).strip()]
+        approved_template_id = (data.get("approved_template_id") or data.get("assessment_template_id") or None)
+        if approved_template_id:
+            approved_template_id = str(approved_template_id).strip() or None
 
         # Deduplicate filenames while preserving order
         seen_names: set[str] = set()
@@ -2313,62 +3066,249 @@ async def grade_submission():
             f"refs={genre_signals.get('has_references')}"
         )
 
-        from grading_server.ingest_service import assert_embedding_provider_compatible
+        from grading_server.ingest_service import assert_embedding_space_compatible
         try:
-            await assert_embedding_provider_compatible(
+            await assert_embedding_space_compatible(
                 assignment_id=str(data.get("assignment_id") or ""),
-                course_id=str(data.get("course_id") or "") or None,
-                provider=llm_provider,
+                course_id=str(data.get("course_id") or ""),
+                space=space_for_provider(llm_provider),
             )
-        except RuntimeError as reingest_err:
-            msg = str(reingest_err)
-            if msg.startswith("REINGEST_REQUIRED:"):
-                return jsonify({
-                    "error": "REINGEST_REQUIRED",
-                    "message": msg.split(":", 1)[1].strip(),
-                    "details": msg,
-                }), 409
-            raise
+        except EmbeddingError as emb_err:
+            return _embedding_error_response(emb_err)
 
+        from grading_server.evidence.mode import resolve_experiment_mode
+
+        # Automatic evidence path (coverage_recovery). Client mode ignored unless
+        # EDUCONNECT_ALLOW_CLIENT_EVIDENCE_MODE=1. Budgets stay server-side only.
+        experiment_mode = resolve_experiment_mode(data.get("experiment_mode"))
+        t_graph = time.time()
+        print(
+            f"[GRADE] start student={data.get('student_id')} assignment={data.get('assignment_id')} "
+            f"chars={len(submission_text)} extract_s={round(t_graph - s, 2)}",
+            flush=True,
+        )
         final = await get_graph().ainvoke({
             "assignment_id": data.get("assignment_id"),
             "course_id": data.get("course_id") or request.form.get("course_id"),
             "student_id": data.get("student_id"),
             "submission_text": submission_text,
             "assignment_context": assignment_context,
+            "assignment_name": assign_name,
+            "assignment_description": assign_desc[:8000],
+            "points_possible": points_possible,
+            "approved_template_id": approved_template_id,
+            "explicit_outcomes": explicit_outcomes,
             "submission_genre": submission_genre,
             "submission_filenames": uniq_filenames,
             "genre_signals": genre_signals,
+            "moe": _truthy(data.get("moe")),
+            "deep_retrieve": _truthy(data.get("deep_retrieve")),
+            "grade_started_at": s,
             "custom_gemini_key": llm_api_key,
             "llm_provider": llm_provider,
             "llm_api_key": llm_api_key,
+            "experiment_mode": experiment_mode,
+            "extraction_failed": False,
+            "extraction_limitations": [],
+            "evidence_chat_json": (
+                (lambda prompt, provider=None, api_key=None: chat_json(
+                    prompt, provider=provider or llm_provider, api_key=api_key or llm_api_key
+                ))
+                if experiment_mode != "baseline"
+                else None
+            ),
         })
         
         res = final["final_output"]
-        res["_pipeline_duration_seconds"] = round(time.time() - s, 2)
+        # Prefer duration stamped inside the graph (persisted to DB); refresh as fallback.
+        res["_pipeline_duration_seconds"] = res.get("_pipeline_duration_seconds") or round(time.time() - s, 2)
         res["extracted_submission_text"] = submission_text
         res["submission_genre"] = submission_genre
         res["genre_signals"] = genre_signals
+        print(
+            f"[GRADE] done student={data.get('student_id')} "
+            f"graph_s={round(time.time() - t_graph, 2)} total_s={res['_pipeline_duration_seconds']}",
+            flush=True,
+        )
+        # #region agent log
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log").open("a", encoding="utf-8").write(_json.dumps({
+                "sessionId": "9ae70f", "runId": "latency-fix", "hypothesisId": "H1",
+                "location": "app.py:grade_submission",
+                "message": "grade finished with concurrency+timeout fix",
+                "data": {
+                    "student_id": data.get("student_id"),
+                    "assignment_id": data.get("assignment_id"),
+                    "extract_s": round(t_graph - s, 2),
+                    "graph_s": round(time.time() - t_graph, 2),
+                    "total_s": res["_pipeline_duration_seconds"],
+                    "grade_llm_cap": _GRADE_LLM_CONCURRENCY,
+                },
+                "timestamp": int(time.time() * 1000),
+            }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         return jsonify(res), 200
+    except EmbeddingError as e:
+        traceback.print_exc()
+        return _embedding_error_response(e)
+    except RubricStoreUnavailable:
+        traceback.print_exc()
+        return jsonify({
+            "error": "RUBRIC_STORE_UNAVAILABLE",
+            "message": "The rubric store could not be read. No draft was produced; retry later.",
+        }), 503
+    except RubricInvalid as e:
+        traceback.print_exc()
+        return jsonify({
+            "error": "RUBRIC_INVALID",
+            "message": str(e) or (
+                "An instructor rubric exists but is unusable. "
+                "It was not replaced with a fallback. Fix or replace the rubric explicitly."
+            ),
+            "validation_errors": list(getattr(e, "validation_errors", []) or []),
+            "require_instructor_decision": True,
+        }), 422
     except Exception as e:
         traceback.print_exc()
         err_msg = str(e)
         if "expected 768 dimensions" in err_msg or "expected 3072 dimensions" in err_msg:
-             return jsonify({"error": "DATABASE_DIMENSION_MISMATCH", "details": "Please run the setup_ingestion_tables.sql in Supabase SQL Editor to update your vector dimensions to 3072."}), 500
+             return jsonify({
+                 "error": "DATABASE_DIMENSION_MISMATCH",
+                 "message": "Vector dimensions in the database do not match this grading server. Ask the owner to apply the ingestion SQL.",
+             }), 500
         if "REINGEST_REQUIRED" in err_msg:
-             return jsonify({"error": "REINGEST_REQUIRED", "message": err_msg.split(":", 1)[-1].strip(), "details": err_msg}), 409
+             return jsonify({
+                 "error": "REINGEST_REQUIRED",
+                 "message": err_msg.split(":", 1)[-1].strip() or "Re-ingest course materials with your current LLM provider, then grade again.",
+             }), 409
         if "PERMISSION_DENIED" in err_msg or "API key not valid" in err_msg or "API key was reported as leaked" in err_msg or "LLM HTTP 401" in err_msg or "BYOK required" in err_msg:
-             return jsonify({"error": "Invalid LLM API key. Re-verify your provider key in settings.", "details": err_msg}), 401
+             return jsonify({
+                 "error": "BYOK_REQUIRED",
+                 "message": "Invalid LLM API key. Re-verify your provider key in settings.",
+             }), 401
         if "RESOURCE_EXHAUSTED" in err_msg or "exceeded your current quota" in err_msg or "429" in err_msg:
-             return jsonify({"error": "LLM API quota exceeded. Wait a moment and retry one student.", "details": err_msg}), 429
+             return jsonify({
+                 "error": "LLM_QUOTA",
+                 "message": "LLM API quota exceeded. Wait a moment and retry one student.",
+             }), 429
         if "cannot schedule new futures after shutdown" in err_msg:
-             return jsonify({"error": "Grading server restarted mid-request. Please click Grade again.", "details": err_msg}), 503
-        # Surface a short actionable message (not just a vague internal error)
-        short = err_msg[:240] if err_msg else "Unknown error"
-        return jsonify({"error": f"Grading failed: {short}", "details": err_msg}), 500
+             return jsonify({
+                 "error": "SERVER_RESTARTED",
+                 "message": "Grading server restarted mid-request. Please click Grade again.",
+             }), 503
+        # Never echo raw ValidationError / provider dumps to the browser.
+        return jsonify({
+            "error": "GRADING_FAILED",
+            "message": "Grading could not finish. Retry once; if it keeps failing, re-verify your LLM key or re-ingest materials.",
+        }), 500
+
+@app.route("/api/assessment-policy/templates", methods=["GET"])
+@require_access("course")
+def list_assessment_policy_templates():
+    from grading_server.assessment_policy.templates import list_approved_templates
+
+    return jsonify({"templates": list_approved_templates()}), 200
+
+
+@app.route("/api/assessment-policy/<policy_id>/v/<int:version>", methods=["GET"])
+@require_access("assignment")
+def get_assessment_policy(policy_id: str, version: int):
+    sb = get_supabase()
+    store = _policy_store_for_client(sb)
+    policy = store.get_by_id_version(policy_id, version)
+    if policy is None:
+        # Also search memory default when supabase miss
+        from grading_server.assessment_policy.store import get_default_store
+
+        policy = get_default_store().get_by_id_version(policy_id, version)
+    if policy is None:
+        return jsonify({"error": "POLICY_NOT_FOUND", "message": "Assessment policy version not found."}), 404
+    # Scope check against authorized assignment/course
+    course_id = str(request.args.get("course_id") or getattr(g, "course_id", "") or "")
+    assignment_id = str(request.args.get("assignment_id") or getattr(g, "assignment_id", "") or "")
+    if course_id and policy.course_id != course_id:
+        return jsonify({"error": "FORBIDDEN", "message": "Policy is outside this course."}), 403
+    if assignment_id and policy.assignment_id != assignment_id:
+        return jsonify({"error": "FORBIDDEN", "message": "Policy is outside this assignment."}), 403
+    return jsonify(policy.model_dump()), 200
+
+
+@app.route("/api/assessment-policy/<policy_id>/v/<int:version>/approve", methods=["POST"])
+@require_access("assignment")
+def approve_assessment_policy(policy_id: str, version: int):
+    sb = get_supabase()
+    store = _policy_store_for_client(sb)
+    from grading_server.assessment_policy.store import get_default_store
+
+    data = request.get_json(silent=True) or {}
+    approved_by = str(data.get("approved_by") or getattr(getattr(g, "principal", None), "user_id", None) or "instructor")
+    try:
+        try:
+            policy = store.approve(policy_id, version, approved_by=approved_by)
+        except KeyError:
+            policy = get_default_store().approve(policy_id, version, approved_by=approved_by)
+    except KeyError:
+        return jsonify({"error": "POLICY_NOT_FOUND", "message": "Exact policy version not found."}), 404
+    except ValueError as e:
+        return jsonify({"error": "POLICY_NOT_APPROVABLE", "message": str(e)}), 409
+    return jsonify(policy.model_dump()), 200
+
+
+@app.route("/api/assessment-policy/<policy_id>/v/<int:version>/edit", methods=["POST"])
+@require_access("assignment")
+def edit_assessment_policy(policy_id: str, version: int):
+    """Instructor edit creates a new frozen version; does not mutate the approved/frozen snapshot in place."""
+    from grading_server.assessment_policy.hashing import policy_content_hash
+    from grading_server.assessment_policy.store import get_default_store
+    from grading_server.assessment_policy.types import AssessmentPolicy
+    from grading_server.assessment_policy.validate import validate_policy
+
+    sb = get_supabase()
+    store = _policy_store_for_client(sb)
+    data = request.get_json(silent=True) or {}
+    edited_by = str(data.get("edited_by") or getattr(getattr(g, "principal", None), "user_id", None) or "instructor")
+    base = store.get_by_id_version(policy_id, version) or get_default_store().get_by_id_version(policy_id, version)
+    if base is None:
+        return jsonify({"error": "POLICY_NOT_FOUND", "message": "Exact policy version not found."}), 404
+    patch = data.get("policy") or data
+    updated = AssessmentPolicy.model_validate({**base.model_dump(), **patch, "policy_id": base.policy_id})
+    # Keep weights aligned to edited maxima so validation does not invent a second scale.
+    pts = sum(float(c.max_points) for c in updated.criteria) or 1.0
+    recomputed = [
+        c.model_copy(update={"weight": float(c.max_points) / pts})
+        for c in updated.criteria
+    ]
+    updated = updated.model_copy(
+        update={
+            "criteria": recomputed,
+            "maximum_score": float(sum(c.max_points for c in recomputed)) if recomputed else None,
+        }
+    )
+    body = updated.model_dump()
+    updated = updated.model_copy(update={"content_hash": policy_content_hash(body)})
+    errs = validate_policy(updated)
+    if errs:
+        return jsonify({"error": "POLICY_INVALID", "message": "Edited policy failed validation.", "validation_errors": errs}), 422
+    try:
+        new_p = store.save_new_version(base, updated, edited_by=edited_by)
+    except Exception:
+        new_p = get_default_store().save_new_version(base, updated, edited_by=edited_by)
+    return jsonify(new_p.model_dump()), 200
+
 
 @app.route("/api/health")
-def health(): return jsonify({"status":"ok"}), 200
+def health():
+    from grading_server.utils.authz import local_mock_grade_enabled, probe_authz_ready
+    authz = probe_authz_ready()
+    return jsonify({
+        "status": "ok" if authz["ready"] else "degraded",
+        "authz": authz,
+        "local_mock_grade": local_mock_grade_enabled(),
+    }), 200
 
 
 @app.route("/api/llm/providers", methods=["GET"])
@@ -2376,7 +3316,32 @@ def llm_providers():
     return jsonify({"providers": list_providers()}), 200
 
 
+@app.route("/api/authz/sync-canvas-memberships", methods=["POST"])
+@require_access("identity")
+def sync_canvas_memberships_endpoint():
+    """Synchronize the caller's teacher and TA memberships from Canvas."""
+    from grading_server.utils.membership_sync import MembershipSyncError, sync_canvas_memberships
+
+    data = request.get_json(silent=True) or {}
+    token = request.headers.get("X-Canvas-Token") or data.get("canvas_token") or ""
+    try:
+        result = sync_canvas_memberships(
+            user_id=g.authz_principal.user_id,
+            canvas_base_url=str(data.get("canvas_base_url") or ""),
+            canvas_token=str(token),
+        )
+    except MembershipSyncError as error:
+        return jsonify({"error": error.code, "message": error.message}), error.status
+    except Exception:
+        return jsonify({
+            "error": "AUTH_UNAVAILABLE",
+            "message": "Membership synchronization is temporarily unavailable.",
+        }), 503
+    return jsonify(result), 200
+
+
 @app.route("/api/verify-llm", methods=["POST"])
+@require_access("identity")
 def verify_llm_endpoint():
     """
     POST /api/verify-llm
@@ -2407,7 +3372,19 @@ def verify_llm_endpoint():
 
 from grading_server.ingest_service import ingest_course_material, delete_assignment_data
 
+
+def _embedding_error_response(e: EmbeddingError):
+    """Typed embedding/provenance failure. Never falls through to grading or a partial write."""
+    if isinstance(e, EmbeddingProvenanceError):
+        status = 503 if e.code == "EMBEDDING_MIGRATION_REQUIRED" else 409
+    elif isinstance(e, EmbeddingSpaceUnsupported):
+        status = 400
+    else:
+        status = 502
+    return jsonify({"error": e.code, "message": str(e).split(": ", 1)[-1]}), status
+
 @app.route("/api/ingest", methods=["POST"])
+@require_access("assignment")
 async def ingest_json():
     """
     POST /api/ingest
@@ -2438,15 +3415,20 @@ async def ingest_json():
             exemplars=exemplars if exemplars else None,
             api_key=llm_api_key,
             provider=llm_provider,
+            course_id=str(data.get("course_id")),
         )
         return jsonify(result), 200
 
+    except EmbeddingError as e:
+        traceback.print_exc()
+        return _embedding_error_response(e)
     except Exception:
         traceback.print_exc()
         return jsonify({"error": "Ingestion failed"}), 500
 
 
 @app.route("/api/ingest/file", methods=["POST"])
+@require_access("assignment")
 async def ingest_file():
     """
     POST /api/ingest/file
@@ -2521,9 +3503,13 @@ async def ingest_file():
             source_name=filename,
             api_key=llm_api_key,
             provider=llm_provider,
+            course_id=str(request.form.get("course_id")),
         )
         return jsonify(result), 200
 
+    except EmbeddingError as e:
+        traceback.print_exc()
+        return _embedding_error_response(e)
     except Exception:
         traceback.print_exc()
         return jsonify({"error": "File ingestion failed"}), 500
@@ -2581,16 +3567,21 @@ def _html_to_text(html: str) -> str:
     return parser.get_text()
 
 
-def _detect_external_submission_url(text: str) -> str | None:
-    """If submission_text is only an LTI/Harmonize launch URL, return that URL."""
+def _detect_any_https_submission_url(text: str) -> str | None:
+    """If submission_text is only a bare http(s) URL, return that URL."""
     if not text:
         return None
     plain = _html_to_text(text) if "<" in text else text
     collapsed = re.sub(r"\s+", "", plain or "").strip()
     match = re.fullmatch(r"https?://\S+", collapsed, flags=re.IGNORECASE)
-    if not match:
+    return match.group(0) if match else None
+
+
+def _detect_external_submission_url(text: str) -> str | None:
+    """If submission_text is only an LTI/Harmonize launch URL, return that URL."""
+    url = _detect_any_https_submission_url(text)
+    if not url:
         return None
-    url = match.group(0)
     lower = url.lower()
     if "/lti/" in lower or "harmonize" in lower or "42lines.net" in lower:
         return url
@@ -2744,22 +3735,124 @@ def _sanitize_submission_html(html: str) -> str:
     return cleaned.strip()
 
 
+_LTI_EMBED_BLOCKED_MARKERS = (
+    "needs to be loaded in a new browser window",
+    "load in a new window",
+    "open this tool in a new window",
+    "cannot be displayed in an iframe",
+    "refused to display in a frame",
+)
+
+
+def _is_lti_embed_blocked_page(html: str = "", text: str = "") -> bool:
+    """Harmonize (and similar LTI tools) return an interstitial instead of student work when framed."""
+    blob = f"{html or ''}\n{text or ''}".lower()
+    return any(m in blob for m in _LTI_EMBED_BLOCKED_MARKERS)
+
+
+def _extract_new_window_urls(html: str, base_url: str = "") -> list[str]:
+    """Pull Harmonize 'open in a new window' targets (and similar) from an interstitial page."""
+    urls: list[str] = []
+    if not html:
+        return urls
+
+    def _abs(href: str) -> str:
+        href = (href or "").strip()
+        if not href:
+            return ""
+        if href.startswith("//"):
+            return "https:" + href
+        if href.startswith("/") and base_url:
+            p = urlparse(base_url)
+            return f"{p.scheme}://{p.netloc}{href}"
+        return href
+
+    for m in re.finditer(
+        r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        href, inner = m.group(1), re.sub(r"<[^>]+>", " ", m.group(2))
+        low_inner = inner.lower()
+        low_href = href.lower()
+        if (
+            "new window" in low_inner
+            or "load " in low_inner
+            or "harmonize" in low_href
+            or "42lines" in low_href
+            or "target=_blank" in m.group(0).lower()
+            or 'target="_blank"' in m.group(0).lower()
+        ):
+            abs_url = _abs(href)
+            if abs_url.startswith("http"):
+                urls.append(abs_url)
+
+    for m in re.finditer(r'window\.open\(\s*[\'"]([^\'"]+)[\'"]', html, flags=re.IGNORECASE):
+        abs_url = _abs(m.group(1))
+        if abs_url.startswith("http"):
+            urls.append(abs_url)
+
+    for m in re.finditer(
+        r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\'>\s]+)',
+        html,
+        flags=re.IGNORECASE,
+    ):
+        abs_url = _abs(m.group(1).strip("'\""))
+        if abs_url.startswith("http"):
+            urls.append(abs_url)
+
+    # Preserve order, drop dupes
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _lti_browser_headers() -> dict[str, str]:
+    # Look like a top-level browser navigation (not an iframe) so tools that
+    # gate on Sec-Fetch-* / UA still return the real student page.
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+    }
+
+
+def _html_looks_like_student_work(html: str, text: str) -> bool:
+    if _is_lti_embed_blocked_page(html, text):
+        return False
+    if "unknown version" in (text or "").lower():
+        return False
+    # Require some real prose — interstitial/chrome pages are short / templated.
+    return len((text or "").strip()) >= 40
+
+
 def _follow_lti_launch(sessionless_url: str) -> dict:
     """
     Open Canvas sessionless launch URL, auto-submit the LTI form if present,
     and return sanitized HTML + plain text from the tool response.
+
+    Harmonize often returns an interstitial ("load in a new window"). When that
+    happens we reuse the LTI session cookies and GET the new-window target so
+    grading still receives the student post.
     """
     session = requests.Session()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 EduConnect-AI/1.0"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-    }
+    headers = _lti_browser_headers()
     r = session.get(sessionless_url, headers=headers, timeout=45, allow_redirects=True)
     html = r.text or ""
     lower = html.lower()
+    final_url = str(getattr(r, "url", sessionless_url) or sessionless_url)
 
     # Canvas often returns an auto-post form to the tool
     form_match = re.search(
@@ -2778,14 +3871,119 @@ def _follow_lti_launch(sessionless_url: str) -> dict:
         post = session.post(action, data=fields, headers=headers, timeout=45, allow_redirects=True)
         html = post.text or ""
         lower = html.lower()
+        final_url = str(getattr(post, "url", action) or action)
 
     text = _html_to_text(html)
     if "launch message is of an unknown version" in lower or "unknown version" in (text or "").lower():
         raise ValueError(
             "LTI launch failed (unknown version). The raw Harmonize URL cannot be opened without Canvas signing."
         )
+
+    if _is_lti_embed_blocked_page(html, text):
+        for target in _extract_new_window_urls(html, base_url=final_url)[:3]:
+            try:
+                followed = session.get(target, headers=headers, timeout=45, allow_redirects=True)
+                f_html = followed.text or ""
+                f_text = _html_to_text(f_html)
+                if _html_looks_like_student_work(f_html, f_text):
+                    safe = _sanitize_submission_html(f_html)
+                    return {
+                        "html": safe,
+                        "text": (f_text or "").strip(),
+                        "embed_blocked": False,
+                        "content_source": "lti_new_window_follow",
+                    }
+            except Exception as follow_err:
+                print(f"[LTI] new-window follow failed for {target}: {follow_err}", flush=True)
+        return {
+            "html": "",
+            "text": "",
+            "embed_blocked": True,
+            "error": (
+                "This external tool (e.g. Harmonize) blocks in-app preview and no student text "
+                "could be extracted for AI grading. Open in Canvas to read it, or paste the post text."
+            ),
+        }
+
+    if not _html_looks_like_student_work(html, text):
+        return {
+            "html": "",
+            "text": "",
+            "embed_blocked": True,
+            "error": "External tool returned no readable student submission text.",
+        }
+
     safe_html = _sanitize_submission_html(html)
-    return {"html": safe_html, "text": (text or "").strip()}
+    return {"html": safe_html, "text": (text or "").strip(), "embed_blocked": False}
+
+
+def _fetch_canvas_discussion_post_for_student(
+    course_id: str,
+    assignment_id: str,
+    student_id: str,
+    canvas_token: str,
+) -> dict | None:
+    """
+    For discussion / Harmonize-backed assignments, pull the student's Canvas discussion
+    entry (and recent replies) when the LTI tool won't embed.
+    """
+    if not (course_id and assignment_id and student_id and canvas_token):
+        return None
+    base = CANVAS_BASE_URL.rstrip("/")
+    headers = {"Authorization": f"Bearer {canvas_token}", "User-Agent": "EduConnect-AI/1.0"}
+    assign_resp = requests.get(
+        f"{base}/api/v1/courses/{course_id}/assignments/{assignment_id}",
+        headers=headers,
+        timeout=30,
+    )
+    topic_id = None
+    if assign_resp.status_code == 200:
+        assign = assign_resp.json()
+        assign = assign if isinstance(assign, dict) else {}
+        topic = assign.get("discussion_topic") if isinstance(assign.get("discussion_topic"), dict) else {}
+        topic_id = str(topic.get("id") or assign.get("discussion_topic_id") or "") or None
+    if not topic_id:
+        # Assignment id may already be a discussion topic id (some Canvas setups).
+        probe = requests.get(
+            f"{base}/api/v1/courses/{course_id}/discussion_topics/{assignment_id}",
+            headers=headers,
+            timeout=20,
+        )
+        if probe.status_code != 200:
+            return None
+        topic_id = str(assignment_id)
+
+    entries_resp = requests.get(
+        f"{base}/api/v1/courses/{course_id}/discussion_topics/{topic_id}/entries",
+        headers=headers,
+        params={"per_page": 100},
+        timeout=30,
+    )
+    if entries_resp.status_code != 200:
+        return None
+    raw_entries = entries_resp.json()
+    entries = raw_entries if isinstance(raw_entries, list) else []
+    sid = str(student_id)
+    match = next((e for e in entries if str(e.get("user_id") or "") == sid), None)
+    if not match:
+        return None
+
+    parts: list[str] = []
+    message = (match.get("message") or "").strip()
+    if message:
+        parts.append(message)
+    for reply in match.get("recent_replies") or []:
+        rmsg = (reply.get("message") or "").strip()
+        if rmsg:
+            parts.append(rmsg)
+    if not parts:
+        return None
+    combined_html = "\n<hr/>\n".join(parts)
+    return {
+        "html": _sanitize_submission_html(combined_html),
+        "text": _html_to_text(combined_html).strip(),
+        "source": "canvas_discussion",
+    }
 
 
 def _follow_lti_launch_for_text(sessionless_url: str) -> str:
@@ -2812,6 +4010,7 @@ def _fetch_canvas_submission_json(
         params=[
             ("include[]", "submission_history"),
             ("include[]", "submission_comments"),
+            ("include[]", "discussion_entries"),
             ("include[]", "user"),
             ("include[]", "rubric_assessment"),
         ],
@@ -2823,6 +4022,33 @@ def _fetch_canvas_submission_json(
     if not isinstance(payload, dict):
         raise ValueError("Canvas submission response was not an object")
     return payload
+
+
+def _text_from_canvas_submission_record(sub: dict) -> tuple[str, str]:
+    """Prefer real discussion/body HTML over an LTI launch URL placeholder."""
+    if not isinstance(sub, dict):
+        return "", ""
+    body = (sub.get("body") or "").strip()
+    if body and not _detect_external_submission_url(body) and not _is_lti_embed_blocked_page(body):
+        return _sanitize_submission_html(body), _html_to_text(body).strip()
+
+    entries = sub.get("discussion_entries") or []
+    if isinstance(entries, list) and entries:
+        parts = [str(e.get("message") or "").strip() for e in entries if isinstance(e, dict)]
+        parts = [p for p in parts if p]
+        if parts:
+            combined = "\n<hr/>\n".join(parts)
+            return _sanitize_submission_html(combined), _html_to_text(combined).strip()
+
+    for hist in reversed(sub.get("submission_history") or []):
+        if not isinstance(hist, dict):
+            continue
+        h_html, h_text = _text_from_canvas_submission_record(
+            {k: hist.get(k) for k in ("body", "discussion_entries") if k in hist}
+        )
+        if h_text and len(h_text) >= 20:
+            return h_html, h_text
+    return "", ""
 
 
 def _resolve_external_submission_via_canvas(
@@ -2843,13 +4069,17 @@ def _resolve_external_submission_via_canvas(
     html = ""
     text = ""
     canvas_submission = None
+    embed_blocked = False
+    content_source = None
 
-    speedgrader_url = None
+    # Escape hatch into Canvas (native grader) — not an EduConnect feature.
+    canvas_open_url = None
     if course_id and assignment_id and student_id:
-        speedgrader_url = (
+        canvas_open_url = (
             f"{CANVAS_BASE_URL.rstrip('/')}/courses/{course_id}/gradebook/speed_grader"
             f"?assignment_id={assignment_id}&student_id={student_id}"
         )
+    speedgrader_url = canvas_open_url  # backward-compatible alias
 
     # 1) Always pull the Canvas submission record first
     if course_id and assignment_id and student_id and canvas_token:
@@ -2857,16 +4087,13 @@ def _resolve_external_submission_via_canvas(
             canvas_submission = _fetch_canvas_submission_json(
                 course_id, assignment_id, student_id, canvas_token
             )
-            body = (canvas_submission.get("body") or "").strip()
             sub_url = (canvas_submission.get("url") or url or "").strip()
             if sub_url and not url:
                 url = sub_url
 
-            # If Canvas already has real HTML/text (not just an LTI URL), show that
-            external_only = _detect_external_submission_url(body)
-            if body and not external_only:
-                html = _sanitize_submission_html(body)
-                text = _html_to_text(body)
+            html, text = _text_from_canvas_submission_record(canvas_submission)
+            if text and len(text) >= 20:
+                content_source = "canvas_submission"
             elif sub_url:
                 url = sub_url
         except Exception as e:
@@ -2897,27 +4124,52 @@ def _resolve_external_submission_via_canvas(
     if extract_text and launch_url and (not html or len(text) < 20):
         try:
             followed = _follow_lti_launch(launch_url)
-            html = followed.get("html") or html
-            text = (followed.get("text") or text or "").strip()
+            if followed.get("embed_blocked"):
+                embed_blocked = True
+                warnings.append(followed.get("error") or "external tool blocked embed")
+            else:
+                html = followed.get("html") or html
+                text = (followed.get("text") or text or "").strip()
+                if html or text:
+                    content_source = "lti_follow"
         except Exception as e:
             warnings.append(f"lti follow: {e}")
+
+    # 3) Discussion-topic fallback when Harmonize won't give us the post body
+    if (not html or len(text) < 20) and course_id and assignment_id and student_id and canvas_token:
+        try:
+            disc = _fetch_canvas_discussion_post_for_student(
+                course_id, assignment_id, student_id, canvas_token
+            )
+            if disc and (disc.get("html") or disc.get("text")):
+                html = disc.get("html") or html
+                text = (disc.get("text") or text or "").strip()
+                content_source = disc.get("source") or "canvas_discussion"
+                embed_blocked = False
+        except Exception as e:
+            warnings.append(f"discussion fallback: {e}")
 
     if not launch_url and not html and not text:
         return {
             "error": "; ".join(warnings) or "Could not load submission from Canvas",
             "speedgrader_url": speedgrader_url,
+            "canvas_open_url": canvas_open_url,
             "launch_url": None,
             "html": "",
             "text": "",
+            "embed_blocked": embed_blocked,
         }
 
     return {
-        "launch_url": launch_url,
+        "launch_url": None if embed_blocked else launch_url,
         "tool_name": tool_name,
         "html": html,
         "text": text,
         "chars": len(text or ""),
         "speedgrader_url": speedgrader_url,
+        "canvas_open_url": canvas_open_url,
+        "embed_blocked": embed_blocked,
+        "content_source": content_source,
         "warnings": warnings,
         "submission_type": (canvas_submission or {}).get("submission_type"),
         "canvas_body_present": bool((canvas_submission or {}).get("body")),
@@ -2946,30 +4198,49 @@ def _canvas_url_rejection(file_url: str) -> str | None:
     ):
         return "Refusing to fetch a private or link-local address"
 
-    allowed_hosts = {"instructure.com", "inscloudgate.net", "instructuremedia.com"}
-    configured = urlparse(CANVAS_BASE_URL).hostname
-    if configured:
-        allowed_hosts.add(configured.lower())
-
-    if host.startswith("canvas."):
+    if host == trusted_lms_host():
         return None
-    for allowed in allowed_hosts:
+    # Canvas file storage/CDN hosts that the configured instance redirects downloads to.
+    for allowed in _CANVAS_FILE_HOSTS:
         if host == allowed or host.endswith(f".{allowed}"):
             return None
-    return f"Host '{host}' is not a recognized Canvas host"
+    return f"Host '{host}' is not the configured Canvas host or its file storage"
+
+
+_CANVAS_FILE_HOSTS = (
+    "inscloudgate.net",
+    "instructuremedia.com",
+    "instructure-uploads.s3.amazonaws.com",
+    # Current Canvas student-file CDN (e.g. a13-….cluster13.canvas-user-content.com)
+    "canvas-user-content.com",
+)
+_MAX_REDIRECTS = 5
 
 
 def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> bytes:
-    """Download a Canvas-hosted file with auth, size limit, and SSRF checks."""
-    rejection = _canvas_url_rejection(str(file_url))
-    if rejection:
-        raise ValueError(rejection)
+    """Download a Canvas-hosted file with size limit and SSRF checks on every redirect hop.
 
-    headers = {"User-Agent": "EduConnect-AI/1.0"}
-    if canvas_token:
-        headers["Authorization"] = f"Bearer {canvas_token}"
+    The Canvas token is sent only to the configured Canvas host, never to storage/CDN hosts.
+    """
+    url = str(file_url)
+    for _ in range(_MAX_REDIRECTS + 1):
+        rejection = _canvas_url_rejection(url)
+        if rejection:
+            raise ValueError(rejection)
+        headers = {"User-Agent": "EduConnect-AI/1.0"}
+        if canvas_token and (urlparse(url).hostname or "").lower() == trusted_lms_host():
+            headers["Authorization"] = f"Bearer {canvas_token}"
+        r = requests.get(url, headers=headers, timeout=30, stream=True, allow_redirects=False)
+        if r.is_redirect:
+            nxt = r.headers.get("Location") or ""
+            r.close()
+            url = requests.compat.urljoin(url, nxt)
+            continue
+        break
+    else:
+        raise ValueError("Too many redirects while downloading from Canvas")
 
-    with requests.get(file_url, headers=headers, timeout=30, stream=True, allow_redirects=True) as r:
+    with r:
         if r.status_code != 200:
             raise ValueError(f"Failed to download from Canvas: {r.status_code}")
 
@@ -2989,8 +4260,33 @@ def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> by
         return b"".join(parts)
 
 
+@app.route("/api/fetch-public-link", methods=["POST"])
+@require_access("course")
+def fetch_public_link():
+    """SSRF-safe best-effort text extract from an arbitrary https student link."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "url is required", "extractable": False}), 400
+    from grading_server.utils.safe_url_fetch import fetch_public_link_text
+
+    try:
+        result = fetch_public_link_text(url)
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            "extractable": False,
+            "url": url,
+            "text": "",
+            "reason": str(e),
+            "method": None,
+        }), 502
+
+
 @app.route("/api/resolve-external-submission", methods=["POST"])
 @app.route("/api/fetch-external-submission", methods=["POST"])
+@require_access("course")
 def resolve_external_submission():
     """
     Resolve Harmonize / LTI submissions through Canvas sessionless launch
@@ -3054,11 +4350,12 @@ def resolve_external_submission():
 
 
 @app.route("/api/proxy-file", methods=["GET"])
+@require_access("course")
 def proxy_file():
     """
     Browser-safe proxy for Canvas file URLs (avoids CORS Failed to fetch in Local Reader).
-    GET /api/proxy-file?url=...
-    Header: X-Canvas-Token (optional)
+    GET /api/proxy-file?url=...&course_id=...
+    Headers: Authorization (Supabase session), X-Canvas-Token (optional)
     """
     file_url = request.args.get("url")
     if not file_url:
@@ -3094,14 +4391,12 @@ def proxy_file():
         file_bytes,
         status=200,
         mimetype=content_type,
-        headers={
-            "Cache-Control": "private, max-age=300",
-            "Access-Control-Allow-Origin": "*",
-        },
+        headers={"Cache-Control": "private, max-age=300"},
     )
 
 
 @app.route("/api/ingest/canvas-url", methods=["POST"])
+@require_access("course")
 async def ingest_canvas_url():
     """
     Downloads a file from a given URL and ingests it.
@@ -3111,35 +4406,15 @@ async def ingest_canvas_url():
         assignment_id = data.get("assignment_id")
         file_url = data.get("url")
         filename = (data.get("filename") or "").lower()
-        canvas_token = data.get("canvas_token")
+        canvas_token = data.get("canvas_token") or request.headers.get("X-Canvas-Token")
 
         if not assignment_id or not file_url:
             return jsonify({"error": "assignment_id and url are required"}), 400
 
-        rejection = _canvas_url_rejection(str(file_url))
-        if rejection:
-            return jsonify({"error": rejection}), 400
-
-        headers = {}
-        if canvas_token:
-            headers["Authorization"] = f"Bearer {canvas_token}"
-
-        with requests.get(file_url, headers=headers, timeout=30, stream=True) as r:
-            if r.status_code != 200:
-                return jsonify({"error": f"Failed to download from Canvas: {r.status_code} {r.text[:500]}"}), 400
-
-            declared_length = r.headers.get("Content-Length")
-            if declared_length and declared_length.isdigit() and int(declared_length) > MAX_CANVAS_DOWNLOAD_BYTES:
-                return jsonify({"error": "File is too large to ingest (limit 25MB)"}), 400
-
-            parts: list[bytes] = []
-            total = 0
-            for part in r.iter_content(chunk_size=65536):
-                total += len(part)
-                if total > MAX_CANVAS_DOWNLOAD_BYTES:
-                    return jsonify({"error": "File is too large to ingest (limit 25MB)"}), 400
-                parts.append(part)
-            file_bytes = b"".join(parts)
+        try:
+            file_bytes = await asyncio.to_thread(_download_canvas_bytes, str(file_url), canvas_token)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
         # Determine file type and extract text
         if filename.endswith(".pdf"):
@@ -3188,15 +4463,20 @@ async def ingest_canvas_url():
             source_name=filename,
             api_key=llm_api_key,
             provider=llm_provider,
+            course_id=str(course_id),
         )
         return jsonify(result), 200
 
+    except EmbeddingError as e:
+        traceback.print_exc()
+        return _embedding_error_response(e)
     except Exception:
         traceback.print_exc()
         return jsonify({"error": "Canvas URL ingestion failed"}), 500
 
 
 @app.route("/api/ingest/course-status", methods=["GET"])
+@require_access("course")
 async def course_ingest_status():
     course_id = request.args.get("course_id")
     if not course_id:
@@ -3208,16 +4488,18 @@ async def course_ingest_status():
 
 
 @app.route("/api/ingest/<assignment_id>", methods=["DELETE"])
+@require_access("assignment")
 async def delete_ingested(assignment_id: str):
     """
-    DELETE /api/ingest/<assignment_id>
-    Clears all stored chunks, criteria, and exemplars for a given assignment.
+    DELETE /api/ingest/<assignment_id>?course_id=...
+    Clears this assignment's description chunks, criteria, and exemplars in that course.
+    Course-file chunks are not affected.
     """
     try:
         if not assignment_id:
             return jsonify({"error": "assignment_id is required"}), 400
 
-        result = await delete_assignment_data(assignment_id)
+        result = await delete_assignment_data(assignment_id, str(request.args.get("course_id")))
         return jsonify(result), 200
 
     except Exception:
@@ -3261,12 +4543,25 @@ def _extract_image(
     api_key: str | None = None,
     provider: str | None = None,
 ) -> str:
-    """Extract text/visual info from a standalone image using provider vision."""
-    from grading_server.utils.file_parsers import _describe_visual
-    desc = _describe_visual(file_bytes, mime_type, api_key=api_key, provider=provider)
-    if desc:
-        return f"[FIGURE / VISUAL - treat as present in the submission]\n{desc}"
-    return ""
+    """Extract text/visual info from a standalone image using provider vision.
+
+    Unlike PDF embedded figures, a standalone image *is* the submission — empty
+    extraction must raise so the teacher sees a real vision error, not
+    "extracted empty text".
+    """
+    from grading_server.utils.llm_client import describe_image
+
+    if not file_bytes or len(file_bytes) < 200:
+        raise ValueError("image file is empty or too small")
+    if not api_key or not provider:
+        raise ValueError("BYOK provider and api_key are required to read image submissions")
+    try:
+        desc = describe_image(file_bytes, mime_type, provider=provider, api_key=api_key)
+    except Exception as e:
+        raise ValueError(f"vision describe failed: {e}") from e
+    if not (desc or "").strip():
+        raise ValueError("vision model returned empty description for image")
+    return f"[FIGURE / VISUAL - treat as present in the submission]\n{desc.strip()}"
 
 
 def _extract_ipynb(file_bytes: bytes) -> str:
@@ -3318,11 +4613,21 @@ def _running_under_streamlit() -> bool:
 
 
 if __name__ == "__main__" and not _running_under_streamlit():
-    from grading_server.config import FLASK_DEBUG
+    from grading_server.config import FLASK_DEBUG, FLASK_HOST
 
     # Render / Railway inject PORT; fall back to local FLASK_PORT.
     port = int(os.environ.get("PORT", FLASK_PORT))
-    print(f"Starting Flask server on port {port} (debug={FLASK_DEBUG})...")
+    print(f"Starting Flask server on {FLASK_HOST}:{port} (debug={FLASK_DEBUG})...")
+    try:
+        from grading_server.utils.authz import probe_authz_ready
+        ready = probe_authz_ready()
+        if not ready["ready"]:
+            print(f"[AUTHZ] NOT READY ({ready['code']}): {ready['message']}")
+        else:
+            print("[AUTHZ] memberships schema reachable")
+    except Exception as e:
+        print(f"[AUTHZ] readiness probe failed: {e}")
     # use_reloader=False: Windows watchdog reloads kill in-flight grade/ingest
     # requests with "cannot schedule new futures after shutdown".
-    app.run(host="0.0.0.0", port=port, debug=FLASK_DEBUG, use_reloader=False)
+    # threaded=True: long Gemini grades must not block health/auth on the same process.
+    app.run(host=FLASK_HOST, port=port, debug=FLASK_DEBUG, use_reloader=False, threaded=True)

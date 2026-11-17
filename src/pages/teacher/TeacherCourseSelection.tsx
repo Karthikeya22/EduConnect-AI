@@ -1,3 +1,4 @@
+import { authErrorMessage, gradingAuthHeaders, syncCanvasMemberships } from '../../lib/gradingApi';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { gsap } from 'gsap';
@@ -33,6 +34,9 @@ interface Course {
   };
 }
 
+const DEFAULT_CANVAS_BASE_URL =
+  import.meta.env.VITE_CANVAS_BASE_URL || 'https://usflearn.instructure.com';
+
 export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => void }) {
   const [courses, setCourses] = useState<Course[]>([]);
   const [availableTerms, setAvailableTerms] = useState<{ id: number; name: string }[]>([]);
@@ -41,6 +45,9 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
   const [error, setError] = useState('');
   const [customToken, setCustomToken] = useState(localStorage.getItem('custom_canvas_token') || '');
   const [customTokenExpiry, setCustomTokenExpiry] = useState(localStorage.getItem('custom_canvas_token_expiry') || '');
+  const [canvasBaseUrl, setCanvasBaseUrl] = useState(
+    localStorage.getItem('canvas_base_url') || DEFAULT_CANVAS_BASE_URL,
+  );
   const [llmProvider, setLlmProvider] = useState<LlmProviderId | ''>(getStoredLlmProvider());
   const [llmApiKey, setLlmApiKey] = useState(getStoredLlmApiKey());
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -139,7 +146,6 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
 
     if (customToken.trim()) localStorage.setItem('custom_canvas_token', customToken.trim());
     else localStorage.removeItem('custom_canvas_token');
-
     if (customTokenExpiry) {
       localStorage.setItem('custom_canvas_token_expiry', customTokenExpiry);
     } else {
@@ -147,6 +153,10 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
     }
 
     try {
+      const normalizedCanvasBaseUrl = canvasBaseUrl.trim();
+      if (!normalizedCanvasBaseUrl) throw new Error('Enter your Canvas base URL.');
+      localStorage.setItem('canvas_base_url', normalizedCanvasBaseUrl);
+      const membershipSync = await syncCanvasMemberships(normalizedCanvasBaseUrl);
       await canvasAPI.getCourses();
       try {
         const { data: { user } } = await supabase.auth.getUser();
@@ -159,7 +169,10 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
       } catch (err) {
         console.warn("Canvas backend sync failed, still stored locally", err);
       }
-      setCanvasVerifyResult({ type: 'success', message: "Canvas token verified and saved." });
+      setCanvasVerifyResult({
+        type: 'success',
+        message: `Connected — ${membershipSync.count} courses where Canvas lists you as teacher/TA.`,
+      });
       fetchCourses();
     } catch (e: any) {
       setCanvasVerifyResult({ type: 'error', message: `Canvas verification failed: ${e.message}` });
@@ -179,12 +192,12 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
 
       const res = await fetch(`${gradingApiBase()}/api/verify-llm`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(await gradingAuthHeaders()) },
         body: JSON.stringify({ provider: llmProvider, api_key: apiKey }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.ok) {
-        throw new Error(body.error || `Verification failed (HTTP ${res.status})`);
+        throw new Error(authErrorMessage(body) || body.error || `Verification failed (HTTP ${res.status})`);
       }
 
       saveLlmCredentials(llmProvider as LlmProviderId, apiKey);
@@ -318,6 +331,16 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
               Canvas API Connection
             </h3>
             <div className="flex flex-col md:flex-row gap-4 mb-3">
+              <div className="flex-1">
+                <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">Canvas Base URL</label>
+                <input
+                  type="url"
+                  value={canvasBaseUrl}
+                  onChange={(e) => setCanvasBaseUrl(e.target.value)}
+                  placeholder={DEFAULT_CANVAS_BASE_URL}
+                  className="w-full bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1rem] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
+                />
+              </div>
               <div className="flex-1">
                 <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-1.5 block">Canvas API Key</label>
                 <input 

@@ -3,18 +3,19 @@ import { gsap } from 'gsap';
 import * as Icons from '../../components/ui/Icons';
 import { canvasAPI } from '../../services/canvasAPI';
 import { supabase } from '../../lib/supabase';
-import { aiAPI } from '../../services/aiAPI';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { GradingResult } from '../../components/grading/GradingResult';
 import { GradingOutput } from '../../types/grading';
 import { UniversalPreviewer, prefetchPreviewFile } from '../../components/ui/UniversalPreviewer';
-import { selectPhaseFiles, CanvasCourseFile } from '../../lib/courseFileRanker';
+import { selectPhaseFiles, selectFilesNeedingIngest, sourceUpdatedAt, CanvasCourseFile, CourseFileStatusRow } from '../../lib/courseFileRanker';
 import { CourseMaterialsModal } from '../../components/modals/CourseMaterialsModal';
+import { AskEduConnectPanel } from '../../components/copilot/AskEduConnectPanel';
 import { loadAiGrades, saveAiGrade, formatAiGradeLabel } from '../../lib/aiGradeCache';
-import { llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5557';
+import { formatVerdictScore, isLegacyResult, isScore, summarizeGrade } from '../../lib/gradeDisplay';
+import { gradingApiBase, llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
+import { requireGradingSession } from '../../lib/gradingApi';
+import { activeCourseId, authErrorMessage, gradingAuthHeaders } from '../../lib/gradingApi';
 
 function htmlToPlainText(html: string): string {
   if (!html) return '';
@@ -26,7 +27,12 @@ function htmlToPlainText(html: string): string {
   }
 }
 
-/** True when Canvas stored only an LTI/external launch URL as the "submission". */
+/** True when URL is a Canvas LTI / Harmonize-style launch (needs signed resolve). */
+function isLtiExternalUrl(url: string): boolean {
+  return /\/lti\//i.test(url) || /harmonize/i.test(url) || /42lines\.net/i.test(url);
+}
+
+/** True when Canvas (or student) stored only a bare http(s) URL as the submission body. */
 function getExternalSubmissionUrl(html: string): string | null {
   const text = htmlToPlainText(html);
   if (!text) return null;
@@ -34,12 +40,22 @@ function getExternalSubmissionUrl(html: string): string | null {
   const collapsed = text.replace(/\s+/g, '');
   const match = collapsed.match(/^(https?:\/\/\S+)$/i);
   if (!match) return null;
-  const url = match[1];
-  if (/\/lti\//i.test(url) || /harmonize/i.test(url) || /42lines\.net/i.test(url)) return url;
-  return null;
+  return match[1];
+}
+
+function linkHostLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return 'external link';
+  }
 }
 
 const CANVAS_WEB_BASE = 'https://usflearn.instructure.com';
+
+function isLtiEmbedBlockedCopy(value: string): boolean {
+  return /needs to be loaded in a new browser window|load in a new window|cannot be displayed in an iframe/i.test(value || '');
+}
 
 /** Fetch submission from Canvas (API + signed LTI launch) and render it in-app. */
 function ExternalSubmissionViewer({
@@ -47,20 +63,28 @@ function ExternalSubmissionViewer({
   courseId,
   assignmentId,
   studentId,
+  initialText,
+  onResolved,
 }: {
   url: string;
   courseId: string;
   assignmentId: string;
   studentId: string;
+  initialText?: string;
+  onResolved?: (payload: { text: string; html: string; embedBlocked: boolean }) => void;
 }) {
   const [html, setHtml] = useState<string | null>(null);
-  const [text, setText] = useState<string | null>(null);
+  const [text, setText] = useState<string | null>(initialText && initialText.length >= 20 ? initialText : null);
   const [launchUrl, setLaunchUrl] = useState<string | null>(null);
-  const [speedgraderUrl, setSpeedgraderUrl] = useState<string | null>(null);
+  const [canvasOpenUrl, setCanvasOpenUrl] = useState<string | null>(null);
   const [toolName, setToolName] = useState<string>('Canvas submission');
   const [error, setError] = useState<string | null>(null);
+  const [embedBlocked, setEmbedBlocked] = useState(false);
+  const [pasteText, setPasteText] = useState(initialText && !getExternalSubmissionUrl(initialText) ? initialText : '');
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<'content' | 'text' | 'embed'>('content');
+  const [mode, setMode] = useState<'content' | 'text' | 'embed'>(
+    initialText && initialText.length >= 20 && !getExternalSubmissionUrl(initialText) ? 'text' : 'content'
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -69,19 +93,18 @@ function ExternalSubmissionViewer({
     setHtml(null);
     setText(null);
     setLaunchUrl(null);
-    const fallbackSpeedGrader =
+    setEmbedBlocked(false);
+    const fallbackCanvasOpen =
       courseId && assignmentId && studentId
         ? `${CANVAS_WEB_BASE}/courses/${courseId}/gradebook/speed_grader?assignment_id=${assignmentId}&student_id=${studentId}`
         : null;
-    setSpeedgraderUrl(fallbackSpeedGrader);
+    setCanvasOpenUrl(fallbackCanvasOpen);
 
     (async () => {
       try {
-        const canvasToken = localStorage.getItem('custom_canvas_token') || '';
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (canvasToken) headers['X-Canvas-Token'] = canvasToken;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(await gradingAuthHeaders()) };
 
-        const res = await fetch(`${API_BASE_URL}/api/resolve-external-submission`, {
+        const res = await fetch(`${gradingApiBase()}/api/resolve-external-submission`, {
           method: 'POST',
           headers,
           body: JSON.stringify({
@@ -95,35 +118,62 @@ function ExternalSubmissionViewer({
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
 
-        if (data.speedgrader_url) setSpeedgraderUrl(data.speedgrader_url);
+        const authMsg = authErrorMessage(data);
+        if (authMsg) {
+          setError(authMsg);
+          setMode('embed');
+          return;
+        }
+        const openUrl = data.canvas_open_url || data.speedgrader_url || fallbackCanvasOpen;
+        if (openUrl) setCanvasOpenUrl(openUrl);
         if (data.tool_name) setToolName(data.tool_name);
-        if (data.launch_url) setLaunchUrl(data.launch_url);
 
         const extractedHtml = String(data.html || '').trim();
         const extractedText = String(data.text || '').trim();
+        const blocked =
+          Boolean(data.embed_blocked) ||
+          isLtiEmbedBlockedCopy(extractedHtml) ||
+          isLtiEmbedBlockedCopy(extractedText);
+        setEmbedBlocked(blocked);
+
         const isLtiError =
           /unknown version/i.test(extractedText) ||
           /launch message is of an unknown version/i.test(extractedText) ||
           /unknown version/i.test(extractedHtml);
 
-        if (extractedHtml && extractedHtml.length >= 40 && !isLtiError) {
+        // Never treat Harmonize's "open in a new window" interstitial as the submission.
+        if (extractedHtml && extractedHtml.length >= 40 && !isLtiError && !isLtiEmbedBlockedCopy(extractedHtml)) {
+          const plain = extractedText || htmlToPlainText(extractedHtml);
           setHtml(extractedHtml);
-          setText(extractedText || htmlToPlainText(extractedHtml));
+          setText(plain);
           setMode('content');
-        } else if (extractedText && extractedText.length >= 40 && !isLtiError) {
+          onResolved?.({ text: plain, html: extractedHtml, embedBlocked: false });
+        } else if (extractedText && extractedText.length >= 40 && !isLtiError && !isLtiEmbedBlockedCopy(extractedText)) {
           setText(extractedText);
           setMode('text');
-        } else if (data.launch_url) {
+          onResolved?.({ text: extractedText, html: '', embedBlocked: false });
+        } else if (data.launch_url && !blocked) {
+          setLaunchUrl(data.launch_url);
           setMode('embed');
           if (!res.ok) setError(data.error || data.details || null);
+          onResolved?.({ text: '', html: '', embedBlocked: false });
         } else {
-          setError(data.error || data.details || 'Could not load this submission from Canvas.');
+          setLaunchUrl(null);
+          setError(
+            data.error ||
+              data.details ||
+              (blocked
+                ? 'This external tool blocks embedding inside EduConnect. Open the submission in Canvas to read it, or paste the student post below to grade.'
+                : 'Could not load this submission from Canvas.')
+          );
           setMode('embed');
+          onResolved?.({ text: '', html: '', embedBlocked: blocked });
         }
       } catch (e: any) {
         if (!cancelled) {
           setError(e?.message || 'Could not load submission from Canvas');
           setMode('embed');
+          onResolved?.({ text: '', html: '', embedBlocked: true });
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -132,7 +182,7 @@ function ExternalSubmissionViewer({
     return () => { cancelled = true; };
   }, [url, courseId, assignmentId, studentId]);
 
-  const openHref = speedgraderUrl || launchUrl || url;
+  const openHref = canvasOpenUrl || launchUrl || url;
   const hasContent = Boolean((html && html.length >= 40) || (text && text.length >= 40));
 
   return (
@@ -167,7 +217,7 @@ function ExternalSubmissionViewer({
             <button
               type="button"
               onClick={() => setMode('embed')}
-              disabled={!launchUrl}
+              disabled={!launchUrl || embedBlocked}
               className={`px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-40 ${
                 mode === 'embed' ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
               }`}
@@ -175,14 +225,16 @@ function ExternalSubmissionViewer({
               Live
             </button>
           </div>
-          <a
-            href={openHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90"
-          >
-            {speedgraderUrl ? 'SpeedGrader' : 'Open'}
-          </a>
+          {openHref && (
+            <a
+              href={openHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90"
+            >
+              Open in Canvas
+            </a>
+          )}
         </div>
       </div>
 
@@ -206,7 +258,7 @@ function ExternalSubmissionViewer({
         </div>
       )}
 
-      {!loading && mode === 'embed' && launchUrl && (
+      {!loading && mode === 'embed' && launchUrl && !embedBlocked && (
         <iframe
           src={launchUrl}
           title="Canvas LTI submission"
@@ -216,25 +268,217 @@ function ExternalSubmissionViewer({
         />
       )}
 
-      {!loading && !hasContent && !launchUrl && (
-        <div className="flex-1 flex flex-col items-center justify-center text-center p-10 gap-3">
-          <Icons.IconAlertCircle className="w-14 h-14 text-amber-500" />
-          <h4 className="text-base font-bold text-zinc-900 dark:text-white">No submission content from Canvas</h4>
-          <p className="text-sm text-zinc-500 max-w-md">
-            {error || 'Canvas did not return readable HTML for this Harmonize submission.'}
-          </p>
-          {openHref && (
-            <a
-              href={openHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 px-5 py-2.5 rounded-xl bg-[var(--brand-primary)] text-white text-[10px] font-black uppercase tracking-widest"
-            >
-              Open in Canvas SpeedGrader
-            </a>
-          )}
+      {!loading && !hasContent && (embedBlocked || !launchUrl) && (
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-xl mx-auto flex flex-col items-center text-center gap-3">
+            <Icons.IconAlertCircle className="w-14 h-14 text-amber-500" />
+            <h4 className="text-base font-bold text-zinc-900 dark:text-white">
+              {embedBlocked ? 'External tool blocks in-app preview' : 'No submission content from Canvas'}
+            </h4>
+            <p className="text-sm text-zinc-500">
+              {error ||
+                (embedBlocked
+                  ? 'Harmonize will not embed here. Open the post in Canvas, copy the student text, and paste it below so AI grading has something to read.'
+                  : 'Canvas did not return readable HTML for this external submission.')}
+            </p>
+            {openHref && (
+              <a
+                href={openHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-1 px-5 py-2.5 rounded-xl bg-[var(--brand-primary)] text-white text-[10px] font-black uppercase tracking-widest"
+              >
+                Open in Canvas
+              </a>
+            )}
+            <div className="w-full text-left mt-4 space-y-2">
+              <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                Paste student post for AI grading
+              </label>
+              <textarea
+                value={pasteText}
+                onChange={(e) => setPasteText(e.target.value)}
+                rows={10}
+                placeholder="Paste the Harmonize / Canvas discussion post here…"
+                className="w-full rounded-xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-black/20 p-3 text-sm text-zinc-800 dark:text-zinc-200 outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/40"
+              />
+              <button
+                type="button"
+                disabled={pasteText.trim().length < 20}
+                onClick={() => {
+                  const cleaned = pasteText.trim();
+                  if (cleaned.length < 20) return;
+                  setText(cleaned);
+                  setHtml(null);
+                  setEmbedBlocked(false);
+                  setMode('text');
+                  onResolved?.({ text: cleaned, html: '', embedBlocked: false });
+                }}
+                className="w-full py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-[10px] font-black uppercase tracking-widest disabled:opacity-40"
+              >
+                Use pasted text for grading
+              </button>
+            </div>
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Generic https link-only submissions (Power BI, docs, dashboards, etc.). */
+function LinkSubmissionViewer({
+  url,
+  initialText,
+  onResolved,
+}: {
+  url: string;
+  initialText?: string;
+  onResolved?: (payload: { text: string; html: string; embedBlocked: boolean }) => void;
+}) {
+  const host = linkHostLabel(url);
+  const [showEmbed, setShowEmbed] = useState(false);
+  const [embedFailed, setEmbedFailed] = useState(false);
+  const [pasteText, setPasteText] = useState(
+    initialText && !getExternalSubmissionUrl(initialText) ? initialText : ''
+  );
+  const [fetchedNote, setFetchedNote] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFetching(true);
+    setFetchedNote(null);
+    (async () => {
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          ...(await gradingAuthHeaders()),
+        };
+        const res = await fetch(`${gradingApiBase()}/api/fetch-public-link`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (data?.extractable && typeof data.text === 'string' && data.text.trim().length >= 40) {
+          const cleaned = data.text.trim();
+          setFetchedNote('Readable content was extracted from this public link for AI grading.');
+          onResolved?.({ text: cleaned, html: '', embedBlocked: false });
+        } else {
+          setFetchedNote(
+            data?.reason ||
+              'This link could not be read automatically (often sign-in or an interactive app). Open it and paste a short description for AI grading.'
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setFetchedNote('Could not fetch link content. Open the link and paste a description if needed.');
+        }
+      } finally {
+        if (!cancelled) setFetching(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return (
+    <div className="h-full flex flex-col bg-white dark:bg-[#0F172A] min-h-0" data-testid="link-submission-viewer">
+      <div className="shrink-0 px-4 py-2.5 border-b border-zinc-200 dark:border-white/5 flex items-center justify-between gap-3 bg-zinc-50 dark:bg-white/5">
+        <div className="min-w-0">
+          <div className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Link submission</div>
+          <div className="text-[11px] text-zinc-400 truncate">{host}</div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setShowEmbed(true);
+              setEmbedFailed(false);
+            }}
+            className="px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-white/10 text-zinc-700 dark:text-zinc-200 text-[9px] font-black uppercase tracking-widest hover:bg-zinc-100 dark:hover:bg-white/5"
+          >
+            Try in-app preview
+          </button>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-[9px] font-black uppercase tracking-widest hover:opacity-90"
+          >
+            Open link
+          </a>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        <div className="rounded-xl border border-zinc-200 dark:border-white/10 bg-zinc-50/80 dark:bg-white/[0.03] p-4 space-y-2">
+          <div className="text-[10px] font-black uppercase tracking-widest text-zinc-500">Submitted URL</div>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block text-sm text-indigo-600 dark:text-indigo-400 break-all hover:underline"
+          >
+            {url}
+          </a>
+          <p className="text-[11px] text-zinc-500 leading-snug">
+            Interactive dashboards (Power BI, Looker, etc.) usually will not embed here. Use Open link, then paste a
+            short description below if AI grading has nothing to read.
+          </p>
+          {fetching ? (
+            <p className="text-[11px] text-zinc-400">Checking whether public content can be extracted…</p>
+          ) : fetchedNote ? (
+            <p className="text-[11px] text-amber-700 dark:text-amber-300">{fetchedNote}</p>
+          ) : null}
+        </div>
+
+        {showEmbed && !embedFailed && (
+          <div className="rounded-xl border border-zinc-200 dark:border-white/10 overflow-hidden h-[360px] bg-white">
+            <iframe
+              src={url}
+              title={`Preview ${host}`}
+              className="w-full h-full border-0"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              referrerPolicy="no-referrer-when-downgrade"
+              onError={() => setEmbedFailed(true)}
+            />
+          </div>
+        )}
+        {showEmbed && embedFailed && (
+          <p className="text-sm text-amber-700 dark:text-amber-300">
+            In-app preview was blocked by the remote site. Use Open link instead.
+          </p>
+        )}
+
+        <div className="space-y-2">
+          <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+            Paste description for AI grading (optional)
+          </label>
+          <textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            rows={8}
+            placeholder="Describe what the linked dashboard/doc shows, key findings, filters used, etc."
+            className="w-full rounded-xl border border-zinc-200 dark:border-white/10 bg-white dark:bg-black/20 p-3 text-sm text-zinc-800 dark:text-zinc-200 outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/40"
+          />
+          <button
+            type="button"
+            disabled={pasteText.trim().length < 20}
+            onClick={() => {
+              const cleaned = pasteText.trim();
+              if (cleaned.length < 20) return;
+              onResolved?.({ text: `[LINK DESCRIPTION]\nURL: ${url}\n\n${cleaned}`, html: '', embedBlocked: false });
+            }}
+            className="w-full py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-[10px] font-black uppercase tracking-widest disabled:opacity-40"
+          >
+            Use pasted description for grading
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -273,11 +517,8 @@ function prepareSubmissionHtml(html: string): string {
 }
 
 async function fetchViaCanvasProxy(url: string): Promise<Response> {
-  const token = localStorage.getItem('custom_canvas_token') || '';
-  const proxyUrl = `${API_BASE_URL}/api/proxy-file?url=${encodeURIComponent(url)}`;
-  return fetch(proxyUrl, {
-    headers: token ? { 'X-Canvas-Token': token } : {}
-  });
+  const proxyUrl = `${gradingApiBase()}/api/proxy-file?course_id=${encodeURIComponent(activeCourseId())}&url=${encodeURIComponent(url)}`;
+  return fetch(proxyUrl, { headers: await gradingAuthHeaders() });
 }
 
 const MOCK_LEARNING_PROFILE = {
@@ -374,11 +615,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
   const [showScaffoldedFeedback, setShowScaffoldedFeedback] = useState(true);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isRefreshingMaterials, setIsRefreshingMaterials] = useState(false);
+  /** Extracted / pasted text for Harmonize (and similar) when Canvas body is only an LTI URL. */
+  const [gradingTextByStudent, setGradingTextByStudent] = useState<Record<string, string>>({});
   const [isGradingSidebarCollapsed, setIsGradingSidebarCollapsed] = useState(false);
   const [showAssignmentContext, setShowAssignmentContext] = useState(false);
   const [showLearningProfile, setShowLearningProfile] = useState(false);
   const [showRubricContext, setShowRubricContext] = useState(false);
   const [showMaterialsModal, setShowMaterialsModal] = useState(false);
+  const [showAskEduConnect, setShowAskEduConnect] = useState(false);
 
   // Phase 3: RAG States
   const [aiGradingData, setAiGradingData] = useState<Record<string, GradingOutput>>({});
@@ -452,6 +697,22 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       }
     };
     initData();
+
+    // Surface missing memberships/migrations before auto-ingest fails mid-flow.
+    (async () => {
+      try {
+        const res = await fetch(`${gradingApiBase()}/api/health`);
+        const body = await res.json().catch(() => ({}));
+        if (body?.authz && body.authz.ready === false) {
+          setIngestStatus({
+            type: 'error',
+            msg: body.authz.message || authErrorMessage({ error: 'AUTHZ_SETUP_REQUIRED' }) || 'Course access is not set up on the server.',
+          });
+        }
+      } catch {
+        /* health probe is best-effort; ingest still fails closed */
+      }
+    })();
   }, []);
 
   // Fetch Assignments & Discussions when course changes
@@ -482,6 +743,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     setAiGradingData({});
     setSelectedStudent(null);
     setRowErrors({});
+    setGradingTextByStudent({});
     
     if (!selectedCourse || !selectedAssignment) return;
     const isDiscussion = discussions.some(d => String(d.id) === selectedAssignment);
@@ -492,11 +754,13 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       if (!cached || student.status === 'Missing') return student;
       // Canvas official score wins for the badge when present
       if (student.rawScore !== null && student.rawScore !== undefined) return student;
+      const summary = summarizeGrade(cached);
+      if (summary.kind !== 'complete') return student;
       return {
         ...student,
         status: 'Graded',
         gradeText: `${formatAiGradeLabel(cached)} AI`,
-        rawScore: cached.total ?? null,
+        rawScore: summary.total,
       };
     };
 
@@ -709,14 +973,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     const rubric = currentItem?.rubric || [];
     const materialText = currentItem?.description || currentItem?.message || '';
 
-    const headers: any = { 'Content-Type': 'application/json', ...llmAuthHeaders() };
+    const headers: any = { 'Content-Type': 'application/json', ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
     requireLlmCredentials();
 
-    const res = await fetch(`${API_BASE_URL}/api/ingest`, {
+    const res = await fetch(`${gradingApiBase()}/api/ingest`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         assignment_id: assignmentId,
+        course_id: selectedCourse,
+        canvas_base_url: localStorage.getItem('canvas_base_url') || '',
         course_material_text: materialText,
         rubric_criteria: rubric.map((r: any) => ({
           criterion_id: r.id || r.description,
@@ -730,7 +996,91 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     });
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(errText || 'Assignment ingest failed');
+      let authMsg: string | null = null;
+      try { authMsg = authErrorMessage(JSON.parse(errText)); } catch { /* not JSON */ }
+      throw new Error(authMsg || errText || 'Assignment ingest failed');
+    }
+  };
+
+  const ingestCourseFile = async (assignmentId: string, file: CanvasCourseFile) => {
+    const payload = {
+      assignment_id: assignmentId,
+      course_id: selectedCourse,
+      canvas_base_url: localStorage.getItem('canvas_base_url') || '',
+      url: file.url,
+      filename: file.display_name,
+      canvas_file_id: String(file.id),
+      updated_at: sourceUpdatedAt(file),
+      canvas_token: localStorage.getItem('custom_canvas_token') || ''
+    };
+
+    const fileHeaders: any = { 'Content-Type': 'application/json', ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
+
+    const res = await fetch(`${gradingApiBase()}/api/ingest/canvas-url`, {
+      method: 'POST',
+      headers: fileHeaders,
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      throw new Error(await res.text());
+    }
+    return await res.json().catch(() => ({} as any));
+  };
+
+  const fetchCourseFileStatus = async (): Promise<CourseFileStatusRow[]> => {
+    const res = await fetch(
+      `${gradingApiBase()}/api/ingest/course-status?course_id=${encodeURIComponent(String(selectedCourse))}`,
+      { headers: { ...(await gradingAuthHeaders()) } }
+    );
+    if (!res.ok) {
+      const errText = await res.text();
+      let authMsg: string | null = null;
+      try { authMsg = authErrorMessage(JSON.parse(errText)); } catch { /* not JSON */ }
+      throw new Error(authMsg || errText || 'Course status failed');
+    }
+    const data = await res.json();
+    return Array.isArray(data?.files) ? data.files : [];
+  };
+
+  // Indexes course files that are missing, failed, or changed in Canvas since last ingest.
+  const handleRefreshMaterials = async () => {
+    if (!selectedCourse || !selectedAssignment || isRefreshingMaterials) return;
+    setIsRefreshingMaterials(true);
+    try {
+      await requireGradingSession();
+      requireLlmCredentials();
+      setIngestStatus({ type: 'loading', msg: 'Checking which course materials need indexing...' });
+      const [files, statusRows] = await Promise.all([
+        canvasAPI.getCourseFiles(selectedCourse),
+        fetchCourseFileStatus(),
+      ]);
+      const docFiles = (Array.isArray(files) ? files as CanvasCourseFile[] : []);
+      const pending = selectFilesNeedingIngest(docFiles, statusRows);
+
+      let failed = 0;
+      for (const [i, file] of pending.entries()) {
+        setIngestStatus({ type: 'loading', msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}` });
+        try {
+          const result = await ingestCourseFile(selectedAssignment, file);
+          if (!result?.cached && !result?.skipped) {
+            await new Promise(r => setTimeout(r, 400));
+          }
+        } catch (e) {
+          failed += 1;
+          console.error(`Refresh ingest failed: ${file.display_name}`, e);
+        }
+      }
+
+      const total = selectFilesNeedingIngest(docFiles, []).length;
+      const ready = total - selectFilesNeedingIngest(docFiles, await fetchCourseFileStatus()).length;
+      setIngestStatus(failed > 0
+        ? { type: 'warning', msg: `${ready} of ${total} course files indexed — ${failed} failed this refresh. Grading may miss some context.` }
+        : { type: 'success', msg: `${ready} of ${total} course files indexed${pending.length === 0 ? ' (already up to date)' : ''}.` });
+    } catch (err: any) {
+      console.error('Refresh materials failed:', err);
+      setIngestStatus({ type: 'error', msg: `Refresh materials failed: ${err.message}` });
+    } finally {
+      setIsRefreshingMaterials(false);
     }
   };
 
@@ -745,6 +1095,11 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     const runAutoIngest = async () => {
       setIngestStatus({ type: 'loading', msg: 'Reading class materials, please wait...' });
       try {
+        await requireGradingSession();
+        const health = await fetch(`${gradingApiBase()}/api/health`).then((r) => r.json()).catch(() => null);
+        if (health?.authz && health.authz.ready === false) {
+          throw new Error(health.authz.message || authErrorMessage({ error: 'AUTHZ_SETUP_REQUIRED' }));
+        }
         const currentItem = assignments.find(a => String(a.id) === selectedAssignment) || discussions.find(d => String(d.id) === selectedAssignment);
         requireLlmCredentials();
 
@@ -757,29 +1112,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           5
         );
 
-        const ingestFile = async (file: CanvasCourseFile) => {
-          const payload = {
-            assignment_id: selectedAssignment,
-            course_id: selectedCourse,
-            url: file.url,
-            filename: file.display_name,
-            canvas_file_id: String(file.id),
-            updated_at: file.updated_at || file.created_at || '',
-            canvas_token: localStorage.getItem('custom_canvas_token') || ''
-          };
-
-          const fileHeaders: any = { 'Content-Type': 'application/json', ...llmAuthHeaders() };
-
-          const res = await fetch(`${API_BASE_URL}/api/ingest/canvas-url`, {
-            method: 'POST',
-            headers: fileHeaders,
-            body: JSON.stringify(payload)
-          });
-          if (!res.ok) {
-            throw new Error(await res.text());
-          }
-          return await res.json().catch(() => ({} as any));
-        };
+        const ingestFile = (file: CanvasCourseFile) => ingestCourseFile(selectedAssignment, file);
 
         let succeeded = 0;
         let failed = 0;
@@ -843,6 +1176,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     setRowErrors(prev => { const n = { ...prev }; delete n[studentId]; return n; });
     
     try {
+      await requireGradingSession();
+      // Offline mock hub courses (101/102) grade without a Canvas token when the
+      // server has EDUCONNECT_LOCAL_MOCK_GRADE=1. Real Canvas courses still need a token.
+      const mockHubCourse = ['101', '102'].includes(String(selectedCourse || ''));
+      if (!mockHubCourse && !localStorage.getItem('custom_canvas_token')) {
+        throw new Error(
+          'Connect your Canvas API token (Course Selection → Verify Canvas) so the assignment can be verified before AI grading.',
+        );
+      }
       // Wait for auto-ingest to finish if it's currently running for this assignment
       if (ingestionPromisesRef.current[selectedAssignment!]) {
         try {
@@ -858,25 +1200,36 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
       const backendReq = async () => {
         let body: any;
-        let headers: any = { ...llmAuthHeaders() };
+        let headers: any = { ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
         requireLlmCredentials();
 
         const canvasToken = localStorage.getItem('custom_canvas_token') || '';
-        if (canvasToken) {
-          headers['X-Canvas-Token'] = canvasToken;
-        }
 
         const rawBody = student.body || '';
+        const overrideText = (gradingTextByStudent[studentId] || '').trim();
+        const bareSubmissionUrl = getExternalSubmissionUrl(String(rawBody));
+        const launchOnly = Boolean(bareSubmissionUrl);
+        // Prefer extracted/pasted Harmonize/link text; fall back to body (may be URL for server resolve).
+        const submissionTextForGrade = overrideText || String(rawBody || '');
         const placeholderBody =
-          !rawBody ||
-          /^submission type:/i.test(rawBody.trim()) ||
-          /^no submission content/i.test(rawBody.trim());
+          !submissionTextForGrade ||
+          /^submission type:/i.test(submissionTextForGrade.trim()) ||
+          /^no submission content/i.test(submissionTextForGrade.trim());
+
+        if (launchOnly && !overrideText && !(student.attachments && student.attachments.length > 0)) {
+          console.warn(
+            bareSubmissionUrl && isLtiExternalUrl(bareSubmissionUrl)
+              ? '[grade] LTI/Harmonize body is launch URL only; server will attempt extract'
+              : '[grade] Link-only submission; server will attempt public fetch or use pasted description'
+          );
+        }
 
         const assignMeta = assignments.find(a => String(a.id) === selectedAssignment)
           || discussions.find(d => String(d.id) === selectedAssignment);
         const assignmentPayload = {
           assignment_name: (assignMeta as any)?.name || (assignMeta as any)?.title || '',
           assignment_description: (assignMeta as any)?.description || (assignMeta as any)?.message || '',
+          moe: useMoE,
         };
 
         if (student.attachments && student.attachments.length > 0) {
@@ -884,9 +1237,10 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           body = JSON.stringify({
             assignment_id: selectedAssignment,
             course_id: selectedCourse,
+            canvas_base_url: localStorage.getItem('canvas_base_url') || '',
             student_id: studentId,
             // Don't send Canvas placeholders — grader reads the attached file(s)
-            submission_text: placeholderBody ? '' : rawBody,
+            submission_text: placeholderBody ? '' : submissionTextForGrade,
             canvas_token: canvasToken,
             file_urls: student.attachments.map((a: any) => ({
               url: a.url,
@@ -899,14 +1253,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           body = JSON.stringify({
             assignment_id: selectedAssignment,
             course_id: selectedCourse,
+            canvas_base_url: localStorage.getItem('canvas_base_url') || '',
             student_id: studentId,
-            submission_text: student.body || '',
+            submission_text: submissionTextForGrade,
+            external_url: bareSubmissionUrl || undefined,
             canvas_token: canvasToken,
             ...assignmentPayload,
           });
         }
 
-        const res = await fetch(`${API_BASE_URL}/api/grade`, {
+        const res = await fetch(`${gradingApiBase()}/api/grade`, {
           method: 'POST',
           headers,
           body
@@ -914,8 +1270,12 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
         const data = await res.json();
         if (!res.ok) {
+          const authMsg = authErrorMessage(data);
+          if (authMsg) {
+             throw new Error(authMsg);
+          }
           if (data.error === "DATABASE_DIMENSION_MISMATCH") {
-             throw new Error(`Database Error: ${data.details}`);
+             throw new Error(data.message || "Database vector setup does not match this grading server.");
           }
           if (data.error === "BYOK_REQUIRED" || res.status === 401) {
              throw new Error(data.message || data.error || "Verify your LLM provider API key before grading.");
@@ -923,15 +1283,25 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (data.error === "REINGEST_REQUIRED" || res.status === 409) {
              throw new Error(data.message || "Re-ingest course materials with your current LLM provider, then grade again.");
           }
-          if (res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
-             throw new Error(data.error || "LLM API quota exceeded. Wait a moment and retry.");
+          if (data.error === "LLM_QUOTA" || res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
+             throw new Error(data.message || "LLM API quota exceeded. Wait a moment and retry.");
           }
-          // Prefer actionable error; fall back to details so "Internal computation error" isn't opaque
-          const msg = data.error || data.details || "Grading failed";
-          throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+          throw new Error(
+            (typeof data.message === 'string' && data.message)
+              || (typeof data.error === 'string' && data.error)
+              || "Grading failed",
+          );
         }
         
-        if (data.rubric_missing) {
+        if (data.error === "RUBRIC_INVALID") {
+           throw new Error(
+             data.message ||
+               "Instructor rubric is invalid/unusable and was not replaced with a fallback. Fix the rubric explicitly.",
+           );
+        }
+        // Fallback policies grade without an instructor rubric; only hard-fail when
+        // the server still reports a true missing rubric with no policy resolution.
+        if (data.rubric_missing && !data.policy_origin && !data.assessment_policy) {
            if (isRetry) {
               throw new Error("No rubric exists for this assignment.");
            }
@@ -994,14 +1364,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       if (selectedCourse && selectedAssignment) {
         saveAiGrade(selectedCourse, selectedAssignment, studentId, finalData);
       }
+      const summary = summarizeGrade(finalData);
       setStudentsData(prev => prev.map(s => {
         if (s.id !== studentId) return s;
-        if (s.status === 'Missing') return s;
+        if (s.status === 'Missing' || summary.kind !== 'complete') return s;
         return {
           ...s,
           status: 'Graded',
           gradeText: `${formatAiGradeLabel(finalData)} AI`,
-          rawScore: finalData.total ?? s.rawScore,
+          rawScore: summary.total,
         };
       }));
 
@@ -1222,11 +1593,31 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 <div className="flex space-x-3 shrink-0 items-center">
 
                   <button
+                    type="button"
+                    onClick={() => setShowAskEduConnect(true)}
+                    className="px-4 py-2 border border-indigo-300 dark:border-indigo-500/30 bg-indigo-50 dark:bg-indigo-500/10 rounded-lg text-xs font-bold hover:bg-indigo-100 dark:hover:bg-indigo-500/20 transition-colors flex items-center text-indigo-700 dark:text-indigo-300"
+                    aria-haspopup="dialog"
+                    aria-expanded={showAskEduConnect}
+                  >
+                    <Icons.IconChat className="w-4 h-4 mr-2" />
+                    Ask EduConnect
+                  </button>
+
+                  <button
                     onClick={() => setShowMaterialsModal(true)}
                     className="px-4 py-2 border border-zinc-300 dark:border-white/10 rounded-lg text-xs font-bold hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors flex items-center"
                   >
                     <Icons.IconBook className="w-4 h-4 mr-2 text-indigo-500" />
                     Manage Materials
+                  </button>
+                  <button
+                    onClick={handleRefreshMaterials}
+                    disabled={isRefreshingMaterials}
+                    title="Index course files that are missing, failed, or changed in Canvas"
+                    className="px-4 py-2 border border-zinc-300 dark:border-white/10 rounded-lg text-xs font-bold hover:bg-zinc-100 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                  >
+                    <Icons.IconRefresh className={`w-4 h-4 mr-2 text-indigo-500 ${isRefreshingMaterials ? 'animate-spin' : ''}`} />
+                    {isRefreshingMaterials ? 'Refreshing...' : 'Refresh Materials'}
                   </button>
                   <button 
                     onClick={handleDownloadZip}
@@ -1410,6 +1801,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
               if (gradingResult && gradingResult.criteria_verdicts && item?.rubric) {
                  let totalEarned = 0;
                  let totalPossible = 0;
+                 let unassessed = 0;
                  
                  item.rubric.forEach((crit: any) => {
                     totalPossible += crit.points || 0;
@@ -1419,13 +1811,17 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         v.title === crit.description ||
                         (crit.id && v.criterion_id && String(v.criterion_id).includes(String(crit.id)))
                     );
-                    if (verdict) {
-                       totalEarned += verdict.score || 0;
+                    if (verdict && isScore(verdict.score)) {
+                       totalEarned += verdict.score;
+                    } else if (verdict) {
+                       unassessed += 1;
                     }
                  });
                  
                  if (totalPossible > 0) {
-                    scoreText = `RUBRIC (${totalEarned}/${totalPossible})`;
+                    scoreText = unassessed > 0
+                      ? `RUBRIC (PARTIAL: ${totalEarned} assessed, ${unassessed} not assessed)`
+                      : `RUBRIC (${totalEarned}/${totalPossible})`;
                  }
               }
               
@@ -1453,6 +1849,14 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                     </div>
                     
                     <div className="flex items-center space-x-4">
+                      <button
+                        type="button"
+                        onClick={() => setShowAskEduConnect(true)}
+                        className="px-3 py-2 text-[11px] font-black uppercase tracking-widest rounded-lg border border-indigo-300 dark:border-indigo-500/30 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                        aria-haspopup="dialog"
+                      >
+                        Ask EduConnect
+                      </button>
                       <div className="flex items-center bg-zinc-100 dark:bg-white/5 p-2 rounded-xl">
                         <button 
                           onClick={() => setShowAssignmentContext(!showAssignmentContext)}
@@ -1612,7 +2016,11 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                         <div key={crit.id} className="bg-zinc-50 dark:bg-white/5 border border-zinc-100 dark:border-white/10 rounded-xl p-4 transition-all duration-300 hover:border-zinc-200 dark:hover:border-white/20 shadow-sm">
                                           <div className="flex justify-between items-start mb-2">
                                             <h4 className="text-sm font-bold text-zinc-900 dark:text-white">{crit.description}</h4>
-                                            {verdict ? (
+                                            {verdict && !isScore(verdict.score) ? (
+                                              <span className="text-xs font-black px-2 py-1 rounded-md text-amber-600 bg-amber-500/10">
+                                                {formatVerdictScore(verdict)}
+                                              </span>
+                                            ) : verdict ? (
                                               <span className={`text-xs font-black px-2 py-1 rounded-md ${verdict.score === crit.points ? 'text-emerald-600 bg-emerald-500/10' : verdict.score > 0 ? 'text-amber-600 bg-amber-500/10' : 'text-rose-600 bg-rose-500/10'}`}>
                                                 {verdict.score} / {crit.points} PTS
                                               </span>
@@ -1631,7 +2039,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                                   const isBottom = rIdx === sorted.length - 1 && sorted.length > 1;
                                                   
                                                   let isSelected = false;
-                                                  if (verdict) {
+                                                  if (verdict && isScore(verdict.score)) {
                                                     const nextRating = sorted[rIdx - 1]; // higher points
                                                     if (isTop && verdict.score >= rating.points) {
                                                         isSelected = true;
@@ -1744,13 +2152,32 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                 (student.submissionUrl && getExternalSubmissionUrl(student.submissionUrl)
                                   ? student.submissionUrl
                                   : null);
-                              if (externalUrl && selectedCourse && selectedAssignment) {
+                              const onLinkResolved = ({ text: resolvedText }: { text: string }) => {
+                                const cleaned = (resolvedText || '').trim();
+                                if (cleaned.length < 20) return;
+                                setGradingTextByStudent((prev) => ({
+                                  ...prev,
+                                  [String(student.id)]: cleaned,
+                                }));
+                              };
+                              if (externalUrl && isLtiExternalUrl(externalUrl) && selectedCourse && selectedAssignment) {
                                 return (
                                   <ExternalSubmissionViewer
                                     url={externalUrl}
                                     courseId={String(selectedCourse)}
                                     assignmentId={String(selectedAssignment)}
                                     studentId={String(student.id)}
+                                    initialText={gradingTextByStudent[String(student.id)] || ''}
+                                    onResolved={onLinkResolved}
+                                  />
+                                );
+                              }
+                              if (externalUrl) {
+                                return (
+                                  <LinkSubmissionViewer
+                                    url={externalUrl}
+                                    initialText={gradingTextByStudent[String(student.id)] || ''}
+                                    onResolved={onLinkResolved}
                                   />
                                 );
                               }
@@ -1868,12 +2295,41 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                 className="w-full py-2.5 px-4 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 flex items-center justify-center border border-zinc-700"
                               >
                                 <Icons.IconRefresh className="w-3.5 h-3.5 mr-2" />
-                                Regrade with AI
+                                {isLegacyResult(aiGradingData[selectedStudent!]) ? 'Reassess legacy draft' : 'Regrade with AI'}
                               </button>
                               <GradingResult 
                                  result={aiGradingData[selectedStudent!]} 
                                  rubricContext={currentAuthItem?.rubric || []}
                                  onEvidenceAnchorClick={(text) => setHighlightText(text)}
+                                 onEvidenceUnitClick={(unit) => setHighlightText(unit.text)}
+                                 onPolicyUpdated={(policy) => {
+                                   setAiGradingData((prev) => {
+                                     const cur = prev[selectedStudent!];
+                                     if (!cur) return prev;
+                                     const next = {
+                                       ...cur,
+                                       assessment_policy: policy,
+                                       policy_id: policy.policy_id,
+                                       policy_version: policy.version,
+                                       policy_content_hash: policy.content_hash,
+                                       policy_origin: policy.origin,
+                                       policy_lifecycle: policy.lifecycle,
+                                       policy_provisional: policy.lifecycle === 'frozen_provisional',
+                                       policy_formative_only: Boolean(policy.formative_only),
+                                       policy_label:
+                                         policy.lifecycle === 'approved'
+                                           ? 'Approved assessment policy'
+                                           : policy.formative_only
+                                             ? 'Formative only — insufficient assignment policy'
+                                             : 'Provisional — inferred assessment policy',
+                                     };
+                                     if (selectedCourse && selectedAssignment) {
+                                       saveAiGrade(selectedCourse, selectedAssignment, selectedStudent!, next);
+                                     }
+                                     return { ...prev, [selectedStudent!]: next };
+                                   });
+                                 }}
+                                 onReassessUnderPolicy={() => handleFetchAiGrade(selectedStudent!)}
                               />
                             </div>
                           ) : (
@@ -1952,6 +2408,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           }}
         />
       )}
+
+      <AskEduConnectPanel
+        open={showAskEduConnect}
+        onClose={() => setShowAskEduConnect(false)}
+        courseId={selectedCourse ? String(selectedCourse) : undefined}
+        assignmentId={selectedAssignment}
+        submissionId={selectedStudent}
+        studentId={selectedStudent}
+        knownSubmissionIds={studentsData.map((s) => String(s.id))}
+      />
     </>
   );
 }

@@ -1,9 +1,32 @@
 import type { GradingOutput } from '../types/grading';
+import { isLegacyResult, summarizeGrade } from './gradeDisplay';
 
 const PREFIX = 'educonnect_ai_grades';
+const LEGACY_PREFIX = 'educonnect_ai_grades_legacy';
 
 function storageKey(courseId: string, assignmentId: string) {
   return `${PREFIX}:${courseId}:${assignmentId}`;
+}
+
+/** Legacy drafts replaced by a reassessment, kept verbatim (first one wins). */
+export function loadArchivedLegacyGrades(courseId: string, assignmentId: string): Record<string, GradingOutput> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(`${LEGACY_PREFIX}:${courseId}:${assignmentId}`) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function archiveLegacyGrade(courseId: string, assignmentId: string, studentId: string, grade: GradingOutput) {
+  const archive = loadArchivedLegacyGrades(courseId, assignmentId);
+  if (archive[studentId]) return;
+  archive[studentId] = grade;
+  try {
+    localStorage.setItem(`${LEGACY_PREFIX}:${courseId}:${assignmentId}`, JSON.stringify(archive));
+  } catch (err) {
+    console.error('Failed to archive legacy AI grade', err);
+  }
 }
 
 export function loadAiGrades(
@@ -28,6 +51,8 @@ export function saveAiGrade(
   grade: GradingOutput
 ): void {
   const all = loadAiGrades(courseId, assignmentId);
+  const prev = all[studentId];
+  if (prev && isLegacyResult(prev)) archiveLegacyGrade(courseId, assignmentId, studentId, prev);
   all[studentId] = {
     ...grade,
     assignment_id: assignmentId,
@@ -41,7 +66,5 @@ export function saveAiGrade(
 }
 
 export function formatAiGradeLabel(grade: GradingOutput): string {
-  const max = grade.total_max ?? grade.content_max ?? grade.structure_max;
-  if (max != null) return `${grade.total}/${max}`;
-  return `${grade.total} pts`;
+  return summarizeGrade(grade).label;
 }

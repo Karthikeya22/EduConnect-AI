@@ -151,6 +151,73 @@ def test_holistic_nudge_reduces_all_full_thin():
     assert all(v["score"] < v["max_score"] for v in out)
 
 
+def test_holistic_nudge_skips_solid_anchors_even_if_justification_short():
+    """Do not flag / dock when each full mark has a real student quote."""
+    solid = "Ethics Explorer uses a neural network to analyze player decisions and reasoning."
+    verdicts = [
+        {
+            "criterion_id": "c1",
+            "score": 10,
+            "max_score": 10,
+            "status": "full",
+            "evidence_anchor": solid,
+            "justification": "Good.",  # intentionally short — must not count as thin
+            "ai_generated": False,
+        },
+        {
+            "criterion_id": "c2",
+            "score": 5,
+            "max_score": 5,
+            "status": "full",
+            "evidence_anchor": solid,
+            "justification": "Fine.",
+            "ai_generated": False,
+        },
+        {
+            "criterion_id": "c3",
+            "score": 10,
+            "max_score": 10,
+            "status": "full",
+            "evidence_anchor": solid,
+            "justification": "Ok.",
+            "ai_generated": False,
+        },
+    ]
+    out, flagged = _holistic_consistency_nudge(verdicts)
+    assert flagged is False
+    assert [v["score"] for v in out] == [10, 5, 10]
+    assert all("Holistic review" not in (v.get("justification") or "") for v in out)
+
+
+def test_covered_concepts_only_keep_required_matches():
+    v = _apply_verdict_score_guards(
+        {
+            "score": 5,
+            "status": "partial",
+            "evidence_anchor": "Ethics Explorer uses a neural network to analyze player decisions.",
+            "required_concepts": ["neural network", "personalized feedback"],
+            "covered_concepts": [
+                "neural network",
+                "Adaptive Learning Mechanics",  # criterion title fluff
+                "choosing a task",
+                "personalized feedback",
+            ],
+            "missing_keywords": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "submission_text": (
+                "Ethics Explorer uses a neural network to analyze player decisions "
+                "and provide personalized feedback."
+            ),
+        },
+        10,
+    )
+    covered = [c.lower() for c in v["covered_concepts"]]
+    assert "neural network" in covered and "personalized feedback" in covered
+    assert "adaptive learning mechanics" not in covered
+    assert "choosing a task" not in covered
+
+
 def test_detect_research_paper_from_context_and_text():
     text = (
         "# Abstract\nStudy of X.\n"
@@ -515,6 +582,42 @@ def test_proposal_filters_empirical_missing_keywords():
     )
     assert "algorithms" in filtered
     assert not any("split" in str(x).lower() or "supervised" in str(x).lower() or "pre-process" in str(x).lower() for x in filtered)
+    # required_concepts use the same empirical filter
+    req = _filter_proposal_missing_keywords(
+        ["running the pipeline", "RMSE", "pipeline execution", "evaluation plan"],
+        True,
+    )
+    assert "RMSE" in req
+    assert "evaluation plan" in req
+    assert not any("pipeline" in str(x).lower() for x in req)
+
+
+def test_missing_status_keeps_positive_score():
+    """Recovered/partial points must not be hard-zeroed by leftover status=missing."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 3,
+            "status": "missing",
+            "criterion_name": "Running the Pipeline",
+            "evidence_anchor": "I would begin with a regression tree using the course pipeline.",
+            "required_concepts": ["pipeline"],
+            "covered_concepts": ["pipeline"],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Plan describes how the pipeline would be run.",
+            "submission_text": "I would begin with a regression tree using the course pipeline.",
+        },
+        5,
+    )
+    assert v["score"] == 3
+    assert v["status"] == "partial"
+
+
+def test_proposal_genre_guide_overrides_empirical_methods_results():
+    guide = _genre_grading_guide("research_paper", {}, "content", is_proposal=True)
+    assert "PROPOSAL" in guide
+    assert "do NOT require completed runs" in guide
+    assert "what was done" not in guide
 
 
 def test_docx_heading_and_list_paragraph_titles_become_markdown():
@@ -558,6 +661,180 @@ def re_search_heading(text: str, title: str) -> bool:
     import re
     pat = r"(?im)^(?:#+\s*)?" + re.escape(title) + r"\s*$"
     return bool(re.search(pat, text))
+
+
+def test_no_evidence_clears_contradictory_covered_concepts():
+    """UI must not show Demonstrated when the same verdict says No evidence / Missing."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 0,
+            "status": "missing",
+            "evidence_anchor": "not found",
+            "required_concepts": ["model evaluation", "accuracy", "interpretation of results"],
+            "covered_concepts": ["model evaluation", "accuracy"],
+            "missing_keywords": ["model evaluation", "accuracy", "interpretation of results"],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "submission_text": "We outline a task and dataset for a proposed tutoring model.",
+        },
+        5,
+    )
+    assert v["covered_concepts"] == []
+    assert v["score"] == 0
+
+
+def test_covered_drops_items_also_listed_as_missing():
+    v = _apply_verdict_score_guards(
+        {
+            "score": 4,
+            "status": "partial",
+            "evidence_anchor": "If the model flags students who report no grade improvement or low satisfaction with tutoring.",
+            "required_concepts": ["model outcomes", "actionable insight"],
+            "covered_concepts": ["model outcomes", "actionable insight"],
+            "missing_keywords": ["actionable insight"],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "submission_text": (
+                "If the model flags students who report no grade improvement or low satisfaction "
+                "with tutoring, advisors can intervene."
+            ),
+        },
+        5,
+    )
+    assert "actionable insight" not in [c.lower() for c in v["covered_concepts"]]
+    assert any("model outcomes" in c.lower() for c in v["covered_concepts"])
+
+
+def test_fractional_max_full_status_not_demoted_by_int_score():
+    """Inferred equal-split policies use fractional maxima; LLM ints must still reach full.
+
+    Even without magic 'fully addresses' phrases — status=full + near-max int score
+    must round up to the fractional maximum, not be forced into perpetual partial.
+    """
+    max_score = 10 / 3  # ≈ 3.333…
+    v = _apply_verdict_score_guards(
+        {
+            "score": 3,
+            "status": "full",
+            "evidence_anchor": "We identified the primary user need as reducing onboarding drop-off in week one.",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Clear user need is stated with a concrete onboarding metric.",
+        },
+        max_score,
+    )
+    assert v["status"] == "full"
+    assert abs(float(v["score"]) - float(max_score)) < 1e-9
+
+
+def test_max_one_partial_with_credit_is_not_hard_zero():
+    """max_score=1 + partial + score=1 must not collapse to 0 via max-1."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 1,
+            "status": "partial",
+            "evidence_anchor": "The student briefly notes consent forms were collected from participants.",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Partial credit: consent is mentioned but ethics depth is limited.",
+        },
+        1,
+    )
+    assert v["score"] == 1
+    assert v["status"] == "partial"
+    assert v["score"] != 0
+
+
+def test_works_cited_and_narrative_cites_are_not_genre_crushed():
+    """Correct scholarly citing must not be crushed when APA regex is picky."""
+    text = (
+        "Introduction\n"
+        "Prior work by Hasanov et al. (2019) and Tang and Hew (2022) shows tutoring gains.\n\n"
+        "Methods\n"
+        "We surveyed 40 learners.\n\n"
+        "Works Cited\n"
+        "Hasanov, A. (2019). Adaptive tutors. Journal of Learning, 12(3), 1-10.\n"
+        "Tang, Y., & Hew, K. (2022). Classroom AI. Computers & Education, 180, 104432.\n"
+    )
+    sections = _extract_submission_sections(text)
+    signals = _analyze_genre_signals("research_paper", text, sections)
+    assert signals["has_references"] is True
+    assert signals["in_text_citation_count"] >= 2
+    v = _apply_genre_criterion_caps(
+        {
+            "score": 10,
+            "max_score": 10,
+            "status": "full",
+            "evidence_anchor": "Prior work by Hasanov et al. (2019) and Tang and Hew (2022) shows tutoring gains.",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Citations and Works Cited are present and correctly used.",
+        },
+        "research_paper",
+        signals,
+        "Citations & References",
+        "Use APA citations and a reference list.",
+    )
+    assert v["score"] >= 9
+    assert "Genre cap: research-paper citation" not in (v.get("justification") or "")
+
+
+def test_synonym_concepts_in_submission_are_credited():
+    """Invented multi-word required_concepts must match synonymous student wording."""
+    submission = (
+        "Literature Review\n"
+        "We synthesize prior tutoring studies, identify the research gap for classroom AI, "
+        "and outline a theoretical framework grounded in self-determination theory."
+    )
+    v = _apply_verdict_score_guards(
+        {
+            "score": 20,
+            "status": "full",
+            "evidence_anchor": "We synthesize prior tutoring studies, identify the research gap for classroom AI.",
+            "required_concepts": [
+                "gap analysis",
+                "theoretical framing",
+                "prior interventions",
+                "synthesis",
+            ],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "The literature review covers prior work, gap, and theory with adequate depth.",
+            "submission_text": submission,
+        },
+        20,
+    )
+    assert v["score"] >= 18
+    assert "concept match rate" not in (v.get("justification") or "").lower()
+
+
+def test_soft_contradicts_with_strong_evidence_not_crushed_to_sixty():
+    """RAG 'contradicts' without critical justification must not demolish a grounded full mark."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 10,
+            "status": "full",
+            "evidence_anchor": "We fine-tune a convolutional network with stratified cross validation.",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "contradicts",
+            "placement_ok": True,
+            "justification": (
+                "The methodology fully addresses the criterion with a clear model and evaluation plan."
+            ),
+            "submission_text": "We fine-tune a convolutional network with stratified cross validation.",
+        },
+        10,
+    )
+    assert v["score"] >= 9
+    assert v["status"] in ("full", "partial")
 
 
 if __name__ == "__main__":
