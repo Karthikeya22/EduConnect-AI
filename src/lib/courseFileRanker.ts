@@ -51,10 +51,62 @@ export type CourseFileStatusRow = {
   canvas_file_id: string | number;
   status?: string;
   updated_at?: string | null;
+  filename?: string | null;
+  chunk_count?: number | null;
+  last_error?: string | null;
+  verified?: boolean | null;
+  stored_chunks?: number | null;
 };
+
+export type MaterialIndexState =
+  | 'indexed'
+  | 'failed'
+  | 'pending'
+  | 'stale'
+  | 'not_indexed'
+  | 'broken'
+  | 'skipped';
 
 export function sourceUpdatedAt(f: CanvasCourseFile): string {
   return f.updated_at || f.created_at || '';
+}
+
+/** UI/status label for one Canvas file against the course ingest registry. */
+export function materialIndexState(
+  file: CanvasCourseFile,
+  row?: CourseFileStatusRow | null,
+): MaterialIndexState {
+  if (!isDocCourseFile(file)) return 'skipped';
+  if (!row) return 'not_indexed';
+  if (row.status === 'failed') return 'failed';
+  if (row.status === 'pending') return 'pending';
+  if (row.status === 'ready') {
+    if (row.verified === false || (typeof row.stored_chunks === 'number' && row.stored_chunks <= 0)) {
+      return 'broken';
+    }
+    if ((row.updated_at || '') !== sourceUpdatedAt(file)) return 'stale';
+    return 'indexed';
+  }
+  return 'not_indexed';
+}
+
+export function materialIndexLabel(state: MaterialIndexState): string {
+  switch (state) {
+    case 'indexed':
+      return 'Indexed';
+    case 'failed':
+      return 'Failed';
+    case 'pending':
+      return 'Pending';
+    case 'stale':
+      return 'Needs refresh';
+    case 'broken':
+      return 'Broken index';
+    case 'skipped':
+      return 'Not readable';
+    default:
+      return 'Not indexed';
+  }
 }
 
 // Doc files with no ready registry row for the same Canvas updated_at (absent, failed, or stale).

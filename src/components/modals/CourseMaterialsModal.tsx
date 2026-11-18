@@ -1,8 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as Icons from '../ui/Icons';
 import { canvasAPI } from '../../services/canvasAPI';
 import { gradingApiBase, llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
 import { gradingAuthHeaders } from '../../lib/gradingApi';
+import {
+  CourseFileStatusRow,
+  materialIndexLabel,
+  materialIndexState,
+  MaterialIndexState,
+  sourceUpdatedAt,
+} from '../../lib/courseFileRanker';
 
 interface CanvasFile {
   id: number;
@@ -12,13 +19,6 @@ interface CanvasFile {
   updated_at: string;
   folder_id?: number;
   'content-type'?: string;
-}
-
-interface IndexedMaterial {
-  canvas_file_id: string;
-  filename: string;
-  status?: string;
-  chunk_count?: number;
 }
 
 const INGEST_EXTS = [
@@ -33,6 +33,23 @@ function isIngestibleName(name: string): boolean {
   return INGEST_EXTS.some((ext) => n.endsWith(ext));
 }
 
+function statusBadgeClass(state: MaterialIndexState): string {
+  switch (state) {
+    case 'indexed':
+      return 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300';
+    case 'failed':
+    case 'broken':
+      return 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300';
+    case 'stale':
+    case 'pending':
+      return 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300';
+    case 'skipped':
+      return 'bg-zinc-100 text-zinc-500 dark:bg-white/5 dark:text-zinc-400';
+    default:
+      return 'bg-zinc-100 text-zinc-600 dark:bg-white/5 dark:text-zinc-300';
+  }
+}
+
 interface CourseMaterialsModalProps {
   courseId: string;
   assignmentId: string;
@@ -42,14 +59,46 @@ interface CourseMaterialsModalProps {
 
 export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngestSuccess }: CourseMaterialsModalProps) {
   const [files, setFiles] = useState<CanvasFile[]>([]);
-  const [indexed, setIndexed] = useState<IndexedMaterial[]>([]);
+  const [statusRows, setStatusRows] = useState<CourseFileStatusRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [verifyNote, setVerifyNote] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
   const [localFiles, setLocalFiles] = useState<File[]>([]);
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestProgress, setIngestProgress] = useState<{ current: number, total: number, currentFileName: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const statusById = useMemo(() => {
+    const map = new Map<string, CourseFileStatusRow>();
+    for (const row of statusRows) {
+      map.set(String(row.canvas_file_id), row);
+    }
+    return map;
+  }, [statusRows]);
+
+  const summary = useMemo(() => {
+    const counts = {
+      indexed: 0,
+      failed: 0,
+      broken: 0,
+      pending: 0,
+      stale: 0,
+      not_indexed: 0,
+      skipped: 0,
+    };
+    for (const file of files) {
+      const state = materialIndexState(file, statusById.get(String(file.id)));
+      counts[state] += 1;
+    }
+    return counts;
+  }, [files, statusById]);
+
+  const indexedOnly = useMemo(
+    () => statusRows.filter((row) => row.filename),
+    [statusRows],
+  );
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -64,38 +113,51 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     }
   };
 
-  useEffect(() => {
-    const fetchFiles = async () => {
-      try {
-        setLoading(true);
-        const [data, statusRes] = await Promise.all([
-          canvasAPI.getCourseFiles(courseId),
-          fetch(
-            `${gradingApiBase()}/api/ingest/course-status?course_id=${encodeURIComponent(courseId)}`,
-            { headers: { ...(await gradingAuthHeaders()) } },
-          ).then(async (res) => (res.ok ? res.json() : { files: [] })).catch(() => ({ files: [] })),
-        ]);
-        const rows: IndexedMaterial[] = Array.isArray(statusRes?.files) ? statusRes.files : [];
-        setIndexed(rows.filter((row) => row.filename));
-        if (Array.isArray(data)) {
-          // Show every Canvas file returned (all folders). Ingest still only for supported docs.
-          const sorted = [...data].sort((a, b) =>
-            String(a.display_name || '').localeCompare(String(b.display_name || '')),
-          );
-          setFiles(sorted);
+  const loadStatus = async (mode: 'status' | 'verify' = 'status') => {
+    const path = mode === 'verify' ? 'course-verify' : 'course-status';
+    const res = await fetch(
+      `${gradingApiBase()}/api/ingest/${path}?course_id=${encodeURIComponent(courseId)}`,
+      { headers: { ...(await gradingAuthHeaders()) } },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Could not load ${mode}`);
+    }
+    const data = await res.json();
+    const rows: CourseFileStatusRow[] = Array.isArray(data?.files) ? data.files : [];
+    setStatusRows(rows);
+    return data;
+  };
+
+  const refreshLists = async (opts?: { preserveSelection?: boolean }) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [data] = await Promise.all([
+        canvasAPI.getCourseFiles(courseId),
+        loadStatus('status').catch(() => ({ files: [] })),
+      ]);
+      if (Array.isArray(data)) {
+        const sorted = [...data].sort((a, b) =>
+          String(a.display_name || '').localeCompare(String(b.display_name || '')),
+        );
+        setFiles(sorted);
+        if (!opts?.preserveSelection) {
           const ingestible = sorted.filter((f) => isIngestibleName(f.display_name));
-          // Pre-select ingestible docs so teachers don't miss nested materials.
           setSelectedFiles(new Set(ingestible.map((f) => f.id)));
-        } else {
-          setFiles([]);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to fetch course files.');
-      } finally {
-        setLoading(false);
+      } else {
+        setFiles([]);
       }
-    };
-    fetchFiles();
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch course files.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshLists();
   }, [courseId]);
 
   const toggleFile = (id: number, ingestible: boolean) => {
@@ -118,16 +180,41 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     setLocalFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const handleVerify = async () => {
+    setVerifying(true);
+    setError(null);
+    setVerifyNote(null);
+    try {
+      const data = await loadStatus('verify');
+      const s = data?.summary || {};
+      const rows: CourseFileStatusRow[] = Array.isArray(data?.files) ? data.files : [];
+      const byId = new Map(rows.map((row) => [String(row.canvas_file_id), row]));
+      const canvasNotIndexed = files.filter((f) => {
+        if (!isIngestibleName(f.display_name)) return false;
+        return materialIndexState(f, byId.get(String(f.id))) !== 'indexed';
+      }).length;
+      setVerifyNote(
+        `Checked against stored chunks: ${s.indexed || 0} indexed, ${s.broken || 0} broken, ${s.failed || 0} failed, ${s.pending || 0} pending`
+        + (files.length ? `. ${canvasNotIndexed} Canvas file(s) still need indexing.` : '.'),
+      );
+    } catch (err: any) {
+      setError(err.message || 'Verification failed.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
   const handleIngest = async () => {
     const apiBase = gradingApiBase();
     setIsIngesting(true);
     setError(null);
+    setVerifyNote(null);
     const canvasFilesToIngest = files.filter(f => selectedFiles.has(f.id));
     const totalFiles = canvasFilesToIngest.length + localFiles.length;
     let current = 0;
+    const failures: string[] = [];
 
     try {
-      // 1. Ingest Canvas files. Already-indexed files return immediately.
       requireLlmCredentials();
       for (const file of canvasFilesToIngest) {
         current++;
@@ -139,31 +226,33 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
           ...(await gradingAuthHeaders()),
         };
 
-        const res = await fetch(`${apiBase}/api/ingest/canvas-url`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            assignment_id: assignmentId,
-            course_id: courseId,
-            url: file.url,
-            filename: file.display_name,
-            canvas_file_id: String(file.id),
-            updated_at: file.updated_at || '',
-            canvas_token: localStorage.getItem('custom_canvas_token') || '',
-          }),
-        });
-
-        if (!res.ok) {
-          const errorText = await res.text();
-          throw new Error(`Failed to ingest ${file.display_name}: ${errorText}`);
+        try {
+          const res = await fetch(`${apiBase}/api/ingest/canvas-url`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              assignment_id: assignmentId,
+              course_id: courseId,
+              url: file.url,
+              filename: file.display_name,
+              canvas_file_id: String(file.id),
+              updated_at: sourceUpdatedAt(file),
+              canvas_token: localStorage.getItem('custom_canvas_token') || '',
+            }),
+          });
+          if (!res.ok) {
+            const errorText = await res.text();
+            failures.push(`${file.display_name}: ${errorText}`);
+          }
+        } catch (err: any) {
+          failures.push(`${file.display_name}: ${err.message || 'ingest failed'}`);
         }
       }
 
-      // 2. Ingest Local Files
       for (const file of localFiles) {
         current++;
         setIngestProgress({ current, total: totalFiles, currentFileName: file.name });
-        
+
         const formData = new FormData();
         formData.append('assignment_id', assignmentId);
         formData.append('course_id', courseId);
@@ -171,20 +260,38 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
         const headers: any = { ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
 
-        const res = await fetch(`${apiBase}/api/ingest/file`, {
-          method: 'POST',
-          headers,
-          body: formData
-        });
-
-        if (!res.ok) {
-          const errorText = await res.text();
-          throw new Error(`Failed to ingest ${file.name}: ${errorText}`);
+        try {
+          const res = await fetch(`${apiBase}/api/ingest/file`, {
+            method: 'POST',
+            headers,
+            body: formData
+          });
+          if (!res.ok) {
+            const errorText = await res.text();
+            failures.push(`${file.name}: ${errorText}`);
+          }
+        } catch (err: any) {
+          failures.push(`${file.name}: ${err.message || 'ingest failed'}`);
         }
       }
 
-      onIngestSuccess();
-      onClose();
+      await refreshLists({ preserveSelection: true });
+      try {
+        const verified = await loadStatus('verify');
+        const s = verified?.summary || {};
+        setVerifyNote(
+          `After ingest: ${s.indexed || 0} indexed, ${s.broken || 0} broken, ${s.failed || 0} failed.`
+          + (failures.length ? ` ${failures.length} file(s) failed this run.` : ''),
+        );
+      } catch {
+        /* status refresh already ran */
+      }
+
+      if (failures.length) {
+        setError(failures.slice(0, 5).join('\n') + (failures.length > 5 ? `\n…and ${failures.length - 5} more` : ''));
+      } else {
+        onIngestSuccess();
+      }
     } catch (err: any) {
       setError(err.message || 'Ingestion failed.');
     } finally {
@@ -193,10 +300,56 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     }
   };
 
+  const renderFileRow = (file: CanvasFile) => {
+    const ingestible = isIngestibleName(file.display_name);
+    const row = statusById.get(String(file.id));
+    const state = materialIndexState(file, row);
+    const detail =
+      state === 'failed' && row?.last_error
+        ? String(row.last_error).slice(0, 120)
+        : state === 'indexed'
+          ? `${row?.stored_chunks ?? row?.chunk_count ?? 0} chunks`
+          : state === 'broken'
+            ? 'marked ready but no chunks stored'
+            : undefined;
+
+    return (
+      <label
+        key={file.id}
+        className={`flex items-center p-3 transition-colors group ${
+          ingestible
+            ? 'hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer'
+            : 'opacity-60 cursor-not-allowed'
+        }`}
+        title={detail || (ingestible ? undefined : 'Not a readable course material type')}
+      >
+        <input
+          type="checkbox"
+          checked={selectedFiles.has(file.id)}
+          disabled={!ingestible}
+          onChange={() => toggleFile(file.id, ingestible)}
+          className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500 bg-white dark:bg-zinc-800 disabled:opacity-40"
+        />
+        <Icons.IconFile className="w-5 h-5 ml-3 mr-3 text-zinc-400 group-hover:text-indigo-400 transition-colors" />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-zinc-900 dark:text-zinc-200 truncate">{file.display_name || '(unnamed file)'}</div>
+          <div className="text-[10px] text-zinc-500 truncate">
+            {((file.size || 0) / 1024 / 1024).toFixed(2)} MB
+            {file.updated_at ? ` • ${new Date(file.updated_at).toLocaleDateString()}` : ''}
+            {detail ? ` • ${detail}` : ''}
+          </div>
+        </div>
+        <span className={`ml-3 shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusBadgeClass(state)}`}>
+          {materialIndexLabel(state)}
+        </span>
+      </label>
+    );
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={!isIngesting ? onClose : undefined} />
-      
+
       <div className="relative bg-white dark:bg-[#0F172A] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col border border-zinc-200 dark:border-white/10 animate-in fade-in zoom-in-95 duration-200">
         <div className="p-6 border-b border-zinc-200 dark:border-white/10 flex items-center justify-between shrink-0">
           <div>
@@ -206,7 +359,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
             </h2>
             <div className="text-xs text-zinc-500 mt-1">Select Canvas files or upload local files to provide context for AI grading.</div>
           </div>
-          <button 
+          <button
             onClick={onClose}
             disabled={isIngesting}
             className="p-2 bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded-full transition-colors disabled:opacity-50"
@@ -217,12 +370,16 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
         <div className="p-6 overflow-y-auto flex-1 space-y-8">
           {error && (
-            <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-sm">
+            <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-sm whitespace-pre-wrap">
               {error}
             </div>
           )}
+          {verifyNote && (
+            <div className="p-4 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 rounded-xl text-emerald-800 dark:text-emerald-300 text-sm">
+              {verifyNote}
+            </div>
+          )}
 
-          {/* Canvas Files Section */}
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-zinc-900 dark:text-white uppercase tracking-wider flex items-center justify-between gap-2">
               <span className="flex items-center">
@@ -231,16 +388,25 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               </span>
               {!loading && files.length > 0 && (
                 <span className="normal-case tracking-normal font-medium text-zinc-500">
-                  {files.length} total · {ingestibleCount} ingestible
+                  {files.length} total · {ingestibleCount} ingestible · {summary.indexed} indexed
                 </span>
               )}
             </h3>
-            
+
+            {!loading && files.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-[10px] font-semibold">
+                <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('indexed')}`}>{summary.indexed} indexed</span>
+                <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('not_indexed')}`}>{summary.not_indexed} not indexed</span>
+                <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('failed')}`}>{summary.failed + summary.broken} failed/broken</span>
+                <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('stale')}`}>{summary.stale + summary.pending} needs work</span>
+              </div>
+            )}
+
             {loading ? (
               <div className="flex items-center justify-center p-8">
                 <span className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></span>
               </div>
-            ) : files.length === 0 && indexed.length === 0 ? (
+            ) : files.length === 0 && indexedOnly.length === 0 ? (
               <div className="text-sm text-zinc-500 italic py-6 text-center">
                 No files found in this course Files tree (all folders).
               </div>
@@ -249,14 +415,15 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
                 <div className="px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-500/10">
                   Canvas did not return a file list. These class materials are already indexed and are what grading uses.
                 </div>
-                {indexed.map((row) => (
-                  <div key={row.canvas_file_id || row.filename} className="flex items-center p-3">
+                {indexedOnly.map((row) => (
+                  <div key={row.canvas_file_id || row.filename || Math.random()} className="flex items-center p-3">
                     <Icons.IconFile className="w-5 h-5 mr-3 text-emerald-500" />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-zinc-900 dark:text-zinc-200 truncate">{row.filename}</div>
                       <div className="text-[10px] text-zinc-500">
-                        {row.status === 'ready' ? 'Indexed' : row.status || 'Indexed'}
-                        {row.chunk_count ? ` · ${row.chunk_count} chunks` : ''}
+                        {row.verified === false ? 'Broken index' : row.status === 'ready' ? 'Indexed' : row.status || 'Indexed'}
+                        {row.stored_chunks || row.chunk_count ? ` · ${row.stored_chunks ?? row.chunk_count} chunks` : ''}
+                        {row.last_error ? ` · ${String(row.last_error).slice(0, 80)}` : ''}
                       </div>
                     </div>
                   </div>
@@ -264,58 +431,27 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               </div>
             ) : (
               <div className="border border-zinc-200 dark:border-white/10 rounded-xl overflow-hidden divide-y divide-zinc-200 dark:divide-white/10 max-h-[300px] overflow-y-auto custom-scrollbar">
-                {files.map(file => {
-                  const ingestible = isIngestibleName(file.display_name);
-                  return (
-                  <label
-                    key={file.id}
-                    className={`flex items-center p-3 transition-colors group ${
-                      ingestible
-                        ? 'hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer'
-                        : 'opacity-60 cursor-not-allowed'
-                    }`}
-                    title={ingestible ? undefined : 'Not a readable course material type'}
-                  >
-                    <input 
-                      type="checkbox" 
-                      checked={selectedFiles.has(file.id)}
-                      disabled={!ingestible}
-                      onChange={() => toggleFile(file.id, ingestible)}
-                      className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500 bg-white dark:bg-zinc-800 disabled:opacity-40"
-                    />
-                    <Icons.IconFile className="w-5 h-5 ml-3 mr-3 text-zinc-400 group-hover:text-indigo-400 transition-colors" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-zinc-900 dark:text-zinc-200 truncate">{file.display_name}</div>
-                      <div className="text-[10px] text-zinc-500">
-                        {((file.size || 0) / 1024 / 1024).toFixed(2)} MB
-                        {file.updated_at ? ` • ${new Date(file.updated_at).toLocaleDateString()}` : ''}
-                        {!ingestible ? ' • preview only' : ''}
-                      </div>
-                    </div>
-                  </label>
-                  );
-                })}
+                {files.map(renderFileRow)}
               </div>
             )}
           </div>
 
-          {/* Local Upload Section */}
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-zinc-900 dark:text-white uppercase tracking-wider flex items-center">
               <Icons.IconUpload className="w-4 h-4 mr-2 text-zinc-400" />
               Upload Local Files
             </h3>
-            
-            <div 
+
+            <div
               className="flex items-center justify-center p-6 bg-zinc-50 dark:bg-white/5 rounded-xl hover:bg-zinc-100 dark:hover:bg-white/10 transition-colors cursor-pointer text-center"
               onClick={() => fileInputRef.current?.click()}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
             >
-              <input 
+              <input
                 ref={fileInputRef}
-                type="file" 
-                multiple 
+                type="file"
+                multiple
                 accept=".pdf,.docx,.txt,.pptx,.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.webm,.mp3,.wav,.m4a"
                 onChange={handleLocalFileChange}
                 className="hidden"
@@ -339,7 +475,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
                       <Icons.IconFile className="w-4 h-4 text-zinc-400 shrink-0" />
                       <div className="text-sm text-zinc-700 dark:text-zinc-300 truncate">{file.name}</div>
                     </div>
-                    <button 
+                    <button
                       onClick={() => removeLocalFile(index)}
                       className="p-1 hover:bg-zinc-200 dark:hover:bg-white/10 rounded text-red-500"
                     >
@@ -352,37 +488,58 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
           </div>
         </div>
 
-        <div className="p-6 border-t border-zinc-200 dark:border-white/10 shrink-0 flex items-center justify-between bg-transparent">
+        <div className="p-6 border-t border-zinc-200 dark:border-white/10 shrink-0 flex items-center justify-between gap-3 bg-transparent">
           <div className="text-xs font-medium text-zinc-500">
-            {files.length === 0 && indexed.length > 0
-              ? `${indexed.length} class materials already indexed`
-              : `${selectedFiles.size + localFiles.length} files selected for ingestion`}
+            {files.length === 0 && indexedOnly.length > 0
+              ? `${indexedOnly.length} class materials in index`
+              : `${selectedFiles.size + localFiles.length} selected · ${summary.indexed} indexed`}
           </div>
-          
-          <button
-            onClick={files.length === 0 && indexed.length > 0 && selectedFiles.size === 0 && localFiles.length === 0
-              ? () => { onIngestSuccess(); onClose(); }
-              : handleIngest}
-            disabled={isIngesting || (selectedFiles.size === 0 && localFiles.length === 0 && indexed.length === 0)}
-            className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
-          >
-            {isIngesting ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
-                Ingesting ({ingestProgress?.current}/{ingestProgress?.total})...
-              </>
-            ) : files.length === 0 && indexed.length > 0 && localFiles.length === 0 ? (
-              <>
-                <Icons.IconSparkles className="w-4 h-4 mr-2" />
-                Grade with these materials
-              </>
-            ) : (
-              <>
-                <Icons.IconSparkles className="w-4 h-4 mr-2" />
-                Ingest Selected Files
-              </>
-            )}
-          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleVerify}
+              disabled={isIngesting || verifying || loading}
+              className="px-4 py-2.5 bg-zinc-100 hover:bg-zinc-200 dark:bg-white/5 dark:hover:bg-white/10 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 text-sm font-semibold rounded-xl transition-all flex items-center"
+            >
+              {verifying ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-zinc-400/30 border-t-zinc-600 rounded-full animate-spin mr-2"></span>
+                  Checking…
+                </>
+              ) : (
+                <>
+                  <Icons.IconCheck className="w-4 h-4 mr-2" />
+                  Verify index
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={files.length === 0 && indexedOnly.length > 0 && selectedFiles.size === 0 && localFiles.length === 0
+                ? () => { onIngestSuccess(); onClose(); }
+                : handleIngest}
+              disabled={isIngesting || (selectedFiles.size === 0 && localFiles.length === 0 && indexedOnly.length === 0)}
+              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
+            >
+              {isIngesting ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
+                  Ingesting ({ingestProgress?.current}/{ingestProgress?.total})...
+                </>
+              ) : files.length === 0 && indexedOnly.length > 0 && localFiles.length === 0 ? (
+                <>
+                  <Icons.IconSparkles className="w-4 h-4 mr-2" />
+                  Grade with these materials
+                </>
+              ) : (
+                <>
+                  <Icons.IconSparkles className="w-4 h-4 mr-2" />
+                  Ingest Selected Files
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

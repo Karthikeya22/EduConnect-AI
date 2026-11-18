@@ -629,6 +629,81 @@ async def list_course_file_status(course_id: str) -> list[dict]:
         return []
 
 
+async def _chunk_counts_by_file(course_id: str) -> dict[str, int]:
+    """Count stored course_material_chunks per canvas_file_id for this course."""
+    sb = get_supabase()
+
+    def _q():
+        resp = (
+            sb.table("course_material_chunks")
+            .select("canvas_file_id")
+            .eq("course_id", str(course_id))
+            .not_.is_("canvas_file_id", "null")
+            .execute()
+        )
+        counts: dict[str, int] = {}
+        for row in resp.data or []:
+            fid = str(row.get("canvas_file_id") or "").strip()
+            if not fid:
+                continue
+            counts[fid] = counts.get(fid, 0) + 1
+        return counts
+
+    try:
+        return await asyncio.to_thread(_q)
+    except Exception as e:
+        print(f"[course_cache] chunk count verify failed: {e}")
+        return {}
+
+
+async def verify_course_file_index(course_id: str) -> dict:
+    """
+    Cross-check the course_file_ingest registry against stored chunks.
+
+    A file is verified only when status is ready and at least one chunk exists
+    for that course_id + canvas_file_id. Registry ready with zero chunks is broken.
+    """
+    rows = await list_course_file_status(course_id)
+    chunk_counts = await _chunk_counts_by_file(course_id)
+    files: list[dict] = []
+    summary = {
+        "indexed": 0,
+        "failed": 0,
+        "pending": 0,
+        "broken": 0,
+        "total_registry": len(rows),
+        "files_with_chunks": sum(1 for n in chunk_counts.values() if n > 0),
+    }
+    for row in rows:
+        fid = str(row.get("canvas_file_id") or "")
+        stored = int(chunk_counts.get(fid, 0))
+        status = str(row.get("status") or "")
+        reported = int(row.get("chunk_count") or 0)
+        verified = status == "ready" and stored > 0
+        broken = status == "ready" and stored <= 0
+        item = {
+            **row,
+            "stored_chunks": stored,
+            "verified": verified,
+            "check": (
+                "indexed" if verified
+                else "broken" if broken
+                else status if status in ("failed", "pending") else "unknown"
+            ),
+            "chunk_count_match": stored == reported if status == "ready" else None,
+        }
+        files.append(item)
+        if verified:
+            summary["indexed"] += 1
+        elif broken:
+            summary["broken"] += 1
+        elif status == "failed":
+            summary["failed"] += 1
+        elif status == "pending":
+            summary["pending"] += 1
+    return {"course_id": str(course_id), "files": files, "summary": summary}
+
+
 def plan_removed_file_reconciliation(
     course_id: str,
     registry_rows: list[dict],

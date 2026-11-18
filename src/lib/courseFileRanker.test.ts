@@ -1,4 +1,10 @@
-import { selectPhaseFiles, selectFilesNeedingIngest, isDocCourseFile, CanvasCourseFile } from './courseFileRanker';
+import {
+  selectPhaseFiles,
+  selectFilesNeedingIngest,
+  isDocCourseFile,
+  materialIndexState,
+  CanvasCourseFile,
+} from './courseFileRanker';
 
 const files: CanvasCourseFile[] = [
   { id: 1, display_name: 'unrelated_notes.pdf', updated_at: '2026-01-01T00:00:00Z' },
@@ -30,5 +36,15 @@ if (JSON.stringify(needing) !== JSON.stringify(expectedNeeding)) {
 }
 if (!isDocCourseFile({ id: 9, display_name: 'slide.png' })) {
   throw new Error('expected PNG course images to be ingestible');
+}
+const indexedFile = { id: 1, display_name: 'a.pdf', updated_at: '2026-01-01T00:00:00Z' };
+if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'ready', updated_at: '2026-01-01T00:00:00Z', verified: true, stored_chunks: 2 }) !== 'indexed') {
+  throw new Error('expected indexed state');
+}
+if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'ready', updated_at: '2026-01-01T00:00:00Z', verified: false, stored_chunks: 0 }) !== 'broken') {
+  throw new Error('expected broken state');
+}
+if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'failed', last_error: '404' }) !== 'failed') {
+  throw new Error('expected failed state');
 }
 console.log('courseFileRanker.test.ts PASS');

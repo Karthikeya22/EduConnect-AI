@@ -4694,6 +4694,17 @@ async def course_ingest_status():
     return jsonify({"course_id": course_id, "files": files}), 200
 
 
+@app.route("/api/ingest/course-verify", methods=["GET"])
+@require_access("course")
+async def course_ingest_verify():
+    """Cross-check registry rows against stored course_material_chunks."""
+    course_id = request.args.get("course_id")
+    if not course_id:
+        return jsonify({"error": "course_id is required"}), 400
+    from grading_server.ingest_service import verify_course_file_index
+    result = await verify_course_file_index(course_id)
+    return jsonify(result), 200
+
 
 @app.route("/api/ingest/<assignment_id>", methods=["DELETE"])
 @require_access("assignment")
