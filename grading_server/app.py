@@ -1301,6 +1301,64 @@ def _text_claims_full_or_glowing(text: str) -> bool:
     return any(c in t for c in cues)
 
 
+def _is_process_only_explanation(text: str) -> bool:
+    """True when copy only cites missing quotes / internal caps, not content gaps."""
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    process_cues = (
+        "verifiable quote",
+        "verifiable student quote",
+        "evidence quote",
+        "evidence_anchor",
+        "no clear student passage",
+        "score capped",
+        "credit limited",
+        "linked as evidence",
+        "linked to this criterion",
+    )
+    has_process = any(c in t for c in process_cues)
+    if not has_process:
+        return False
+    # Still treat as process-only unless it also names a content gap.
+    content_cues = (
+        "missing",
+        "underdeveloped",
+        "incomplete",
+        "does not",
+        "fails to",
+        "lacks",
+        "thin",
+        "shallow",
+        "unclear",
+        "without enough",
+        "not enough depth",
+        "specificity",
+        "compare",
+        "definition",
+        "example",
+    )
+    return not any(c in t for c in content_cues)
+
+
+def _content_gap_phrases(v: dict) -> list[str]:
+    covered = {
+        str(c).strip().lower()
+        for c in (v.get("covered_concepts") or [])
+        if str(c).strip()
+    }
+    gaps: list[str] = []
+    for c in (v.get("missing_keywords") or []):
+        s = str(c).strip()
+        if s and s.lower() not in {g.lower() for g in gaps}:
+            gaps.append(s)
+    for c in (v.get("required_concepts") or []):
+        s = str(c).strip()
+        if s and s.lower() not in covered and s.lower() not in {g.lower() for g in gaps}:
+            gaps.append(s)
+    return gaps[:6]
+
+
 def _reconcile_verdict_explanation(
     v: dict,
     *,
@@ -1309,63 +1367,116 @@ def _reconcile_verdict_explanation(
     anchor_missing: bool,
     teacher_notes: list[str],
 ) -> dict:
-    """Keep faculty-facing copy consistent with the final numeric score (do not change the score)."""
-    friendly_notes = [
-        _faculty_friendly_guard_note(n) for n in (teacher_notes or []) if str(n).strip()
-    ]
+    """Align faculty-facing copy with the final score — never invent a different grade."""
     credit = str(v.get("credit_awarded_for") or "").strip()
     withheld = str(v.get("points_withheld_because") or "").strip()
     just = str(v.get("justification") or "").strip()
+    gaps = _content_gap_phrases(v)
+    covered = [str(c).strip() for c in (v.get("covered_concepts") or []) if str(c).strip()][:4]
+    criterion = str(v.get("criterion_name") or v.get("title") or "this criterion").strip()
 
-    # Strip internal jargon from withheld / justification if present.
-    for raw, friendly in (
-        (
+    # Translate leftover internal jargon; do not use process notes as the deduction reason.
+    for raw in list(
+        {
+            *(teacher_notes or []),
             "Score capped: no verifiable student evidence_anchor.",
-            _faculty_friendly_guard_note("Score capped: no verifiable student evidence_anchor."),
-        ),
+        }
     ):
-        if raw in withheld:
-            withheld = withheld.replace(raw, friendly).strip()
-        if raw in just:
-            just = just.replace(raw, friendly).strip()
+        friendly = _faculty_friendly_guard_note(str(raw))
+        raw_s = str(raw or "").strip()
+        if raw_s and raw_s in withheld:
+            withheld = withheld.replace(raw_s, "").strip()
+        if raw_s and raw_s in just:
+            just = just.replace(raw_s, "").strip()
+        if friendly and friendly in withheld and _is_process_only_explanation(friendly):
+            withheld = withheld.replace(friendly, "").strip()
+        if friendly and friendly in just and _is_process_only_explanation(friendly):
+            just = just.replace(friendly, "").strip()
 
-    for note in friendly_notes:
-        if note and note not in withheld and score < max_score:
-            withheld = (withheld + (" " if withheld else "") + note).strip()
+    # Drop process-only withheld / credit so we can rebuild content reasons.
+    if _is_process_only_explanation(withheld):
+        withheld = ""
+    if _is_process_only_explanation(credit) and score < max_score:
+        credit = ""
 
-    inconsistent = score < max_score and (
-        _text_claims_full_or_glowing(credit)
-        or _text_claims_full_or_glowing(just)
-        or (anchor_missing and _text_claims_full_or_glowing(credit + " " + just))
-    )
+    was_glowing = _text_claims_full_or_glowing(credit) or _text_claims_full_or_glowing(just)
+    inconsistent = score < max_score and was_glowing
 
     if inconsistent:
-        if anchor_missing:
+        # Glowing full-credit prose is not a usable deduction reason after a partial score.
+        credit = ""
+        just = ""
+        if covered:
             credit = (
-                f"Limited credit ({score:g}/{max_score:g}): topical discussion may be present, "
-                "but no verifiable student quote was linked as evidence for this criterion."
-            )
-            withheld = withheld or (
-                "Without a verifiable evidence quote, full marks cannot be justified for this criterion."
+                f"Partial credit ({score:g}/{max_score:g}) for covering: "
+                + ", ".join(covered)
+                + "."
             )
         else:
             credit = (
-                f"Partial credit ({score:g}/{max_score:g}) for relevant content that was demonstrated."
+                f"Partial credit ({score:g}/{max_score:g}) for relevant discussion of {criterion}."
             )
-            withheld = withheld or (
-                f"Awarded {score:g}/{max_score:g}. Full rubric expectations were not fully met."
-            )
-        # Rebuild justification so praise and score cannot contradict.
-        just = f"{credit} {withheld}".strip()
 
     if score >= max_score:
         withheld = ""
-    elif score < max_score and not withheld:
-        withheld = f"Awarded {score:g}/{max_score:g} (partial). Full rubric expectations were not fully met."
+    else:
+        if gaps and (_is_process_only_explanation(withheld) or not withheld):
+            withheld = (
+                f"Not full credit ({score:g}/{max_score:g}): missing or underdeveloped — "
+                + ", ".join(gaps)
+                + "."
+            )
+        elif not withheld or _is_process_only_explanation(withheld):
+            # Content reason required — never deduct with only “no quote linked”.
+            usable_just = (
+                just
+                and not was_glowing
+                and not _is_process_only_explanation(just)
+                and not _text_claims_full_or_glowing(just)
+            )
+            if usable_just:
+                withheld = f"Awarded {score:g}/{max_score:g}. {just}"
+                just = ""
+            else:
+                withheld = (
+                    f"Awarded {score:g}/{max_score:g}. The response does not demonstrate "
+                    f"{criterion} with enough depth or specificity for full marks."
+                )
 
-    v["credit_awarded_for"] = credit
-    v["points_withheld_because"] = withheld
-    v["justification"] = just
+        if not credit:
+            if covered:
+                credit = (
+                    f"Partial credit ({score:g}/{max_score:g}) for covering: "
+                    + ", ".join(covered)
+                    + "."
+                )
+            else:
+                credit = f"Partial credit ({score:g}/{max_score:g}) for relevant work on {criterion}."
+
+        # If justification still glows or only repeats process/credit+withheld, collapse it.
+        if just and (
+            _text_claims_full_or_glowing(just)
+            or _is_process_only_explanation(just)
+            or was_glowing
+            or just.lower() in f"{credit} {withheld}".lower()
+            or f"{credit} {withheld}".lower() in just.lower()
+        ):
+            just = ""
+
+    # Optional soft evidence note — never as the primary withheld reason.
+    if (
+        score < max_score
+        and anchor_missing
+        and withheld
+        and "student passage" not in withheld.lower()
+        and "evidence quote" not in withheld.lower()
+    ):
+        # Keep withheld content-first; evidence weakness stays out of the headline reason.
+        pass
+
+    v["credit_awarded_for"] = credit.strip()
+    v["points_withheld_because"] = withheld.strip()
+    v["justification"] = just.strip()
     return v
 
 

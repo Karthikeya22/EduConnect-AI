@@ -227,7 +227,7 @@ export function buildDeductionExplanation(
   >,
 ): DeductionExplanation {
   const justification = String(v.justification || '').trim();
-  const credit =
+  let credit: string | null =
     (typeof v.credit_awarded_for === 'string' && v.credit_awarded_for.trim()) || null;
   let withheld =
     (typeof v.points_withheld_because === 'string' && v.points_withheld_because.trim()) ||
@@ -237,44 +237,68 @@ export function buildDeductionExplanation(
   const score = isScore(v.score) ? v.score : null;
   const belowMax = score != null && max > 0 && score < max;
 
-  // Translate leftover internal guard jargon on legacy drafts.
-  if (
-    withheld &&
-    (withheld.includes('evidence_anchor') || withheld.includes('Score capped:'))
-  ) {
-    withheld = withheld
-      .replace(
-        /Score capped:\s*no verifiable student evidence_anchor\.?/gi,
-        'No verifiable quote from the student submission was linked to this criterion, so credit was limited.',
-      )
-      .replace(/Score capped:/gi, 'Credit limited:')
-      .replace(/evidence_anchor/gi, 'evidence quote')
-      .trim();
+  const isProcessOnly = (text: string | null) => {
+    if (!text) return true;
+    const t = text.toLowerCase();
+    const process =
+      /verifiable quote|evidence quote|evidence_anchor|no clear student passage|score capped|credit limited|linked as evidence|linked to this criterion/.test(
+        t,
+      );
+    if (!process) return false;
+    return !/missing|underdeveloped|incomplete|does not|fails to|lacks|thin|shallow|unclear|depth|specificity|compare|definition|example/.test(
+      t,
+    );
+  };
+
+  // Prefer content gaps over process-only “no quote” reasons on legacy drafts.
+  const covered = new Set(
+    (v.covered_concepts || []).map((c) => String(c).trim().toLowerCase()).filter(Boolean),
+  );
+  const missingFromRequired = (v.required_concepts || [])
+    .map((c) => String(c).trim())
+    .filter((c) => c && !covered.has(c.toLowerCase()));
+  const gaps = [
+    ...new Set([...(v.missing_keywords || []).map((c) => String(c).trim()), ...missingFromRequired]),
+  ].filter(Boolean);
+
+  if (withheld && isProcessOnly(withheld)) {
+    withheld = null;
+  }
+  if (credit && belowMax && isProcessOnly(credit)) {
+    credit = null;
   }
 
-  if (belowMax && !withheld) {
-    const covered = new Set(
-      (v.covered_concepts || []).map((c) => String(c).trim().toLowerCase()).filter(Boolean),
-    );
-    const missingFromRequired = (v.required_concepts || [])
-      .map((c) => String(c).trim())
-      .filter((c) => c && !covered.has(c.toLowerCase()));
-    const gaps = [
-      ...new Set([...(v.missing_keywords || []).map((c) => String(c).trim()), ...missingFromRequired]),
-    ].filter(Boolean);
+  if (belowMax && (!withheld || isProcessOnly(withheld))) {
     if (gaps.length) {
       withheld = `Not full credit: missing or underdeveloped — ${gaps.slice(0, 6).join(', ')}.`;
-    } else if (justification) {
-      withheld =
-        `Awarded ${score}/${max} (partial). See explanation for what was not fully met for full marks.`;
+    } else if (justification && !isProcessOnly(justification)) {
+      withheld = `Awarded ${score}/${max}. ${justification}`;
     } else {
-      withheld = `Awarded ${score}/${max}. Full marks were not awarded for this criterion.`;
+      withheld = `Awarded ${score}/${max}. The response does not demonstrate this criterion with enough depth or specificity for full marks.`;
     }
+  }
+
+  // Hide body justification when it duplicates credit/withheld (avoids triple paste).
+  let body = justification;
+  const joined = `${credit || ''} ${withheld || ''}`.trim().toLowerCase();
+  if (
+    body &&
+    (isProcessOnly(body) ||
+      (joined && (joined.includes(body.toLowerCase()) || body.toLowerCase().includes(joined))))
+  ) {
+    body = '';
+  }
+  if (body && withheld && withheld.toLowerCase().includes(body.toLowerCase().slice(0, 80))) {
+    body = '';
+  }
+  // When structured fields are present, prefer them alone (no third paste).
+  if (body && (credit || withheld)) {
+    body = '';
   }
 
   return {
     creditAwardedFor: credit,
     pointsWithheldBecause: belowMax ? withheld : null,
-    justification,
+    justification: body,
   };
 }

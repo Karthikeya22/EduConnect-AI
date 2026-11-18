@@ -122,7 +122,9 @@ function EvidenceLimitationsPanel({
   const deduction = buildDeductionExplanation(verdict);
   const whyLine =
     deduction.justification ||
-    firstSentence(claim?.semantic_justification || claim?.judgment || '') ||
+    (!(deduction.creditAwardedFor || deduction.pointsWithheldBecause)
+      ? firstSentence(claim?.semantic_justification || claim?.judgment || '')
+      : '') ||
     '';
   const needsReview =
     Boolean(claim?.review_reasons?.length) || claim?.evidence_check_status === 'needs_review';
@@ -549,9 +551,10 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
                           {explain.pointsWithheldBecause ? (
                             <p><span className="font-bold text-amber-700 dark:text-amber-400">Points withheld because: </span>{explain.pointsWithheldBecause}</p>
                           ) : null}
-                          {explain.justification ? (
+                          {explain.justification &&
+                          !(explain.creditAwardedFor || explain.pointsWithheldBecause) ? (
                             <p>{explain.justification}</p>
-                          ) : !explain.creditAwardedFor && !explain.pointsWithheldBecause ? (
+                          ) : !explain.creditAwardedFor && !explain.pointsWithheldBecause && !explain.justification ? (
                             <p className="italic text-zinc-500 text-xs font-normal">No written explanation for this criterion.</p>
                           ) : null}
                         </div>

@@ -70,8 +70,10 @@ def test_missing_anchor_cap_does_not_keep_glowing_credit_copy():
             "score": 5,
             "status": "full",
             "evidence_anchor": "not found",
-            "required_concepts": [],
+            "criterion_name": "Introduction to LLMs",
+            "required_concepts": ["token", "transformer"],
             "covered_concepts": [],
+            "missing_keywords": ["token", "transformer"],
             "material_alignment": "neutral",
             "placement_ok": True,
             "justification": (
@@ -88,10 +90,37 @@ def test_missing_anchor_cap_does_not_keep_glowing_credit_copy():
     credit = str(v.get("credit_awarded_for") or "").lower()
     just = str(v.get("justification") or "").lower()
     withheld = str(v.get("points_withheld_because") or "").lower()
-    assert "comprehensive" not in credit and "meets" not in credit
-    assert "comprehensive" not in just or "limited credit" in just
+    assert "comprehensive" not in credit
+    assert "meets requirements" not in credit
     assert "evidence_anchor" not in withheld
-    assert "verifiable" in withheld or "quote" in withheld
+    assert "verifiable quote" not in withheld
+    assert "token" in withheld or "transformer" in withheld or "depth" in withheld
+    # Do not triple-paste credit+withheld into justification.
+    assert just == "" or just != f"{credit} {withheld}".strip()
+
+
+def test_missing_anchor_without_gaps_still_gives_content_reason():
+    v = _apply_verdict_score_guards(
+        {
+            "score": 5,
+            "status": "full",
+            "evidence_anchor": "not found",
+            "criterion_name": "Introduction to LLMs",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Meets the assignment's requirements with a comprehensive overview.",
+            "credit_awarded_for": "Comprehensive overview that meets requirements.",
+            "points_withheld_because": "Score capped: no verifiable student evidence_anchor.",
+        },
+        5,
+    )
+    assert v["score"] <= 2
+    withheld = str(v.get("points_withheld_because") or "").lower()
+    assert "verifiable quote" not in withheld
+    assert "evidence_anchor" not in withheld
+    assert "depth" in withheld or "specificity" in withheld or "introduction to llms" in withheld
 
 
 def test_grade_prompt_requires_faculty_explanation_fields():

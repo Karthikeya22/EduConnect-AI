@@ -198,6 +198,7 @@ const structured = buildDeductionExplanation({
 });
 assert(structured.creditAwardedFor?.includes('GPT'), 'structured credit');
 assert(structured.pointsWithheldBecause?.includes('BERT'), 'structured withheld');
+assert(!structured.justification, 'no triple-paste body when structured fields exist');
 
 const legacy = buildDeductionExplanation({
   score: 9,
@@ -210,6 +211,26 @@ const legacy = buildDeductionExplanation({
 });
 assert(legacy.pointsWithheldBecause, 'legacy composes withheld from gaps');
 assert(legacy.pointsWithheldBecause!.toLowerCase().includes('missing') || legacy.pointsWithheldBecause!.includes('9/10'), 'legacy withheld useful');
+
+const processOnly = buildDeductionExplanation({
+  score: 2,
+  max_score: 5,
+  status: 'partial',
+  justification:
+    'Limited credit (2/5): topical discussion may be present, but no verifiable student quote was linked as evidence for this criterion. No verifiable quote from the student submission was linked to this criterion, so credit was limited.',
+  credit_awarded_for:
+    'Limited credit (2/5): topical discussion may be present, but no verifiable student quote was linked as evidence for this criterion.',
+  points_withheld_because:
+    'No verifiable quote from the student submission was linked to this criterion, so credit was limited.',
+  missing_keywords: [],
+});
+assert(
+  processOnly.pointsWithheldBecause?.toLowerCase().includes('depth') ||
+    processOnly.pointsWithheldBecause?.toLowerCase().includes('specificity'),
+  'process-only withheld replaced with content reason',
+);
+assert(!processOnly.pointsWithheldBecause?.toLowerCase().includes('verifiable quote'), 'no quote-jargon withheld');
+assert(!processOnly.justification, 'no duplicate body for process-only drafts');
 
 const deductionHtml = renderToStaticMarkup(
   createElement(GradingResult, {
