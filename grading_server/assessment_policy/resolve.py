@@ -7,6 +7,7 @@ from typing import Any, Callable
 from grading_server.assessment_policy.generate import (
     build_formative_policy,
     build_inferred_policy,
+    build_points_anchored_policy,
     build_template_policy,
     generate_with_bounds,
 )
@@ -39,8 +40,9 @@ def resolve_assessment_policy(
       1. Existing instructor rubric
       2. Existing frozen fallback for this context version
       3. New inferred policy from assignment instructions/outcomes
-      4. Approved template (if selected)
-      5. Formative-only
+      4. Points-anchored prompt policy (no rubric, but points + usable prompt)
+      5. Approved template (if selected)
+      6. Formative-only
 
     Genuine absence only enters fallback. Invalid rubric / lookup failure do not.
     """
@@ -152,6 +154,30 @@ def resolve_assessment_policy(
             rubric_criteria=frozen.to_rubric_rows(),
         )
 
+    # No structured bullets, but assignment has points + a usable prompt/title.
+    def _anchored() -> AssessmentPolicy | None:
+        return build_points_anchored_policy(
+            course_id=str(course_id),
+            assignment_id=str(assignment_id),
+            assignment_name=assignment_name,
+            assignment_description=assignment_description,
+            points_possible=points_possible,
+            creation_config=cfg,
+            created_by=created_by,
+            organization_id=organization_id,
+            lms_host=lms_host,
+        )
+
+    anchored, anchored_diag = generate_with_bounds(_anchored)
+    if anchored is not None:
+        frozen = store.freeze(anchored, gen_config={**cfg, "fallback": "points_anchored"})
+        return PolicyResolution(
+            lookup=lookup,
+            policy=frozen,
+            rubric_criteria=frozen.to_rubric_rows(),
+        )
+    infer_diag = anchored_diag or infer_diag
+
     if approved_template_id:
         def _tpl() -> AssessmentPolicy | None:
             return build_template_policy(
@@ -160,6 +186,7 @@ def resolve_assessment_policy(
                 assignment_id=str(assignment_id),
                 assignment_name=assignment_name,
                 assignment_description=assignment_description,
+                points_possible=points_possible,
                 created_by=created_by,
                 organization_id=organization_id,
                 lms_host=lms_host,

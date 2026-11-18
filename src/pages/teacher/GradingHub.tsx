@@ -1276,9 +1276,18 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
         const assignMeta = assignments.find(a => String(a.id) === selectedAssignment)
           || discussions.find(d => String(d.id) === selectedAssignment);
+        const rawPoints = (assignMeta as any)?.points_possible ?? (assignMeta as any)?.points;
+        const parsedPoints =
+          rawPoints == null || rawPoints === ''
+            ? null
+            : Number(rawPoints);
         const assignmentPayload = {
           assignment_name: (assignMeta as any)?.name || (assignMeta as any)?.title || '',
           assignment_description: (assignMeta as any)?.description || (assignMeta as any)?.message || '',
+          // Required for no-rubric inferred / points-anchored scored policies.
+          ...(Number.isFinite(parsedPoints) && parsedPoints > 0
+            ? { points_possible: parsedPoints }
+            : {}),
           moe: useMoE,
         };
 

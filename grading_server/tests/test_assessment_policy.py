@@ -503,3 +503,58 @@ def test_empty_rubric_route_no_longer_processing_failed_zero():
     out = post(TableSB(rubric=[], rows=GOOD_ROWS), body=_body(assignment_description="", points_possible=None)).get_json()
     assert out.get("total") is None
     assert out.get("policy_formative_only") is True
+
+
+def test_html_assignment_description_infers_scored_policy():
+    setup_function()
+    html = (
+        "<p>Complete the overview presentation.</p>"
+        "<ul>"
+        "<li>Introduce the topic clearly (5 points)</li>"
+        "<li>Compare at least two perspectives (5 points)</li>"
+        "</ul>"
+    )
+    policy = build_inferred_policy(
+        course_id="11",
+        assignment_id="101",
+        assignment_name="Parental Leave Overview",
+        assignment_description=html,
+        points_possible=10,
+    )
+    assert policy is not None
+    assert policy.formative_only is False
+    assert abs(policy.maximum_score - 10.0) < 1e-9
+    assert len(policy.criteria) >= 2
+
+
+def test_no_rubric_with_points_and_title_uses_points_anchored_policy():
+    """Canvas often has points + title but no rubric and no bullet requirements."""
+    setup_function()
+    from grading_server.assessment_policy.generate import build_points_anchored_policy
+
+    policy = build_points_anchored_policy(
+        course_id="11",
+        assignment_id="jamie",
+        assignment_name="Parental Leave in Florida Higher Education",
+        assignment_description="<p>Share your overview.</p>",
+        points_possible=20,
+    )
+    assert policy is not None
+    assert policy.origin == "inferred"
+    assert policy.formative_only is False
+    assert abs(policy.maximum_score - 20.0) < 1e-9
+    assert len(policy.criteria) == 2
+    assert any("No instructor rubric" in a for a in policy.disclosed_assumptions)
+
+    out = post(
+        TableSB(rubric=[], rows=GOOD_ROWS),
+        body=_body(
+            assignment_name="Parental Leave in Florida Higher Education",
+            assignment_description="<p>Share your overview.</p>",
+            points_possible=20,
+        ),
+    ).get_json()
+    assert out["policy_formative_only"] is False
+    assert out["policy_origin"] == "inferred"
+    assert out["total"] is not None
+    assert out["assessment_policy"]["criteria"]

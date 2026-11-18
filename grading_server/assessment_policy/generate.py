@@ -16,8 +16,10 @@ from grading_server.assessment_policy.hashing import (
 )
 from grading_server.assessment_policy.requirements import (
     Requirement,
+    assignment_text_to_plain,
     context_is_sufficient,
     extract_requirements,
+    prompt_context_usable,
 )
 from grading_server.assessment_policy.templates import get_approved_template
 from grading_server.assessment_policy.types import (
@@ -215,6 +217,143 @@ def build_inferred_policy(
     return policy
 
 
+def build_points_anchored_policy(
+    *,
+    course_id: str,
+    assignment_id: str,
+    assignment_name: str = "",
+    assignment_description: str = "",
+    points_possible: float | None = None,
+    creation_config: dict[str, Any] | None = None,
+    created_by: str | None = None,
+    organization_id: str | None = None,
+    lms_host: str | None = None,
+) -> AssessmentPolicy | None:
+    """
+    No-rubric fallback when structured requirements cannot be extracted, but the
+    assignment has a defensible maximum score and a usable prompt/title.
+
+    Builds a disclosed, equal-weight short-response style policy scaled to points.
+    Never invents a total without points_possible.
+    """
+    if points_possible is None or float(points_possible) <= 0:
+        return None
+    if not prompt_context_usable(assignment_name, assignment_description):
+        return None
+
+    total = float(points_possible)
+    name = (assignment_name or "").strip() or "Assignment prompt"
+    plain = assignment_text_to_plain(assignment_description or "")
+    prompt_excerpt = plain[:400] if plain else name
+
+    # Two content criteria (understanding + support), equal split of assignment points.
+    weights = (0.55, 0.45)
+    pts = [round(total * w, 4) for w in weights]
+    pts[-1] = round(total - sum(pts[:-1]), 4)
+
+    specs = [
+        (
+            "pol_prompt_understanding",
+            "Addresses the assignment prompt",
+            f"Responds to the assignment prompt ({name}) with relevant concepts and coverage.",
+            weights[0],
+            pts[0],
+        ),
+        (
+            "pol_prompt_support",
+            "Support, clarity, and completeness",
+            "Provides reasoning, examples, or detail sufficient for the points available.",
+            weights[1],
+            pts[1],
+        ),
+    ]
+
+    assumptions = [
+        "No instructor rubric was attached; structured requirements could not be extracted.",
+        f"Scored criteria were synthesized from the assignment prompt and equal-weight split of {total:g} points.",
+        "This policy is provisional and disclosed — not instructor-authored.",
+    ]
+    criteria: list[PolicyCriterion] = []
+    for cid, title, desc, weight, mx in specs:
+        # Unique source ids — validate_policy forbids one requirement scored by two criteria.
+        src_id = f"prompt:{cid}"
+        criteria.append(
+            PolicyCriterion(
+                criterion_id=cid,
+                title=title,
+                description=desc,
+                source_requirement_ids=[src_id],
+                source_excerpts=[
+                    SourceExcerpt(
+                        requirement_id=src_id,
+                        excerpt=prompt_excerpt,
+                        location="assignment_description" if plain else "assignment_name",
+                    )
+                ],
+                provenance="inferred_interpretation",
+                max_points=float(mx),
+                weight=float(weight),
+                performance_descriptors=list(_DEFAULT_DESCRIPTORS),
+                evidence_policy="submission_sufficient",
+                disclosed_assumptions=list(assumptions),
+                dimension="content",
+            )
+        )
+
+    ctx_hash = assignment_context_hash(
+        assignment_name=assignment_name,
+        assignment_description=assignment_description,
+        points_possible=points_possible,
+    )
+    cfg = dict(creation_config or {})
+    cfg["generation_config_key"] = generation_config_key(cfg)
+    cfg["fallback"] = "points_anchored_short_response"
+    body = {
+        "criteria": [c.model_dump() for c in criteria],
+        "maximum_score": total,
+        "weighting_mode": "inferred_equal",
+        "weighting_assumptions": assumptions,
+        "origin": "inferred",
+        "assignment_context_hash": ctx_hash,
+        "generation_protocol_version": POLICY_GENERATION_PROTOCOL_VERSION,
+        "creation_config": cfg,
+        "formative_only": False,
+        "disclosed_assumptions": assumptions,
+        "source_document_versions": [f"assignment_prompt:{ctx_hash[:12]}"],
+    }
+    policy = AssessmentPolicy(
+        policy_id=f"ap_{uuid.uuid4().hex[:12]}",
+        version=1,
+        content_hash=policy_content_hash(body),
+        organization_id=organization_id,
+        lms_host=lms_host,
+        course_id=str(course_id),
+        assignment_id=str(assignment_id),
+        origin="inferred",
+        lifecycle="draft",
+        assignment_context_hash=ctx_hash,
+        assignment_context_version=ctx_hash[:16],
+        source_document_versions=body["source_document_versions"],
+        criteria=criteria,
+        maximum_score=total,
+        weighting_mode="inferred_equal",
+        weighting_assumptions=assumptions,
+        creation_model="points-anchored-fallback",
+        creation_config=cfg,
+        created_by=created_by,
+        created_at=_now(),
+        formative_only=False,
+        diagnostic=(
+            "Structured requirement extraction was insufficient; "
+            "used points-anchored prompt policy."
+        ),
+        disclosed_assumptions=assumptions,
+    )
+    if validate_policy(policy):
+        return None
+    return policy
+
+
 def build_template_policy(
     *,
     template_id: str,
@@ -222,6 +361,7 @@ def build_template_policy(
     assignment_id: str,
     assignment_name: str = "",
     assignment_description: str = "",
+    points_possible: float | None = None,
     created_by: str | None = None,
     organization_id: str | None = None,
     lms_host: str | None = None,
@@ -233,10 +373,26 @@ def build_template_policy(
         assignment_name=assignment_name,
         assignment_description=assignment_description,
         explicit_outcomes=[f"template:{template_id}"],
-        points_possible=None,
+        points_possible=points_possible,
     )
+    raw_pts = [float(c["max_points"]) for c in tpl["criteria"]]
+    raw_total = sum(raw_pts) or 1.0
+    if points_possible is not None and float(points_possible) > 0:
+        scale = float(points_possible) / raw_total
+        pts = [round(p * scale, 4) for p in raw_pts]
+        pts[-1] = round(float(points_possible) - sum(pts[:-1]), 4)
+        scale_note = f"Template weights scaled to assignment points_possible={float(points_possible):g}."
+    else:
+        pts = raw_pts
+        scale_note = None
+    assumptions = list(tpl["assumptions"])
+    if scale_note:
+        assumptions.append(scale_note)
+
     criteria: list[PolicyCriterion] = []
-    for c in tpl["criteria"]:
+    maximum = float(sum(pts))
+    for c, mx in zip(tpl["criteria"], pts):
+        w = float(mx) / maximum if maximum else float(c["weight"])
         criteria.append(
             PolicyCriterion(
                 criterion_id=c["criterion_id"],
@@ -251,26 +407,25 @@ def build_template_policy(
                     )
                 ],
                 provenance="template_assumption",
-                max_points=float(c["max_points"]),
-                weight=float(c["weight"]),
+                max_points=float(mx),
+                weight=w,
                 performance_descriptors=list(_DEFAULT_DESCRIPTORS),
                 evidence_policy="submission_sufficient",
-                disclosed_assumptions=list(tpl["assumptions"]),
+                disclosed_assumptions=assumptions,
                 dimension=c.get("dimension") or "content",
             )
         )
-    maximum = float(sum(c.max_points for c in criteria))
     body = {
         "criteria": [c.model_dump() for c in criteria],
         "maximum_score": maximum,
         "weighting_mode": "template",
-        "weighting_assumptions": list(tpl["assumptions"]),
+        "weighting_assumptions": assumptions,
         "origin": "approved_template",
         "assignment_context_hash": ctx_hash,
         "generation_protocol_version": POLICY_GENERATION_PROTOCOL_VERSION,
         "creation_config": {"template_id": template_id},
         "formative_only": False,
-        "disclosed_assumptions": list(tpl["assumptions"]),
+        "disclosed_assumptions": assumptions,
         "source_document_versions": [f"approved_template:{template_id}"],
     }
     policy = AssessmentPolicy(
@@ -289,13 +444,13 @@ def build_template_policy(
         criteria=criteria,
         maximum_score=maximum,
         weighting_mode="template",
-        weighting_assumptions=list(tpl["assumptions"]),
+        weighting_assumptions=assumptions,
         creation_model="approved_template",
         creation_config={"template_id": template_id},
         created_by=created_by,
         created_at=_now(),
         formative_only=False,
-        disclosed_assumptions=list(tpl["assumptions"]),
+        disclosed_assumptions=assumptions,
     )
     if validate_policy(policy):
         return None

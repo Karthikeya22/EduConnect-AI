@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+from html import unescape
 
 from grading_server.assessment_policy.validate import flag_unsupported_requirements
 
@@ -17,7 +18,7 @@ _POINTS = re.compile(
     re.I,
 )
 _YOU_WILL = re.compile(
-    r"(?:you will|students? (?:will|must|should)|your (?:task|paper|report) (?:must|should)|submit)\s+(.{20,220}?)(?:\.|$)",
+    r"(?:you will|students? (?:will|must|should)|your (?:task|paper|report|post|response) (?:must|should)|submit|prepare|create|develop)\s+(.{20,220}?)(?:\.|$)",
     re.I,
 )
 _INJECTION = re.compile(
@@ -25,6 +26,17 @@ _INJECTION = re.compile(
     r"you are now|disregard (the )?rubric)",
     re.I,
 )
+_INSTRUCTIONAL = re.compile(
+    r"\b(must|should|include|describe|explain|analyze|compare|discuss|evaluate|"
+    r"summarize|define|identify|outline|present|address|cover|demonstrate|"
+    r"respond|answer|write|prepare|create|develop|submit)\b",
+    re.I,
+)
+_TAG = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
+_BR = re.compile(r"(?i)<br\s*/?>")
+_BLOCK = re.compile(r"(?i)</(p|div|li|h[1-6]|tr|section|article)>")
+_LI = re.compile(r"(?is)<li[^>]*>(.*?)</li>")
+_ALL_TAGS = re.compile(r"(?s)<[^>]+>")
 
 
 @dataclass
@@ -43,6 +55,40 @@ def _rid(text: str, idx: int) -> str:
     return f"req_{h}"
 
 
+def assignment_text_to_plain(text: str) -> str:
+    """Normalize Canvas HTML assignment descriptions into plain instructional text.
+
+    Preserves newlines so bullet / numbered-list extractors still work.
+    """
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    if "<" not in raw:
+        # Keep line structure; only collapse horizontal whitespace.
+        t = unescape(raw)
+        t = re.sub(r"[ \t]+\n", "\n", t)
+        t = re.sub(r"[ \t]{2,}", " ", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()
+
+    t = _TAG.sub(" ", raw)
+
+    def _li_to_bullet(m: re.Match[str]) -> str:
+        inner = _ALL_TAGS.sub(" ", m.group(1))
+        inner = " ".join(unescape(inner).split()).strip()
+        return f"\n- {inner}\n" if inner else "\n"
+
+    t = _LI.sub(_li_to_bullet, t)
+    t = _BR.sub("\n", t)
+    t = _BLOCK.sub("\n", t)
+    t = _ALL_TAGS.sub(" ", t)
+    t = unescape(t)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return t.strip()
+
+
 def extract_requirements(
     assignment_name: str,
     assignment_description: str,
@@ -53,7 +99,10 @@ def extract_requirements(
     Strips prompt-injection attempts from becoming policy controls.
     """
     diagnostics: list[str] = []
-    desc = assignment_description or ""
+    raw_desc = assignment_description or ""
+    if raw_desc and "<" in raw_desc:
+        diagnostics.append("Assignment description HTML was normalized to plain text for requirement extraction.")
+    desc = assignment_text_to_plain(raw_desc)
     if _INJECTION.search(desc):
         diagnostics.append(
             "Assignment text contained prompt-injection phrases; those phrases were ignored for policy controls."
@@ -85,7 +134,7 @@ def extract_requirements(
             Requirement(
                 requirement_id=_rid(body, len(reqs)),
                 text=body,
-                excerpt=desc[start:end] if start < end else body,
+                excerpt=desc[start:end] if 0 <= start < end <= len(desc) else body,
                 start=start,
                 end=end,
                 explicit_points=pts,
@@ -103,12 +152,31 @@ def extract_requirements(
             add(o, 0, 0)
 
     # Title alone is never enough for scored policy.
-    if not reqs and assignment_name and len(desc.strip()) >= 80:
-        # Treat substantial prose paragraphs as soft requirements only when clearly instructional.
+    if not reqs and assignment_name and len(desc.strip()) >= 40:
+        # Treat substantial prose paragraphs / sentences as soft requirements when instructional.
+        chunks: list[str] = []
         for para in re.split(r"\n\s*\n", desc):
             p = " ".join(para.split()).strip()
-            if len(p) >= 40 and re.search(r"\b(must|should|include|describe|explain|analyze|compare)\b", p, re.I):
-                add(p, desc.find(para), desc.find(para) + len(para))
+            if p:
+                chunks.append(p)
+        if not chunks:
+            chunks = [desc]
+        for chunk in chunks:
+            if len(chunk) >= 40 and _INSTRUCTIONAL.search(chunk):
+                idx = desc.find(chunk[:40])
+                start = idx if idx >= 0 else 0
+                add(chunk[:240], start, start + min(len(chunk), 240))
+            else:
+                for sent in re.split(r"(?<=[.!?])\s+", chunk):
+                    s = " ".join(sent.split()).strip()
+                    if len(s) >= 40 and _INSTRUCTIONAL.search(s):
+                        idx = desc.find(s[:40])
+                        start = idx if idx >= 0 else 0
+                        add(s[:240], start, start + min(len(s), 240))
+
+    # Single instructional blob: keep one scored requirement when description is usable.
+    if not reqs and len(desc.strip()) >= 80 and _INSTRUCTIONAL.search(desc):
+        add(desc[:280], 0, min(len(desc), 280))
 
     return reqs, diagnostics
 
@@ -119,4 +187,15 @@ def context_is_sufficient(reqs: list[Requirement], assignment_description: str) 
     if len(reqs) == 1 and (reqs[0].explicit_points or len(reqs[0].text) >= 40):
         return True
     # Ambiguous / missing instructions
+    return False
+
+
+def prompt_context_usable(assignment_name: str, assignment_description: str) -> bool:
+    """True when there is enough prompt text to anchor a points-based fallback policy."""
+    name = (assignment_name or "").strip()
+    desc = assignment_text_to_plain(assignment_description or "")
+    if len(name) >= 8:
+        return True
+    if len(desc) >= 40:
+        return True
     return False
