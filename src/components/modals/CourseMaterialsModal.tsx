@@ -21,7 +21,12 @@ interface IndexedMaterial {
   chunk_count?: number;
 }
 
-const INGEST_EXTS = ['.pdf', '.docx', '.txt', '.pptx'];
+const INGEST_EXTS = [
+  '.pdf', '.docx', '.txt', '.pptx',
+  '.png', '.jpg', '.jpeg', '.webp', '.gif',
+  '.mp4', '.mov', '.m4v', '.webm', '.mkv',
+  '.mp3', '.wav', '.m4a', '.ogg',
+];
 
 function isIngestibleName(name: string): boolean {
   const n = (name || '').toLowerCase();
@@ -269,7 +274,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
                         ? 'hover:bg-zinc-50 dark:hover:bg-white/5 cursor-pointer'
                         : 'opacity-60 cursor-not-allowed'
                     }`}
-                    title={ingestible ? undefined : 'Not ingestible for RAG (use PDF, DOCX, TXT, or PPTX)'}
+                    title={ingestible ? undefined : 'Not a readable course material type'}
                   >
                     <input 
                       type="checkbox" 
@@ -311,7 +316,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
                 ref={fileInputRef}
                 type="file" 
                 multiple 
-                accept=".pdf,.docx,.txt,.pptx"
+                accept=".pdf,.docx,.txt,.pptx,.png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.webm,.mp3,.wav,.m4a"
                 onChange={handleLocalFileChange}
                 className="hidden"
               />
@@ -321,7 +326,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
                 </div>
                 <div className="text-left">
                   <span className="block text-sm font-medium text-zinc-700 dark:text-zinc-300">Choose files or drag here</span>
-                  <span className="block text-[10px] text-zinc-500">Supported formats: PDF, DOCX, TXT, PPTX</span>
+                  <span className="block text-[10px] text-zinc-500">Supported: PDF, DOCX, TXT, PPTX, images, audio/video</span>
                 </div>
               </div>
             </div>

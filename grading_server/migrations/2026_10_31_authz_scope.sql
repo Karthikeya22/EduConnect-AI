@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS app_private.settings (
 );
 REVOKE ALL ON app_private.settings FROM PUBLIC, anon, authenticated;
 GRANT SELECT ON app_private.settings TO authenticated;
+-- RLS with no policy hides every row, and can_manage_course() then denies every write.
+DROP POLICY IF EXISTS settings_read_authenticated ON app_private.settings;
+CREATE POLICY settings_read_authenticated ON app_private.settings
+    FOR SELECT TO authenticated USING (true);
 
 -- 1. Memberships ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.memberships (

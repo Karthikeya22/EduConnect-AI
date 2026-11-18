@@ -3467,22 +3467,49 @@ async def ingest_file():
         if not file_bytes:
             return jsonify({"error": "Uploaded file is empty"}), 400
 
+        llm_provider, llm_api_key = resolve_llm_credentials(request)
+        if not llm_provider or not llm_api_key:
+            return byok_required_response()
+
+        from grading_server.utils.media_extract import extract_media_for_grading, media_kind_from_filename
+
         # Determine file type and extract text
         if filename.endswith(".pdf"):
-            course_material_text = _extract_pdf(file_bytes)
+            course_material_text = _extract_pdf(file_bytes, api_key=llm_api_key, provider=llm_provider)
         elif filename.endswith(".docx"):
-            course_material_text = _extract_docx(file_bytes)
+            course_material_text = _extract_docx(file_bytes, api_key=llm_api_key, provider=llm_provider)
         elif filename.endswith(".pptx"):
             course_material_text = _extract_pptx(file_bytes)
         elif filename.endswith(".ppt"):
             course_material_text = "This is a legacy .ppt file; content could not be extracted for AI grading. Please review manually."
         elif filename.endswith(".txt"):
             course_material_text = file_bytes.decode("utf-8", errors="ignore")
-        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
+        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
             mime_type = "image/png"
-            if filename.endswith((".jpg", ".jpeg")): mime_type = "image/jpeg"
-            elif filename.endswith(".webp"): mime_type = "image/webp"
-            course_material_text = _extract_image(file_bytes, mime_type)
+            if filename.endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            elif filename.endswith(".webp"):
+                mime_type = "image/webp"
+            elif filename.endswith(".gif"):
+                mime_type = "image/gif"
+            course_material_text = _extract_image(
+                file_bytes,
+                mime_type,
+                api_key=llm_api_key,
+                provider=llm_provider,
+                purpose="course_material",
+                source_name=uploaded_file.filename or filename,
+            )
+        elif media_kind_from_filename(filename):
+            media = extract_media_for_grading(
+                file_bytes,
+                filename=uploaded_file.filename or filename,
+                provider=llm_provider,
+                api_key=llm_api_key,
+            )
+            if not media.get("ok"):
+                return jsonify({"error": media.get("text") or "Could not read this media file"}), 400
+            course_material_text = f"[COURSE MEDIA MATERIAL]\n{media['text']}"
         else:
             return jsonify({
                 "error": f"Unsupported file type: '{filename}'."
@@ -3490,10 +3517,6 @@ async def ingest_file():
 
         if not course_material_text.strip():
             return jsonify({"error": "Could not extract any text from the uploaded file"}), 400
-
-        llm_provider, llm_api_key = resolve_llm_credentials(request)
-        if not llm_provider or not llm_api_key:
-            return byok_required_response()
 
         result = await ingest_course_material(
             assignment_id=assignment_id,
@@ -4428,7 +4451,13 @@ async def ingest_canvas_url():
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
-        # Determine file type and extract text
+        if not llm_provider or not llm_api_key:
+            return byok_required_response()
+
+        display_name = data.get("filename") or filename
+        from grading_server.utils.media_extract import extract_media_for_grading, media_kind_from_filename
+
+        # Determine file type and extract text (documents + vision/media course materials)
         if filename.endswith(".pdf"):
             course_material_text = _parse_pdf(file_bytes)
         elif filename.endswith(".docx"):
@@ -4437,8 +4466,32 @@ async def ingest_canvas_url():
             course_material_text = _parse_pptx(file_bytes)
         elif filename.endswith(".txt"):
             course_material_text = file_bytes.decode("utf-8", errors="ignore")
-        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp")):
-            course_material_text = "[Image material submitted, skipping text extraction]"
+        elif filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            mime_type = "image/png"
+            if filename.endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            elif filename.endswith(".webp"):
+                mime_type = "image/webp"
+            elif filename.endswith(".gif"):
+                mime_type = "image/gif"
+            course_material_text = _extract_image(
+                file_bytes,
+                mime_type,
+                api_key=llm_api_key,
+                provider=llm_provider,
+                purpose="course_material",
+                source_name=display_name,
+            )
+        elif media_kind_from_filename(filename):
+            media = extract_media_for_grading(
+                file_bytes,
+                filename=display_name,
+                provider=llm_provider,
+                api_key=llm_api_key,
+            )
+            if not media.get("ok"):
+                return jsonify({"error": media.get("text") or "Could not read this media file"}), 400
+            course_material_text = f"[COURSE MEDIA MATERIAL]\n{media['text']}"
         else:
             return jsonify({"error": f"Unsupported file type: '{filename}'."}), 400
 
@@ -4447,15 +4500,12 @@ async def ingest_canvas_url():
 
         from grading_server.ingest_service import ingest_course_file, ingest_course_material
 
-        if not llm_provider or not llm_api_key:
-            return byok_required_response()
-
         if course_id and canvas_file_id:
             result = await ingest_course_file(
                 course_id=str(course_id),
                 canvas_file_id=str(canvas_file_id),
                 updated_at=str(updated_at),
-                filename=data.get("filename") or filename,
+                filename=display_name,
                 course_material_text=course_material_text,
                 assignment_id=assignment_id,
                 api_key=llm_api_key,
@@ -4468,7 +4518,7 @@ async def ingest_canvas_url():
             assignment_id=assignment_id,
             course_material_text=course_material_text,
             rubric_criteria=[],
-            source_name=filename,
+            source_name=display_name,
             api_key=llm_api_key,
             provider=llm_provider,
             course_id=str(course_id),
@@ -4550,26 +4600,33 @@ def _extract_image(
     mime_type: str,
     api_key: str | None = None,
     provider: str | None = None,
+    *,
+    purpose: str = "submission",
+    source_name: str = "",
 ) -> str:
     """Extract text/visual info from a standalone image using provider vision.
 
-    Unlike PDF embedded figures, a standalone image *is* the submission — empty
-    extraction must raise so the teacher sees a real vision error, not
-    "extracted empty text".
+    For student submissions, empty extraction must raise so the teacher sees a
+    real vision error. For course materials, the same vision path indexes the
+    image into the class corpus grading searches.
     """
     from grading_server.utils.llm_client import describe_image
 
     if not file_bytes or len(file_bytes) < 200:
         raise ValueError("image file is empty or too small")
     if not api_key or not provider:
-        raise ValueError("BYOK provider and api_key are required to read image submissions")
+        raise ValueError("BYOK provider and api_key are required to read image materials")
     try:
         desc = describe_image(file_bytes, mime_type, provider=provider, api_key=api_key)
     except Exception as e:
         raise ValueError(f"vision describe failed: {e}") from e
     if not (desc or "").strip():
         raise ValueError("vision model returned empty description for image")
-    return f"[FIGURE / VISUAL - treat as present in the submission]\n{desc.strip()}"
+    body = desc.strip()
+    if purpose == "course_material":
+        label = source_name or "course image"
+        return f"[COURSE IMAGE MATERIAL]\nSource file: {label}\n\n{body}"
+    return f"[FIGURE / VISUAL - treat as present in the submission]\n{body}"
 
 
 def _extract_ipynb(file_bytes: bytes) -> str:

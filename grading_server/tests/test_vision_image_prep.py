@@ -71,6 +71,21 @@ def test_extract_image_wraps_successful_description():
     assert "AI in Education timeline" in out
 
 
+def test_extract_image_course_material_label():
+    with patch.object(llm_client, "describe_image", return_value="lecture slide about feedback loops"):
+        out = app_mod._extract_image(
+            b"x" * 500,
+            "image/jpeg",
+            api_key="k",
+            provider="openai",
+            purpose="course_material",
+            source_name="AI_Cartoon.jpg",
+        )
+    assert out.startswith("[COURSE IMAGE MATERIAL]")
+    assert "AI_Cartoon.jpg" in out
+    assert "feedback loops" in out
+
+
 def test_describe_image_retries_smaller_on_timeout():
     raw = _big_png(1600)
     calls: list[int] = []

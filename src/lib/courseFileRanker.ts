@@ -34,9 +34,17 @@ function scoreFile(f: CanvasCourseFile, titleTokens: string[]): number {
   return score;
 }
 
+const INGESTIBLE_EXTS = [
+  '.pdf', '.docx', '.txt', '.pptx',
+  '.png', '.jpg', '.jpeg', '.webp', '.gif',
+  '.mp4', '.mov', '.m4v', '.webm', '.mkv',
+  '.mp3', '.wav', '.m4a', '.ogg',
+];
+
+/** Course Files the grader can read: documents, images (vision), and media. */
 export function isDocCourseFile(f: CanvasCourseFile): boolean {
   const n = (f.display_name || '').toLowerCase();
-  return n.endsWith('.pdf') || n.endsWith('.docx') || n.endsWith('.txt') || n.endsWith('.pptx');
+  return INGESTIBLE_EXTS.some((ext) => n.endsWith(ext));
 }
 
 export type CourseFileStatusRow = {

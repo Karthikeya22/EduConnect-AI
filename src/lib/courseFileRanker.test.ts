@@ -1,4 +1,4 @@
-import { selectPhaseFiles, selectFilesNeedingIngest, CanvasCourseFile } from './courseFileRanker';
+import { selectPhaseFiles, selectFilesNeedingIngest, isDocCourseFile, CanvasCourseFile } from './courseFileRanker';
 
 const files: CanvasCourseFile[] = [
   { id: 1, display_name: 'unrelated_notes.pdf', updated_at: '2026-01-01T00:00:00Z' },
@@ -24,8 +24,11 @@ const needing = selectFilesNeedingIngest(
     { canvas_file_id: '3', status: 'ready', updated_at: '2025-12-01T00:00:00Z' }, // stale -> re-ingest
   ]
 ).map(f => String(f.id)).sort();
-const expectedNeeding = ['2', '3', '4', '5', '6', '7'];
+const expectedNeeding = ['2', '3', '4', '5', '6', '7', '8'];
 if (JSON.stringify(needing) !== JSON.stringify(expectedNeeding)) {
   throw new Error(`selectFilesNeedingIngest: expected ${expectedNeeding}, got ${needing}`);
+}
+if (!isDocCourseFile({ id: 9, display_name: 'slide.png' })) {
+  throw new Error('expected PNG course images to be ingestible');
 }
 console.log('courseFileRanker.test.ts PASS');
