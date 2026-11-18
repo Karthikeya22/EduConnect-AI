@@ -155,10 +155,11 @@ def test_request_lms_host_prefers_valid_request_host_and_falls_back_to_configure
 
 def test_forged_role_tenant_and_byok_do_not_grant_access():
     tok = token(user_metadata={"role": "admin"}, app_metadata={"role": "teacher", "courses": ["11"]})
-    r, _, _ = status_call(tok, rows=[], headers={
-        "X-Tenant-Id": "11", "X-Org-Id": "usf", "X-LLM-Provider": "openai", "X-LLM-Api-Key": "sk",
-        "X-Canvas-Token": "ct",
-    })
+    with patch.object(authz, "canvas_staff_role_for_course", return_value=None):
+        r, _, _ = status_call(tok, rows=[], headers={
+            "X-Tenant-Id": "11", "X-Org-Id": "usf", "X-LLM-Provider": "openai", "X-LLM-Api-Key": "sk",
+            "X-Canvas-Token": "ct",
+        })
     assert code(r) == (403, "COURSE_ACCESS_DENIED")
 
 
@@ -203,6 +204,28 @@ def test_authorized_request_binds_user_scoped_client():
     assert bound is client
     with pytest.raises(RuntimeError):
         supabase_client.get_supabase()  # nothing leaks outside the request
+
+
+def test_missing_membership_denied_without_canvas_token():
+    r, _, _ = status_call(token(), rows=[])
+    assert code(r) == (403, "COURSE_ACCESS_DENIED")
+
+
+def test_canvas_staff_token_allows_without_membership_row():
+    with patch.object(authz, "canvas_staff_role_for_course", return_value="teacher") as staff, \
+            patch.object(authz, "_best_effort_upsert_membership") as upsert:
+        r, _, _ = status_call(token(), rows=[], headers={"X-Canvas-Token": "shared-teacher-key"})
+    assert r.status_code == 200
+    staff.assert_called_once()
+    assert staff.call_args.args[0] == "11"
+    assert staff.call_args.args[1] == "shared-teacher-key"
+    upsert.assert_called_once()
+
+
+def test_canvas_student_token_denied_without_membership_row():
+    with patch.object(authz, "canvas_staff_role_for_course", return_value=None):
+        r, _, _ = status_call(token(), rows=[], headers={"X-Canvas-Token": "student-key"})
+    assert code(r) == (403, "COURSE_ACCESS_DENIED")
 
 
 # ── assignment ↔ course ─────────────────────────────────────────────────────

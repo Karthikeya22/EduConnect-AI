@@ -2,9 +2,8 @@ import { gradingApiBase } from './llmProviders';
 
 /**
  * Headers for every grading-server call: the Supabase session token (identity,
- * verified server-side) and the teacher's Canvas token (used by the server only
- * against the configured Canvas host). Access itself comes from server-side
- * course memberships, never from anything sent here.
+ * verified server-side) and the Canvas token (verified against Canvas for
+ * teacher/TA on the course when no membership row exists yet).
  */
 export async function gradingAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {};
@@ -49,7 +48,7 @@ const AUTH_MESSAGES: Record<string, string> = {
   AUTH_REQUIRED: 'Sign in again to use AI grading. Demo/mock instructor login is not accepted by the grading server.',
   INVALID_TOKEN: 'Your session is invalid. Sign in again.',
   TOKEN_EXPIRED: 'Your session expired. Sign in again.',
-  COURSE_ACCESS_DENIED: 'You are not registered as a teacher or TA of this course in EduConnect. Ask the project owner to add your membership.',
+  COURSE_ACCESS_DENIED: 'Canvas did not confirm teacher/TA access for this course with the API key you entered. Use an instructor or TA Canvas key for this course.',
   ASSIGNMENT_NOT_IN_COURSE: 'This assignment does not belong to the selected course.',
   ASSIGNMENT_SCOPE_UNVERIFIED: 'Connect your Canvas token so the assignment can be verified.',
   COURSE_REQUIRED: 'Select a course first.',

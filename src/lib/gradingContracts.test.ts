@@ -65,7 +65,7 @@ for (const code of ['AUTH_REQUIRED', 'INVALID_TOKEN', 'TOKEN_EXPIRED', 'COURSE_A
 assert(authErrorMessage({ error: 'BYOK_REQUIRED' }) === null, 'BYOK stays a separate, non-auth error');
 assert(authErrorMessage({ error: 'RUBRIC_STORE_UNAVAILABLE' }) === null, 'infra errors are not auth errors');
 assert(authErrorMessage(null) === null && authErrorMessage('x') === null, 'garbage bodies');
-assert(/not registered as a teacher or TA/.test(authErrorMessage({ error: 'COURSE_ACCESS_DENIED' })!), 'membership denial wording');
+assert(/Canvas did not confirm teacher\/TA access/.test(authErrorMessage({ error: 'COURSE_ACCESS_DENIED' })!), 'membership denial wording');
 
 store.set('active_canvas_course', JSON.stringify({ id: 11 }));
 assert(activeCourseId() === '11', 'active course id');

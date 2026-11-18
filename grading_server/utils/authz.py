@@ -5,11 +5,13 @@ Server-side authorization for grading-server routes.
 Identity: the Supabase access token (Authorization: Bearer) verified against the
 project JWKS (asymmetric keys) or, for legacy projects, SUPABASE_JWT_SECRET.
 Access: a non-revoked teacher/TA row in public.memberships for the configured
-LMS host and course, read with the caller's own JWT under RLS. An assignment is
+LMS host and course, read with the caller's own JWT under RLS. If that row is
+missing, a Canvas API token that Canvas confirms is teacher/TA on the course
+is accepted (trusted helpers sharing an instructor key). An assignment is
 accepted only after the configured Canvas host confirms it belongs to that course.
 
 Never used for authorization: user_metadata/app roles in the token, tenant or
-org headers, BYOK LLM headers, Canvas token presence, CORS origin.
+org headers, BYOK LLM headers, Canvas token presence alone, CORS origin.
 """
 
 from __future__ import annotations
@@ -167,6 +169,68 @@ def request_lms_host(params: dict | None = None) -> str:
     return trusted_lms_host()
 
 
+def canvas_staff_role_for_course(course_id: str, canvas_token: str, host: str | None = None) -> str | None:
+    """Return 'teacher'/'ta' if Canvas says this token is staff on the course; else None."""
+    host = (host or request_lms_host() or "").lower()
+    if not host or not canvas_token or not _CANVAS_ID.match(str(course_id)):
+        return None
+    url = f"https://{host}/api/v1/courses/{course_id}?include[]=enrollments"
+    headers = {"Authorization": f"Bearer {canvas_token}", "User-Agent": "EduConnect-AI/1.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=False)
+    except requests.RequestException as e:
+        raise AuthError("AUTH_UNAVAILABLE", 503, "Canvas could not be reached to verify course access.") from e
+    if response.status_code in (401, 403):
+        return None
+    if response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        raise AuthError(
+            "AUTH_UNAVAILABLE", 503,
+            f"Canvas returned {response.status_code} while verifying course access.",
+        )
+    try:
+        payload = response.json()
+    except ValueError as e:
+        raise AuthError("AUTH_UNAVAILABLE", 503, "Canvas returned an invalid course access response.") from e
+    enrollments = payload.get("enrollments") if isinstance(payload, dict) else None
+    if not isinstance(enrollments, list):
+        return None
+    found: set[str] = set()
+    for enrollment in enrollments:
+        if not isinstance(enrollment, dict):
+            continue
+        raw = str(enrollment.get("type") or "").strip().lower()
+        if raw in STAFF_ROLES:
+            found.add(raw)
+        elif raw == "teacherenrollment":
+            found.add("teacher")
+        elif raw == "taenrollment":
+            found.add("ta")
+    if "teacher" in found:
+        return "teacher"
+    if "ta" in found:
+        return "ta"
+    return None
+
+
+def _best_effort_upsert_membership(user_id: str, host: str, course_id: str, role: str) -> None:
+    """Cache Canvas-confirmed staff access into memberships; never block the request on failure."""
+    try:
+        from grading_server.utils.supabase_client import service_role_client
+
+        service_role_client().rpc(
+            "upsert_my_canvas_memberships",
+            {
+                "p_user_id": user_id,
+                "p_lms_host": host,
+                "p_rows": [{"course_id": str(course_id), "role": role}],
+            },
+        ).execute()
+    except Exception:
+        return
+
+
 def require_course_role(client, principal: Principal, course_id: str, roles=STAFF_ROLES) -> dict:
     """Return the caller's active membership row or raise. Read under RLS with the caller's JWT."""
     host = request_lms_host()
@@ -201,7 +265,21 @@ def require_course_role(client, principal: Principal, course_id: str, roles=STAF
             and row.get("role") in roles
         ):
             return row
-    raise AuthError("COURSE_ACCESS_DENIED", 403, "You are not an active teacher or TA of this course.")
+
+    canvas_token = _canvas_token(_request_params())
+    if not canvas_token:
+        raise AuthError("COURSE_ACCESS_DENIED", 403, "You are not an active teacher or TA of this course.")
+    role = canvas_staff_role_for_course(course_id, canvas_token, host)
+    if role not in roles:
+        raise AuthError("COURSE_ACCESS_DENIED", 403, "You are not an active teacher or TA of this course.")
+    _best_effort_upsert_membership(principal.user_id, host, course_id, role)
+    return {
+        "user_id": principal.user_id,
+        "course_id": str(course_id),
+        "lms_host": host,
+        "role": role,
+        "revoked_at": None,
+    }
 
 
 _assignment_cache: dict[tuple[str, str, str], float] = {}
