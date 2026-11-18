@@ -111,6 +111,11 @@ assert(
   `formative label: ${formative.label}`,
 );
 assert(formatVerdictScore({ score: null, max_score: 6 }) === 'Not assessed: processing failed', 'verdict null');
+assert(
+  formatVerdictScore({ score: null, max_score: 0, status: 'not_assessable', failure_kind: null }) ===
+    'Formative observation (not scored)',
+  'formative not scored',
+);
 assert(formatVerdictScore({ score: 0, max_score: 6 }) === '0/6', 'verdict zero');
 
 // cache round-trip keeps null (JSON), and labels never coerce it

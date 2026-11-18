@@ -214,8 +214,15 @@ def canvas_staff_role_for_course(course_id: str, canvas_token: str, host: str | 
     return None
 
 
-def _best_effort_upsert_membership(user_id: str, host: str, course_id: str, role: str) -> None:
-    """Cache Canvas-confirmed staff access into memberships; never block the request on failure."""
+def _ensure_membership_for_rls(user_id: str, course_id: str, role: str) -> str:
+    """Persist Canvas-confirmed staff access so Postgres RLS can_manage_course() passes.
+
+    RLS matches memberships.lms_host to app_private.settings.lms_host, which must
+    equal the configured Canvas host — not a free-form request host.
+    """
+    host = trusted_lms_host()
+    if not host:
+        raise AuthError("AUTH_NOT_CONFIGURED", 503, "CANVAS_BASE_URL is not configured.")
     try:
         from grading_server.utils.supabase_client import service_role_client
 
@@ -227,21 +234,32 @@ def _best_effort_upsert_membership(user_id: str, host: str, course_id: str, role
                 "p_rows": [{"course_id": str(course_id), "role": role}],
             },
         ).execute()
-    except Exception:
-        return
+    except AuthError:
+        raise
+    except Exception as e:
+        print(f"[AUTHZ] membership upsert failed: {type(e).__name__}: {e}")
+        raise AuthError(
+            "AUTH_UNAVAILABLE",
+            503,
+            "Canvas staff access was verified, but course membership could not be saved for database writes. "
+            "Check SUPABASE_SERVICE_ROLE_KEY on the grading server.",
+        ) from e
+    return host
 
 
 def require_course_role(client, principal: Principal, course_id: str, roles=STAFF_ROLES) -> dict:
     """Return the caller's active membership row or raise. Read under RLS with the caller's JWT."""
-    host = request_lms_host()
-    if not host:
+    # RLS host is the configured Canvas host; request host is only for Canvas API calls.
+    rls_host = trusted_lms_host()
+    request_host = request_lms_host() or rls_host
+    if not rls_host:
         raise AuthError("AUTH_NOT_CONFIGURED", 503, "CANVAS_BASE_URL is not configured.")
     try:
         rows = (
             client.table("memberships")
             .select("user_id,course_id,lms_host,role,revoked_at")
             .eq("user_id", principal.user_id)
-            .eq("lms_host", host)
+            .eq("lms_host", rls_host)
             .eq("course_id", course_id)
             .is_("revoked_at", "null")
             .execute()
@@ -260,7 +278,7 @@ def require_course_role(client, principal: Principal, course_id: str, roles=STAF
         if (
             str(row.get("user_id")) == principal.user_id
             and str(row.get("course_id")) == course_id
-            and row.get("lms_host") == host
+            and row.get("lms_host") == rls_host
             and row.get("revoked_at") is None
             and row.get("role") in roles
         ):
@@ -269,10 +287,10 @@ def require_course_role(client, principal: Principal, course_id: str, roles=STAF
     canvas_token = _canvas_token(_request_params())
     if not canvas_token:
         raise AuthError("COURSE_ACCESS_DENIED", 403, "You are not an active teacher or TA of this course.")
-    role = canvas_staff_role_for_course(course_id, canvas_token, host)
+    role = canvas_staff_role_for_course(course_id, canvas_token, request_host)
     if role not in roles:
         raise AuthError("COURSE_ACCESS_DENIED", 403, "You are not an active teacher or TA of this course.")
-    _best_effort_upsert_membership(principal.user_id, host, course_id, role)
+    host = _ensure_membership_for_rls(principal.user_id, course_id, role)
     return {
         "user_id": principal.user_id,
         "course_id": str(course_id),

@@ -197,14 +197,29 @@ def resolve_assessment_policy(
     )
 
 
+def _plain_submission_excerpt(submission_text: str, limit: int = 180) -> str:
+    """Strip Canvas HTML chrome so formative evidence shows student prose."""
+    import re
+
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", submission_text or "")
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<link\b[^>]*>", " ", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "not found"
+    return (text[:limit] + "…") if len(text) > limit else text
+
+
 def formative_observation_verdicts(submission_text: str, policy: AssessmentPolicy) -> list[dict[str, Any]]:
     """Bounded formative observations — never an authoritative total."""
-    text = (submission_text or "").strip()
+    text = _plain_submission_excerpt(submission_text, limit=10_000)
     length = len(text)
     has_structure = any(
         h in text.lower()
         for h in ("introduction", "method", "conclusion", "discussion", "result")
     )
+    excerpt = _plain_submission_excerpt(text, limit=180)
     return [
         {
             "criterion_id": "formative_presence",
@@ -219,7 +234,7 @@ def formative_observation_verdicts(submission_text: str, policy: AssessmentPolic
                 "No official score: assignment expectations were insufficient to form a scoring policy. "
                 f"Policy diagnostic: {policy.diagnostic or 'n/a'}"
             ),
-            "evidence_anchor": (text[:180] + "…") if length > 180 else (text or "not found"),
+            "evidence_anchor": excerpt,
             "missing_keywords": [],
             "supporting_materials": [],
             "covered_concepts": [],

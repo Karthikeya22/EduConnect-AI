@@ -13,7 +13,7 @@ import uuid
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from grading_server.utils.authz import trusted_lms_host
-from grading_server.utils.supabase_client import get_supabase
+from grading_server.utils.supabase_client import get_supabase, service_role_client
 from grading_server.utils.llm_client import embed_texts as llm_embed_texts
 from grading_server.utils.llm_registry import get_provider
 from grading_server.utils.embedding_space import (
@@ -22,6 +22,11 @@ from grading_server.utils.embedding_space import (
     EmbeddingSpace,
     space_for_provider,
 )
+
+
+def _is_rls_denied(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "42501" in text or "row-level security" in text
 
 
 # Changing chunk_size/overlap requires bumping embedding_space.INDEX_VERSION.
@@ -463,14 +468,24 @@ async def lookup_course_file(course_id: str, canvas_file_id: str) -> dict | None
 
 
 async def _upsert_registry(row: dict) -> None:
-    sb = get_supabase()
+    """Write registry under the caller's JWT; if RLS blocks, retry with service role.
 
-    def _up():
-        sb.table("course_file_ingest").upsert(
+    Flask already authorized the caller as course staff. Trusted helpers may not
+    have a memberships row yet when the JWT-scoped write runs.
+    """
+
+    def _up(client):
+        client.table("course_file_ingest").upsert(
             row, on_conflict="course_id,canvas_file_id"
         ).execute()
 
-    await asyncio.to_thread(_up)
+    try:
+        await asyncio.to_thread(_up, get_supabase())
+    except Exception as e:
+        if not _is_rls_denied(e):
+            raise
+        print(f"[course_cache] registry RLS denied; retrying with service role: {e}")
+        await asyncio.to_thread(_up, service_role_client())
 
 
 async def ingest_course_file(

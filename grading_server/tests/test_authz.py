@@ -213,13 +213,23 @@ def test_missing_membership_denied_without_canvas_token():
 
 def test_canvas_staff_token_allows_without_membership_row():
     with patch.object(authz, "canvas_staff_role_for_course", return_value="teacher") as staff, \
-            patch.object(authz, "_best_effort_upsert_membership") as upsert:
+            patch.object(authz, "_ensure_membership_for_rls", return_value=HOST) as upsert:
         r, _, _ = status_call(token(), rows=[], headers={"X-Canvas-Token": "shared-teacher-key"})
     assert r.status_code == 200
     staff.assert_called_once()
     assert staff.call_args.args[0] == "11"
     assert staff.call_args.args[1] == "shared-teacher-key"
-    upsert.assert_called_once()
+    upsert.assert_called_once_with(USER, "11", "teacher")
+
+
+def test_canvas_staff_membership_upsert_failure_is_503():
+    with patch.object(authz, "canvas_staff_role_for_course", return_value="teacher"), \
+            patch.object(
+                authz, "_ensure_membership_for_rls",
+                side_effect=authz.AuthError("AUTH_UNAVAILABLE", 503, "membership save failed"),
+            ):
+        r, _, _ = status_call(token(), rows=[], headers={"X-Canvas-Token": "shared-teacher-key"})
+    assert code(r) == (503, "AUTH_UNAVAILABLE")
 
 
 def test_canvas_student_token_denied_without_membership_row():

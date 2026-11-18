@@ -121,7 +121,11 @@ export function summarizeGrade(g: Partial<GradingOutput> | null | undefined): Gr
   };
 }
 
-export function formatVerdictScore(v: Pick<CriterionVerdict, 'score' | 'max_score' | 'failure_kind'>): string {
+export function formatVerdictScore(
+  v: Pick<CriterionVerdict, 'score' | 'max_score' | 'failure_kind' | 'status'>,
+): string {
   if (isScore(v.score)) return `${v.score}/${v.max_score}`;
-  return v.failure_kind === 'reference_unavailable' ? 'Not assessed: reference unavailable' : 'Not assessed: processing failed';
+  if (v.failure_kind === 'reference_unavailable') return 'Not assessed: reference unavailable';
+  if (v.status === 'not_assessable' && !v.failure_kind) return 'Formative observation (not scored)';
+  return 'Not assessed: processing failed';
 }
