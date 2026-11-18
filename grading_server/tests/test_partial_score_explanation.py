@@ -63,6 +63,37 @@ def test_score_guard_fills_withheld_when_partial_and_empty():
     assert str(v.get("points_withheld_because") or "").strip()
 
 
+def test_missing_anchor_cap_does_not_keep_glowing_credit_copy():
+    """Score may be capped, but faculty copy must not praise as complete/meets-requirements."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 5,
+            "status": "full",
+            "evidence_anchor": "not found",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": (
+                "The submission provides a comprehensive overview of LLMs and meets the assignment's requirements."
+            ),
+            "credit_awarded_for": (
+                "The submission provides a comprehensive overview of Large Language Models and meets requirements."
+            ),
+            "points_withheld_because": "",
+        },
+        5,
+    )
+    assert v["score"] <= 2  # ≤25% of 5
+    credit = str(v.get("credit_awarded_for") or "").lower()
+    just = str(v.get("justification") or "").lower()
+    withheld = str(v.get("points_withheld_because") or "").lower()
+    assert "comprehensive" not in credit and "meets" not in credit
+    assert "comprehensive" not in just or "limited credit" in just
+    assert "evidence_anchor" not in withheld
+    assert "verifiable" in withheld or "quote" in withheld
+
+
 def test_grade_prompt_requires_faculty_explanation_fields():
     from grading_server import app as app_mod
     import inspect
@@ -71,3 +102,4 @@ def test_grade_prompt_requires_faculty_explanation_fields():
     assert "credit_awarded_for" in src
     assert "points_withheld_because" in src
     assert "FACULTY EXPLANATION" in src
+    assert "do NOT change scoring standards" in src

@@ -237,6 +237,21 @@ export function buildDeductionExplanation(
   const score = isScore(v.score) ? v.score : null;
   const belowMax = score != null && max > 0 && score < max;
 
+  // Translate leftover internal guard jargon on legacy drafts.
+  if (
+    withheld &&
+    (withheld.includes('evidence_anchor') || withheld.includes('Score capped:'))
+  ) {
+    withheld = withheld
+      .replace(
+        /Score capped:\s*no verifiable student evidence_anchor\.?/gi,
+        'No verifiable quote from the student submission was linked to this criterion, so credit was limited.',
+      )
+      .replace(/Score capped:/gi, 'Credit limited:')
+      .replace(/evidence_anchor/gi, 'evidence quote')
+      .trim();
+  }
+
   if (belowMax && !withheld) {
     const covered = new Set(
       (v.covered_concepts || []).map((c) => String(c).trim().toLowerCase()).filter(Boolean),

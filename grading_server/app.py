@@ -1254,6 +1254,121 @@ def _normalize_rubric(criteria: list | None) -> list[dict]:
     return out
 
 
+def _faculty_friendly_guard_note(note: str) -> str:
+    """Translate internal guard jargon into lecturer-facing language."""
+    n = (note or "").strip()
+    if not n:
+        return ""
+    mapping = {
+        "Score capped: no verifiable student evidence_anchor.": (
+            "No verifiable quote from the student submission was linked to this criterion, so credit was limited."
+        ),
+        "Score capped: content for this criterion is misplaced / outside the expected section.": (
+            "Relevant content appears outside the expected section, so credit was limited."
+        ),
+        "Score capped: student claims contradict retrieved course materials.": (
+            "Parts of the response conflict with course materials, so credit was limited."
+        ),
+        "Partial status cannot receive full points.": (
+            "Marked partial, so full points were not awarded."
+        ),
+        "Score capped: reused evidence_anchor already credited on another criterion.": (
+            "The same evidence quote was already credited on another criterion, so credit was limited here."
+        ),
+    }
+    if n in mapping:
+        return mapping[n]
+    if n.startswith("Score capped:"):
+        return n.replace("Score capped:", "Credit limited:", 1).replace("evidence_anchor", "evidence quote")
+    if n.startswith("Score adjusted for concept match rate"):
+        return n.replace("Score adjusted for concept match rate", "Score adjusted for concept coverage")
+    return n
+
+
+def _text_claims_full_or_glowing(text: str) -> bool:
+    t = (text or "").lower()
+    cues = (
+        "comprehensive",
+        "meets the assignment",
+        "meets requirements",
+        "full credit",
+        "fully meets",
+        "excellent overview",
+        "well-organized and meets",
+        "all requirements",
+        "complete and accurate",
+    )
+    return any(c in t for c in cues)
+
+
+def _reconcile_verdict_explanation(
+    v: dict,
+    *,
+    score: float,
+    max_score: float,
+    anchor_missing: bool,
+    teacher_notes: list[str],
+) -> dict:
+    """Keep faculty-facing copy consistent with the final numeric score (do not change the score)."""
+    friendly_notes = [
+        _faculty_friendly_guard_note(n) for n in (teacher_notes or []) if str(n).strip()
+    ]
+    credit = str(v.get("credit_awarded_for") or "").strip()
+    withheld = str(v.get("points_withheld_because") or "").strip()
+    just = str(v.get("justification") or "").strip()
+
+    # Strip internal jargon from withheld / justification if present.
+    for raw, friendly in (
+        (
+            "Score capped: no verifiable student evidence_anchor.",
+            _faculty_friendly_guard_note("Score capped: no verifiable student evidence_anchor."),
+        ),
+    ):
+        if raw in withheld:
+            withheld = withheld.replace(raw, friendly).strip()
+        if raw in just:
+            just = just.replace(raw, friendly).strip()
+
+    for note in friendly_notes:
+        if note and note not in withheld and score < max_score:
+            withheld = (withheld + (" " if withheld else "") + note).strip()
+
+    inconsistent = score < max_score and (
+        _text_claims_full_or_glowing(credit)
+        or _text_claims_full_or_glowing(just)
+        or (anchor_missing and _text_claims_full_or_glowing(credit + " " + just))
+    )
+
+    if inconsistent:
+        if anchor_missing:
+            credit = (
+                f"Limited credit ({score:g}/{max_score:g}): topical discussion may be present, "
+                "but no verifiable student quote was linked as evidence for this criterion."
+            )
+            withheld = withheld or (
+                "Without a verifiable evidence quote, full marks cannot be justified for this criterion."
+            )
+        else:
+            credit = (
+                f"Partial credit ({score:g}/{max_score:g}) for relevant content that was demonstrated."
+            )
+            withheld = withheld or (
+                f"Awarded {score:g}/{max_score:g}. Full rubric expectations were not fully met."
+            )
+        # Rebuild justification so praise and score cannot contradict.
+        just = f"{credit} {withheld}".strip()
+
+    if score >= max_score:
+        withheld = ""
+    elif score < max_score and not withheld:
+        withheld = f"Awarded {score:g}/{max_score:g} (partial). Full rubric expectations were not fully met."
+
+    v["credit_awarded_for"] = credit
+    v["points_withheld_because"] = withheld
+    v["justification"] = just
+    return v
+
+
 def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     """Enforce status/score sync, evidence/placement/material/concept caps."""
     # Wrong-deliverable zeros must survive post-verify / narrative restores.
@@ -1288,8 +1403,6 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
         anchor = "not found"
     anchor_missing = anchor.lower() in ("", "not found", "n/a", "none")
     notes: list[str] = []
-    _guard_raw = raw_score
-    _guard_cid = str(v.get("criterion_id") or "")
 
     integrity_crit = _is_academic_integrity_criterion(
         str(v.get("criterion_name") or v.get("title") or ""),
@@ -1492,53 +1605,18 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
             elif max_score > 0 and not anchor_missing:
                 score = max_score  # preserve the only available credit point when evidenced
 
-    if teacher_notes:
-        just = (v.get("justification") or "").strip()
-        appended = " ".join(teacher_notes)
-        if appended not in just:
-            v["justification"] = (just + "\n\n" + appended).strip()
-        # Keep structured withheld field aligned with post-guard score.
-        withheld = str(v.get("points_withheld_because") or "").strip()
-        for note in teacher_notes:
-            if note and note not in withheld:
-                withheld = (withheld + (" " if withheld else "") + note).strip()
-        if score < max_score:
-            v["points_withheld_because"] = withheld or (
-                f"Awarded {score}/{max_score} after scoring guards."
-            )
-        elif score >= max_score:
-            v["points_withheld_because"] = ""
-
     v["score"] = score
     v["status"] = status
     v["evidence_anchor"] = "not found" if anchor_missing else anchor
     v["max_score"] = max_score
-    if score < max_score and not str(v.get("points_withheld_because") or "").strip():
-        v["points_withheld_because"] = (
-            f"Awarded {score}/{max_score} (partial). Full rubric expectations were not fully met."
-        )
-    # #region agent log
-    if score != _guard_raw or anchor_missing:
-        try:
-            import json as _json, time as _time
-            from pathlib import Path as _Path
-            _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log").open("a", encoding="utf-8").write(_json.dumps({
-                "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "B",
-                "location": "app.py:_apply_verdict_score_guards",
-                "message": "guard changed or missing anchor",
-                "data": {
-                    "cid": _guard_cid,
-                    "raw": _guard_raw,
-                    "final": score,
-                    "status": status,
-                    "anchor_missing": anchor_missing,
-                    "notes": teacher_notes[:4],
-                },
-                "timestamp": int(_time.time() * 1000),
-            }) + "\n")
-        except Exception:
-            pass
-    # #endregion
+    # Explain the final score to faculty — do not invent a different grade narrative.
+    _reconcile_verdict_explanation(
+        v,
+        score=score,
+        max_score=max_score,
+        anchor_missing=anchor_missing,
+        teacher_notes=teacher_notes,
+    )
     return v
 
 
@@ -2036,16 +2114,13 @@ async def _gp(
         f"correctly placed when a section is expected, follows assignment instructions, "
         f"meets genre-appropriate method standards, and has a criterion-relevant student quote.\n"
         f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
-        f"=== FACULTY EXPLANATION (required) ===\n"
-        f"- credit_awarded_for: 1–3 sentences on what in the submission earned the awarded points "
-        f"(cite concrete student content; consider the whole document, not only one sentence).\n"
-        f"- points_withheld_because: REQUIRED whenever score < {max_score}. State exactly why full marks "
-        f"were not given vs the rubric description (what was missing, thin, misplaced, or under-justified). "
-        f"If the student addressed the topic elsewhere in the document, acknowledge that and explain why it "
-        f"still falls short of full credit. Do NOT invent missing content.\n"
-        f"- justification: combined faculty paragraph that a teacher can show parents/students; must include "
-        f"both credit and deduction when score is partial.\n"
-        f"- When score == {max_score}, points_withheld_because may be empty.\n\n"
+        f"=== FACULTY EXPLANATION (explain the score — do NOT change scoring standards) ===\n"
+        f"- First decide score/status using the scoring philosophy and bands above. Then explain that decision.\n"
+        f"- credit_awarded_for: brief note on what earned the points you awarded (must match the score).\n"
+        f"- points_withheld_because: when score < {max_score}, briefly why full marks were not given "
+        f"(must match the score; do not praise as complete/meets-requirements if you scored partial).\n"
+        f"- justification: one coherent faculty paragraph consistent with the numeric score.\n"
+        f"- Never invent missing content. Never write full-credit praise for a partial/missing score.\n\n"
     )
 
     genre_block = _genre_grading_guide(
