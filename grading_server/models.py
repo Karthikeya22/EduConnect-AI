@@ -44,6 +44,14 @@ class CriterionVerdict(BaseModel):
         ...,
         description="Must cite specific parts of the submission and rubric.",
     )
+    credit_awarded_for: str = Field(
+        default="",
+        description="Faculty-facing: what in the submission earned the awarded points.",
+    )
+    points_withheld_because: str = Field(
+        default="",
+        description="Faculty-facing: why full marks were not given when score < max_score.",
+    )
     missing_keywords: list[str] = Field(
         default_factory=list,
         description="Concept keywords expected but absent from submission_concepts.",

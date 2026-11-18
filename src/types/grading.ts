@@ -129,6 +129,10 @@ export interface CriterionVerdict {
   supporting_materials: string[];
   covered_concepts?: string[];
   required_concepts?: string[];
+  /** What earned the awarded points (faculty-facing). */
+  credit_awarded_for?: string | null;
+  /** Why full marks were not given when score < max (faculty-facing). */
+  points_withheld_because?: string | null;
   criterion_id?: string; // Keep for backward compatibility internally if needed
   ai_generated?: boolean;
   ungrounded_full?: boolean;

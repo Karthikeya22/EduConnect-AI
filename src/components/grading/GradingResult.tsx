@@ -6,7 +6,12 @@ import {
   CriterionClaim,
   SourceUnit,
 } from '../../types/grading';
-import { formatVerdictScore, isScore, summarizeGrade } from '../../lib/gradeDisplay';
+import {
+  buildDeductionExplanation,
+  formatVerdictScore,
+  isScore,
+  summarizeGrade,
+} from '../../lib/gradeDisplay';
 
 interface GradingResultProps {
   result: GradingOutput;
@@ -114,7 +119,11 @@ function EvidenceLimitationsPanel({
 
   const claimLabel = humanClaimType(claim?.claim_type);
   const statusLabel = STATUS_PLAIN[verdict.status] || verdict.status;
-  const whyLine = firstSentence(verdict.justification || claim?.semantic_justification || claim?.judgment || '');
+  const deduction = buildDeductionExplanation(verdict);
+  const whyLine =
+    deduction.justification ||
+    firstSentence(claim?.semantic_justification || claim?.judgment || '') ||
+    '';
   const needsReview =
     Boolean(claim?.review_reasons?.length) || claim?.evidence_check_status === 'needs_review';
   const recovered =
@@ -192,11 +201,23 @@ function EvidenceLimitationsPanel({
         </div>
       )}
 
+      {deduction.creditAwardedFor ? (
+        <p className="text-[12px] leading-snug text-zinc-700 dark:text-zinc-300">
+          <span className="font-bold text-zinc-500 dark:text-zinc-400">Credit awarded: </span>
+          {deduction.creditAwardedFor}
+        </p>
+      ) : null}
+      {deduction.pointsWithheldBecause ? (
+        <p className="text-[12px] leading-snug text-zinc-700 dark:text-zinc-300" data-testid="points-withheld">
+          <span className="font-bold text-amber-700 dark:text-amber-400">Points withheld because: </span>
+          {deduction.pointsWithheldBecause}
+        </p>
+      ) : null}
       {whyLine ? (
         <p className="text-[12px] leading-snug text-zinc-700 dark:text-zinc-300">{whyLine}</p>
-      ) : (
+      ) : !deduction.creditAwardedFor && !deduction.pointsWithheldBecause ? (
         <p className="text-[11px] italic text-zinc-500">No written explanation for this criterion.</p>
-      )}
+      ) : null}
 
       {!compact && unresolvedLim && (
         <div className="text-[10px] text-amber-800 dark:text-amber-300" data-testid="evidence-unresolved-limitation">
@@ -518,7 +539,24 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
 
                   <div className="space-y-1">
                     <div className="text-[7px] font-black text-zinc-500 uppercase tracking-widest flex items-center"><Icons.IconCheck className="w-3 h-3 mr-1" /> Why the AI scored it this way</div>
-                    <div className="text-sm text-zinc-800 dark:text-zinc-200 leading-snug font-medium">{v.justification}</div>
+                    {(() => {
+                      const explain = buildDeductionExplanation(v);
+                      return (
+                        <div className="text-sm text-zinc-800 dark:text-zinc-200 leading-snug font-medium space-y-1.5">
+                          {explain.creditAwardedFor ? (
+                            <p><span className="font-bold text-zinc-500">Credit awarded: </span>{explain.creditAwardedFor}</p>
+                          ) : null}
+                          {explain.pointsWithheldBecause ? (
+                            <p><span className="font-bold text-amber-700 dark:text-amber-400">Points withheld because: </span>{explain.pointsWithheldBecause}</p>
+                          ) : null}
+                          {explain.justification ? (
+                            <p>{explain.justification}</p>
+                          ) : !explain.creditAwardedFor && !explain.pointsWithheldBecause ? (
+                            <p className="italic text-zinc-500 text-xs font-normal">No written explanation for this criterion.</p>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="space-y-1">

@@ -12,7 +12,15 @@ import { selectPhaseFiles, selectFilesNeedingIngest, sourceUpdatedAt, CanvasCour
 import { CourseMaterialsModal } from '../../components/modals/CourseMaterialsModal';
 import { AskEduConnectPanel } from '../../components/copilot/AskEduConnectPanel';
 import { loadAiGrades, saveAiGrade, formatAiGradeLabel } from '../../lib/aiGradeCache';
-import { formatVerdictScore, isLegacyResult, isScore, summarizeGrade } from '../../lib/gradeDisplay';
+import {
+  buildDeductionExplanation,
+  formatVerdictScore,
+  isLegacyResult,
+  isScore,
+  rubricScoreBandNote,
+  selectMatchingRubricRating,
+  summarizeGrade,
+} from '../../lib/gradeDisplay';
 import { gradingApiBase, llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
 import { requireGradingSession } from '../../lib/gradingApi';
 import { activeCourseId, authErrorMessage, gradingAuthHeaders } from '../../lib/gradingApi';
@@ -2113,21 +2121,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                             <div className="flex flex-col sm:flex-row gap-3 mb-4 mt-2 w-full">
                                               {(() => {
                                                 const sorted = [...crit.ratings].sort((a, b) => b.points - a.points);
+                                                const matched =
+                                                  verdict && isScore(verdict.score)
+                                                    ? selectMatchingRubricRating(verdict.score, sorted)
+                                                    : null;
                                                 return sorted.map((rating: any, rIdx: number) => {
                                                   const isTop = rIdx === 0;
                                                   const isBottom = rIdx === sorted.length - 1 && sorted.length > 1;
-                                                  
-                                                  let isSelected = false;
-                                                  if (verdict && isScore(verdict.score)) {
-                                                    const nextRating = sorted[rIdx - 1]; // higher points
-                                                    if (isTop && verdict.score >= rating.points) {
-                                                        isSelected = true;
-                                                    } else if (isBottom && verdict.score <= rating.points) {
-                                                        isSelected = true;
-                                                    } else if (verdict.score >= rating.points && (!nextRating || verdict.score < nextRating.points)) {
-                                                        isSelected = true;
-                                                    }
-                                                  }
+                                                  // Exact point match only — never check Excellent for a 9/10 deduction.
+                                                  const isSelected = !!(matched && rating === matched);
 
                                                   let borderAccentColor = 'border-amber-500/40 dark:border-amber-500/20';
                                                   let textColor = 'text-amber-700 dark:text-amber-300';
@@ -2173,6 +2175,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                               })()}
                                             </div>
                                           )}
+
+                                          {verdict && isScore(verdict.score) && crit.ratings?.length > 0 && (() => {
+                                            const note = rubricScoreBandNote(verdict.score, crit.ratings);
+                                            return note ? (
+                                              <div className="mt-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 rounded-lg px-3 py-2">
+                                                {note}
+                                              </div>
+                                            ) : null;
+                                          })()}
                                           
                                           {verdict && (
                                             <div className="mt-4 space-y-3 pt-3 border-t border-zinc-200 dark:border-white/10 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -2180,9 +2191,24 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                                 <div className="text-[9px] font-black uppercase tracking-widest text-zinc-500 flex items-center">
                                                   <Icons.IconCheck className="w-3 h-3 mr-1 text-emerald-500" /> Explanation
                                                 </div>
-                                                <div className="text-xs text-zinc-800 dark:text-zinc-200 leading-relaxed pl-3 border-l-2 border-indigo-500/30 py-1">
-                                                  {verdict.justification}
-                                                </div>
+                                                {(() => {
+                                                  const explain = buildDeductionExplanation(verdict);
+                                                  return (
+                                                    <div className="text-xs text-zinc-800 dark:text-zinc-200 leading-relaxed pl-3 border-l-2 border-indigo-500/30 py-1 space-y-2">
+                                                      {explain.creditAwardedFor ? (
+                                                        <p><span className="font-bold text-zinc-600 dark:text-zinc-400">Credit awarded: </span>{explain.creditAwardedFor}</p>
+                                                      ) : null}
+                                                      {explain.pointsWithheldBecause ? (
+                                                        <p><span className="font-bold text-amber-700 dark:text-amber-400">Points withheld because: </span>{explain.pointsWithheldBecause}</p>
+                                                      ) : null}
+                                                      {explain.justification ? (
+                                                        <p>{explain.justification}</p>
+                                                      ) : !explain.creditAwardedFor && !explain.pointsWithheldBecause ? (
+                                                        <p className="italic text-zinc-500">No written explanation for this criterion.</p>
+                                                      ) : null}
+                                                    </div>
+                                                  );
+                                                })()}
                                               </div>
                                               <div className="space-y-1">
                                                 <div className="text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)] flex items-center mb-1">

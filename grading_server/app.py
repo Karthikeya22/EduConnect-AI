@@ -1497,11 +1497,26 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
         appended = " ".join(teacher_notes)
         if appended not in just:
             v["justification"] = (just + "\n\n" + appended).strip()
+        # Keep structured withheld field aligned with post-guard score.
+        withheld = str(v.get("points_withheld_because") or "").strip()
+        for note in teacher_notes:
+            if note and note not in withheld:
+                withheld = (withheld + (" " if withheld else "") + note).strip()
+        if score < max_score:
+            v["points_withheld_because"] = withheld or (
+                f"Awarded {score}/{max_score} after scoring guards."
+            )
+        elif score >= max_score:
+            v["points_withheld_because"] = ""
 
     v["score"] = score
     v["status"] = status
     v["evidence_anchor"] = "not found" if anchor_missing else anchor
     v["max_score"] = max_score
+    if score < max_score and not str(v.get("points_withheld_because") or "").strip():
+        v["points_withheld_because"] = (
+            f"Awarded {score}/{max_score} (partial). Full rubric expectations were not fully met."
+        )
     # #region agent log
     if score != _guard_raw or anchor_missing:
         try:
@@ -1778,6 +1793,8 @@ class LLMGradingPayload(BaseModel):
     justification: str
     evidence_anchor: str
     status: Literal['full', 'partial', 'missing']
+    credit_awarded_for: str = ""
+    points_withheld_because: str = ""
     missing_keywords: list[str] = []
     supporting_materials: list[str] = []
     covered_concepts: list[str] = []
@@ -2019,6 +2036,16 @@ async def _gp(
         f"correctly placed when a section is expected, follows assignment instructions, "
         f"meets genre-appropriate method standards, and has a criterion-relevant student quote.\n"
         f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
+        f"=== FACULTY EXPLANATION (required) ===\n"
+        f"- credit_awarded_for: 1–3 sentences on what in the submission earned the awarded points "
+        f"(cite concrete student content; consider the whole document, not only one sentence).\n"
+        f"- points_withheld_because: REQUIRED whenever score < {max_score}. State exactly why full marks "
+        f"were not given vs the rubric description (what was missing, thin, misplaced, or under-justified). "
+        f"If the student addressed the topic elsewhere in the document, acknowledge that and explain why it "
+        f"still falls short of full credit. Do NOT invent missing content.\n"
+        f"- justification: combined faculty paragraph that a teacher can show parents/students; must include "
+        f"both credit and deduction when score is partial.\n"
+        f"- When score == {max_score}, points_withheld_because may be empty.\n\n"
     )
 
     genre_block = _genre_grading_guide(
@@ -2178,14 +2205,25 @@ async def _gp(
             except Exception:
                 pass
 
+    credit_awarded = str(r.get("credit_awarded_for") or "").strip()
+    withheld = str(r.get("points_withheld_because") or "").strip()
+    raw_score = _as_points(r.get("score", 0))
+    if raw_score < _as_points(max_score) and not withheld:
+        withheld = (
+            f"Awarded {raw_score}/{_as_points(max_score)} (partial). "
+            "Full rubric expectations were not fully met for this criterion."
+        )
+
     v = {
         "criterion_id": c.get('criterion_id', 'unknown'),
         "criterion_name": c.get('title', c.get('criterion_id', 'unknown')),
         "dimension": dimension,
-        "score": _as_points(r.get("score", 0)),
+        "score": raw_score,
         "max_score": _as_points(max_score),
         "status": str(r.get('status', 'partial')),
         "justification": str(r.get('justification', '')),
+        "credit_awarded_for": credit_awarded,
+        "points_withheld_because": withheld,
         "missing_keywords": _filter_proposal_missing_keywords(
             r.get('missing_keywords', []) or [],
             is_proposal,

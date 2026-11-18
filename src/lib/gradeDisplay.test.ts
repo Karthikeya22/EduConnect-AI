@@ -9,7 +9,13 @@ const store = new Map<string, string>();
   removeItem: (k: string) => void store.delete(k),
 };
 
-const { summarizeGrade, formatVerdictScore } = await import('./gradeDisplay');
+const {
+  summarizeGrade,
+  formatVerdictScore,
+  selectMatchingRubricRating,
+  rubricScoreBandNote,
+  buildDeductionExplanation,
+} = await import('./gradeDisplay');
 const { saveAiGrade, loadAiGrades, formatAiGradeLabel, loadArchivedLegacyGrades } = await import('./aiGradeCache');
 const { GradingResult } = await import('../components/grading/GradingResult');
 
@@ -157,10 +163,88 @@ assert(
     partialHtml.includes('Assessed so far 7 of 10 assessable pts'),
   'partial subtotal text',
 );
-assert(partialHtml.includes('Assessment policy'), 'policy panel present');
+assert(!partialHtml.includes('Assessment policy'), 'policy panel hidden from faculty UI');
 assert(partialHtml.includes('Not assessed: processing failed'), 'per-criterion not assessed');
 assert(partialHtml.includes('stroke-dasharray="0 150.79"'), 'ring must be empty for incomplete');
 const zeroHtml = renderToStaticMarkup(createElement(GradingResult, { result: zero }));
 assert(zeroHtml.includes('EVALUATION SCORE') && !bad.test(zeroHtml), 'genuine zero renders as complete');
+
+// ── Canvas rating highlight: exact match only (partial scores check no band) ─
+const bands = [
+  { points: 10, description: 'Excellent' },
+  { points: 6, description: 'Satisfactory' },
+  { points: 1, description: 'Needs Improvement' },
+];
+assert(selectMatchingRubricRating(9, bands) === null, '9 must not check Excellent or Satisfactory');
+assert(selectMatchingRubricRating(10, bands)?.points === 10, 'exact 10');
+assert(selectMatchingRubricRating(6, bands)?.points === 6, 'exact 6');
+assert(selectMatchingRubricRating(1, bands)?.points === 1, 'exact 1');
+assert(selectMatchingRubricRating(7.5, bands) === null, '7.5 matches no Canvas band');
+const between = rubricScoreBandNote(9, bands);
+assert(between?.includes('AI awarded 9'), 'between-band note states awarded score');
+assert(between?.includes('Excellent') && between?.includes('Satisfactory'), 'note names surrounding bands');
+assert(between?.toLowerCase().includes('withheld') || between?.toLowerCase().includes('partial'), 'note points to deduction');
+assert(rubricScoreBandNote(10, bands) === null, 'no note on exact Excellent match');
+
+// ── deduction explanation fallbacks ─────────────────────────────────────────
+const structured = buildDeductionExplanation({
+  score: 9,
+  max_score: 10,
+  status: 'partial',
+  justification: 'Overall solid.',
+  credit_awarded_for: 'Clear GPT tutoring recommendation.',
+  points_withheld_because: 'Thin justification for preferring GPT over BERT.',
+  missing_keywords: [],
+});
+assert(structured.creditAwardedFor?.includes('GPT'), 'structured credit');
+assert(structured.pointsWithheldBecause?.includes('BERT'), 'structured withheld');
+
+const legacy = buildDeductionExplanation({
+  score: 9,
+  max_score: 10,
+  status: 'partial',
+  justification: 'Mentions tutoring with GPT.',
+  missing_keywords: ['model comparison'],
+  required_concepts: ['recommendation', 'justification'],
+  covered_concepts: ['recommendation'],
+});
+assert(legacy.pointsWithheldBecause, 'legacy composes withheld from gaps');
+assert(legacy.pointsWithheldBecause!.toLowerCase().includes('missing') || legacy.pointsWithheldBecause!.includes('9/10'), 'legacy withheld useful');
+
+const deductionHtml = renderToStaticMarkup(
+  createElement(GradingResult, {
+    result: {
+      ...base,
+      assessment_status: 'complete' as const,
+      content_score: 9,
+      structure_score: 0,
+      total: 9,
+      content_max: 10,
+      structure_max: 0,
+      total_max: 10,
+      flag_for_human: false,
+      criteria_verdicts: [
+        {
+          ...verdict('Recommendation', 9, 10),
+          status: 'partial' as const,
+          justification: 'Partial credit for recommendation.',
+          credit_awarded_for: 'Names a tutoring task with GPT.',
+          points_withheld_because: 'Does not fully compare models for the task.',
+          evidence_anchor: 'GPT for tutoring',
+          criterion_claim: {
+            criterion_id: 'Recommendation',
+            claim_type: 'partially_demonstrated',
+            submission_evidence_ids: [],
+            evidence_check_status: 'valid',
+            review_reasons: [],
+            processing_limitations: [],
+          },
+        },
+      ],
+    },
+  }),
+);
+assert(deductionHtml.includes('Points withheld because'), 'renders withheld label');
+assert(deductionHtml.includes('Does not fully compare models'), 'renders withheld text');
 
 console.log('gradeDisplay.test.ts PASS');
