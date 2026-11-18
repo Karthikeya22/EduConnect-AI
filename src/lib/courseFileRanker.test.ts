@@ -23,14 +23,15 @@ if (!phaseA.some(f => String(f.id) === '5')) throw new Error('instructions match
 if (phaseA.length + phaseB.length !== files.length) throw new Error('partition incomplete');
 
 const needing = selectFilesNeedingIngest(
-  [...files, { id: 8, display_name: 'video.mp4', updated_at: '2026-01-01T00:00:00Z' }],
+  [...files, { id: 8, display_name: 'video.mp4', updated_at: '2026-01-01T00:00:00Z' }, { id: 9, display_name: 'broken.pdf', updated_at: '2026-01-01T00:00:00Z' }],
   [
-    { canvas_file_id: '1', status: 'ready', updated_at: '2026-01-01T00:00:00Z' }, // fresh -> skip
+    { canvas_file_id: '1', status: 'ready', updated_at: '2026-01-01T00:00:00Z', chunk_count: 2 }, // fresh -> skip
     { canvas_file_id: 2, status: 'failed', updated_at: '2026-01-02T00:00:00Z' },  // failed -> retry
     { canvas_file_id: '3', status: 'ready', updated_at: '2025-12-01T00:00:00Z' }, // stale -> re-ingest
+    { canvas_file_id: '9', status: 'ready', updated_at: '2026-01-01T00:00:00Z', verified: false, stored_chunks: 0, chunk_count: 0 }, // broken
   ]
 ).map(f => String(f.id)).sort();
-const expectedNeeding = ['2', '3', '4', '5', '6', '7', '8'];
+const expectedNeeding = ['2', '3', '4', '5', '6', '7', '8', '9'];
 if (JSON.stringify(needing) !== JSON.stringify(expectedNeeding)) {
   throw new Error(`selectFilesNeedingIngest: expected ${expectedNeeding}, got ${needing}`);
 }

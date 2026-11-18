@@ -3553,6 +3553,7 @@ async def grade_submission():
                 await mark_course_files_pending_reingest(
                     course_for_reingest,
                     reason=space_status.upper(),
+                    mismatched_scope_keys=list(space_eval.get("mismatched") or []),
                 )
             except Exception as mark_err:
                 print(f"[GRADE] mark pending reingest failed: {mark_err}", flush=True)
@@ -5078,6 +5079,10 @@ async def ingest_canvas_url():
     """
     Downloads a file from a given URL and ingests it.
     """
+    course_id = None
+    canvas_file_id = None
+    updated_at = ""
+    display_name = ""
     try:
         data = request.get_json(force=True)
         assignment_id = data.get("assignment_id")
@@ -5091,7 +5096,20 @@ async def ingest_canvas_url():
 
         course_id = data.get("course_id")
         updated_at = data.get("updated_at") or ""
+        display_name = data.get("filename") or filename
         llm_provider, llm_api_key = resolve_llm_credentials(request)
+
+        async def _fail_registry(err: str):
+            if course_id and canvas_file_id:
+                from grading_server.ingest_service import mark_course_file_failed
+                await mark_course_file_failed(
+                    str(course_id),
+                    str(canvas_file_id),
+                    filename=str(display_name or ""),
+                    updated_at=str(updated_at or ""),
+                    last_error=err,
+                )
+
         if course_id and canvas_file_id and llm_provider:
             from grading_server.ingest_service import cached_course_file_hit
             hit = await cached_course_file_hit(
@@ -5108,12 +5126,12 @@ async def ingest_canvas_url():
                 canvas_token=canvas_token,
             )
         except ValueError as e:
+            await _fail_registry(str(e)[:500])
             return jsonify({"error": str(e)}), 400
 
         if not llm_provider or not llm_api_key:
             return byok_required_response()
 
-        display_name = data.get("filename") or filename
         from grading_server.utils.media_extract import extract_media_for_grading, media_kind_from_filename
 
         # Determine file type and extract text (documents + vision/media course materials)
@@ -5149,13 +5167,19 @@ async def ingest_canvas_url():
                 api_key=llm_api_key,
             )
             if not media.get("ok"):
-                return jsonify({"error": media.get("text") or "Could not read this media file"}), 400
+                err = media.get("text") or "Could not read this media file"
+                await _fail_registry(str(err)[:500])
+                return jsonify({"error": err}), 400
             course_material_text = f"[COURSE MEDIA MATERIAL]\n{media['text']}"
         else:
-            return jsonify({"error": f"Unsupported file type: '{filename}'."}), 400
+            err = f"Unsupported file type: '{filename}'."
+            await _fail_registry(err)
+            return jsonify({"error": err}), 400
 
         if not course_material_text.strip():
-            return jsonify({"error": "Could not extract any text from the uploaded file"}), 400
+            err = "Could not extract any text from the uploaded file"
+            await _fail_registry(err)
+            return jsonify({"error": err}), 400
 
         from grading_server.ingest_service import ingest_course_file, ingest_course_material
 
@@ -5186,9 +5210,27 @@ async def ingest_canvas_url():
 
     except EmbeddingError as e:
         traceback.print_exc()
+        if course_id and canvas_file_id:
+            from grading_server.ingest_service import mark_course_file_failed
+            await mark_course_file_failed(
+                str(course_id),
+                str(canvas_file_id),
+                filename=str(display_name or ""),
+                updated_at=str(updated_at or ""),
+                last_error=str(getattr(e, "code", None) or e)[:500],
+            )
         return _embedding_error_response(e)
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
+        if course_id and canvas_file_id:
+            from grading_server.ingest_service import mark_course_file_failed
+            await mark_course_file_failed(
+                str(course_id),
+                str(canvas_file_id),
+                filename=str(display_name or ""),
+                updated_at=str(updated_at or ""),
+                last_error=str(e)[:500],
+            )
         return jsonify({"error": "Canvas URL ingestion failed"}), 500
 
 

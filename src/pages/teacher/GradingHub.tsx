@@ -1098,7 +1098,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   };
 
   // Auto-index course materials when an assignment opens. Already-ready files are
-  // skipped (no download / no re-embed). Only new or changed Canvas files are read.
+  // skipped (no download / no re-embed). Phase B is awaited so course switches do
+  // not report false "all indexed" while pending rows remain.
   useEffect(() => {
     if (!selectedCourse || !selectedAssignment) return;
 
@@ -1106,35 +1107,44 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       return;
     }
 
+    let cancelled = false;
+    const assignmentId = selectedAssignment;
+    let running: Promise<void>;
+
     const runAutoIngest = async () => {
       setIngestStatus({ type: 'loading', msg: 'Checking class materials...' });
       try {
         await requireGradingSession();
+        if (cancelled) return;
         const health = await fetch(`${gradingApiBase()}/api/health`).then((r) => r.json()).catch(() => null);
         if (health?.authz && health.authz.ready === false) {
           throw new Error(health.authz.message || authErrorMessage({ error: 'AUTHZ_SETUP_REQUIRED' }));
         }
-        const currentItem = assignments.find(a => String(a.id) === selectedAssignment) || discussions.find(d => String(d.id) === selectedAssignment);
+        const currentItem = assignments.find(a => String(a.id) === assignmentId) || discussions.find(d => String(d.id) === assignmentId);
         requireLlmCredentials();
 
-        await postAssignmentIngest(selectedAssignment);
+        await postAssignmentIngest(assignmentId);
+        if (cancelled) return;
 
         const [files, statusRows] = await Promise.all([
           canvasAPI.getCourseFiles(selectedCourse),
           fetchCourseFileStatus(),
         ]);
+        if (cancelled) return;
         const allFiles = Array.isArray(files) ? files as CanvasCourseFile[] : [];
         const pending = selectFilesNeedingIngest(allFiles, statusRows);
         const totalReadable = selectFilesNeedingIngest(allFiles, []).length;
         const alreadyReady = Math.max(0, totalReadable - pending.length);
 
         if (pending.length === 0) {
-          setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
-          setIngestStatus({
-            type: 'success',
-            msg: `${alreadyReady} of ${totalReadable} course files indexed (already up to date).`,
-          });
-          setTimeout(() => setIngestStatus(null), 5000);
+          if (!cancelled) {
+            setIngestedAssignments(prev => new Set(prev).add(assignmentId));
+            setIngestStatus({
+              type: 'success',
+              msg: `${alreadyReady} of ${totalReadable} course files indexed (already up to date).`,
+            });
+            setTimeout(() => setIngestStatus(null), 5000);
+          }
           return;
         }
 
@@ -1149,11 +1159,14 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           5
         );
 
-        const ingestFile = (file: CanvasCourseFile) => ingestCourseFile(selectedAssignment, file);
+        const ingestFile = (file: CanvasCourseFile) => ingestCourseFile(assignmentId, file);
+        const failedNames: string[] = [];
 
         let succeeded = 0;
         let failed = 0;
-        for (const [i, file] of phaseA.entries()) {
+        const allPhases = [...phaseA, ...phaseB];
+        for (const [i, file] of allPhases.entries()) {
+          if (cancelled) break;
           setIngestStatus({
             type: 'loading',
             msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}`,
@@ -1163,59 +1176,51 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             succeeded += 1;
             // A cache hit does no embedding work, so there is no quota to pace.
             if (!result?.cached && !result?.skipped) {
-              await new Promise(r => setTimeout(r, 800));
+              await new Promise(r => setTimeout(r, i < phaseA.length ? 800 : 400));
             }
           } catch (e) {
             failed += 1;
+            failedNames.push(file.display_name || String(file.id));
             console.error(`Failed to ingest course file: ${file.display_name}`, e);
           }
         }
 
-        setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
-        const readyNow = alreadyReady + succeeded;
-        const phaseAStatus: { type: 'success' | 'warning', msg: string } = failed > 0
-          ? {
-              type: 'warning',
-              msg: `${readyNow} of ${totalReadable} course files indexed — ${failed} failed. Grading may miss some context.`,
-            }
-          : {
-              type: 'success',
-              msg: `${readyNow} of ${totalReadable} course files indexed.`,
-            };
-        setIngestStatus(phaseAStatus);
-
-        if (phaseB.length > 0) {
-          void (async () => {
-            setIngestStatus({ type: 'loading', msg: 'Indexing more materials in background...' });
-            for (const file of phaseB) {
-              try {
-                const result = await ingestFile(file);
-                if (!result?.cached && !result?.skipped) {
-                  await new Promise(r => setTimeout(r, 400));
-                }
-              } catch (e) {
-                console.error(`Background ingest failed: ${file.display_name}`, e);
-              }
-            }
-            setIngestStatus({
-              type: failed > 0 ? 'warning' : 'success',
-              msg: failed > 0
-                ? `${totalReadable - failed} of ${totalReadable} course files indexed — ${failed} failed. Grading may miss some context.`
-                : `${totalReadable} of ${totalReadable} course files indexed.`,
-            });
-            setTimeout(() => setIngestStatus(null), 5000);
-          })();
-        } else {
-          setTimeout(() => setIngestStatus(null), 5000);
+        if (cancelled) {
+          // Leave remaining rows pending for the next visit; never claim full success.
+          return;
         }
+
+        const readyNow = alreadyReady + succeeded;
+        const failedSuffix = failed > 0
+          ? ` — ${failed} failed${failedNames.length ? ` (${failedNames.slice(0, 3).join(', ')}${failedNames.length > 3 ? ', …' : ''})` : ''}. Grading may miss some context.`
+          : '';
+        setIngestStatus({
+          type: failed > 0 ? 'warning' : 'success',
+          msg: `${readyNow} of ${totalReadable} course files indexed${failedSuffix || '.'}`,
+        });
+        if (failed === 0) {
+          setIngestedAssignments(prev => new Set(prev).add(assignmentId));
+        }
+        setTimeout(() => setIngestStatus(null), 5000);
       } catch (err: any) {
+        if (cancelled) return;
         console.error(`Auto-ingestion failed:`, err);
         setIngestStatus({ type: 'error', msg: `Auto-ingestion failed: ${err.message}` });
+      } finally {
+        if (ingestionPromisesRef.current[assignmentId] === running) {
+          delete ingestionPromisesRef.current[assignmentId];
+        }
       }
     };
 
-    const promise = runAutoIngest();
-    ingestionPromisesRef.current[selectedAssignment] = promise;
+    running = runAutoIngest();
+    ingestionPromisesRef.current[assignmentId] = running;
+    return () => {
+      cancelled = true;
+      if (ingestionPromisesRef.current[assignmentId] === running) {
+        delete ingestionPromisesRef.current[assignmentId];
+      }
+    };
   }, [selectedAssignment, selectedCourse, assignments, discussions]);
 
   const handleFetchAiGrade = async (studentId: string, isRetry = false) => {
@@ -1430,7 +1435,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
          finalData.integrityEvaluation = integrityEvaluation;
       }
 
-      if (finalData.materials_status === 'reingesting' || finalData.rag_degraded) {
+      if (finalData.policy_formative_only) {
+        const why = finalData.policy_label
+          || finalData.assessment_policy?.diagnostic
+          || 'No usable Canvas rubric or scored assignment context.';
+        setIngestStatus({
+          type: 'warning',
+          msg: `Formative feedback only (not a scored grade): ${why}`,
+        });
+        setTimeout(() => setIngestStatus(null), 10000);
+      } else if (finalData.materials_status === 'reingesting' || finalData.rag_degraded) {
         setIngestStatus({
           type: 'warning',
           msg: 'Course materials are reindexing for your current LLM provider. This grade used the rubric and submission only (limited material grounding).',

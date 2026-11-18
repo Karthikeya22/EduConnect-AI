@@ -16,6 +16,11 @@ import {
   gradingApiBase,
   saveLlmCredentials,
 } from '@/src/lib/llmProviders';
+import {
+  CourseMaterialsSyncProgress,
+  syncAllCourseMaterials,
+} from '@/src/lib/courseMaterialsSync';
+import { orderCoursesForMaterialSync } from '@/src/lib/courseSyncPriority';
 
 interface Course {
   id: number;
@@ -59,9 +64,50 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
   const [isVerifyingLlm, setIsVerifyingLlm] = useState(false);
   const [canvasVerifyResult, setCanvasVerifyResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
   const [llmVerifyResult, setLlmVerifyResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const [materialsSync, setMaterialsSync] = useState<CourseMaterialsSyncProgress | null>(null);
 
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
+  const materialsSyncAbortRef = useRef<AbortController | null>(null);
+
+  const startMaterialsSync = (courseList: Course[]) => {
+    if (!courseList.length) return;
+    if (!localStorage.getItem('custom_canvas_token') || !getStoredLlmApiKey() || !getStoredLlmProvider()) {
+      return;
+    }
+    materialsSyncAbortRef.current?.abort();
+    const ac = new AbortController();
+    materialsSyncAbortRef.current = ac;
+    const { active, upcoming, older } = orderCoursesForMaterialSync(courseList);
+    const plan = [
+      active.length ? `${active.length} active` : null,
+      upcoming.length ? `${upcoming.length} upcoming` : null,
+      older.length ? `${older.length} older` : null,
+    ].filter(Boolean).join(' → ');
+    setMaterialsSync({
+      phase: 'active',
+      message: `Checking materials — ${plan || 'your courses'}…`,
+      courseIndex: 0,
+      courseTotal: courseList.length,
+      courseName: '',
+      fileIndex: 0,
+      fileTotal: 0,
+      filesIndexed: 0,
+      filesFailed: 0,
+      filesSkipped: 0,
+    });
+    void syncAllCourseMaterials({
+      courses: courseList,
+      signal: ac.signal,
+      onProgress: (p) => {
+        if (!ac.signal.aborted) setMaterialsSync(p);
+      },
+    }).finally(() => {
+      if (materialsSyncAbortRef.current === ac) {
+        materialsSyncAbortRef.current = null;
+      }
+    });
+  };
 
   const runDiagnostics = async () => {
     setDiagnosticsLoading(true);
@@ -110,30 +156,35 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
     }
   };
 
-  const fetchCourses = () => {
+  const fetchCourses = (opts?: { startSync?: boolean }) => {
     setLoading(true);
     setError('');
-    canvasAPI.getCourses()
+    return canvasAPI.getCourses()
       .then(fetchedCourses => {
         if (!fetchedCourses || fetchedCourses.length === 0) {
           setError("No Canvas courses found or Canvas API token missing.");
-        } else {
-          setCourses(fetchedCourses);
-          
-          const termsMap = new Map<number, { id: number; name: string }>();
-          fetchedCourses.forEach((c: Course) => {
-            if (c.term) {
-              termsMap.set(c.term.id, { id: c.term.id, name: c.term.name });
-            }
-          });
-          
-          const terms = Array.from(termsMap.values()).sort((a, b) => b.id - a.id);
-          setAvailableTerms(terms);
+          return [] as Course[];
         }
+        setCourses(fetchedCourses);
+
+        const termsMap = new Map<number, { id: number; name: string }>();
+        fetchedCourses.forEach((c: Course) => {
+          if (c.term) {
+            termsMap.set(c.term.id, { id: c.term.id, name: c.term.name });
+          }
+        });
+
+        const terms = Array.from(termsMap.values()).sort((a, b) => b.id - a.id);
+        setAvailableTerms(terms);
+        if (opts?.startSync) {
+          startMaterialsSync(fetchedCourses);
+        }
+        return fetchedCourses as Course[];
       })
       .catch(err => {
         const errorMsg = err.message || "Failed to fetch Canvas courses. Make sure the Edge Functions and Secrets are configured correctly.";
         setError(errorMsg);
+        return [] as Course[];
       })
       .finally(() => {
         setLoading(false);
@@ -173,7 +224,8 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
         type: 'success',
         message: `Connected — ${membershipSync.count} courses where Canvas lists you as teacher/TA.`,
       });
-      fetchCourses();
+      // Current-year courses index first; older ones after. Needs AI key too.
+      await fetchCourses({ startSync: true });
     } catch (e: any) {
       setCanvasVerifyResult({ type: 'error', message: `Canvas verification failed: ${e.message}` });
     } finally {
@@ -215,6 +267,11 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
       }
 
       setLlmVerifyResult({ type: 'success', message: "LLM provider key verified and saved." });
+      // If Canvas is already connected, kick materials sync now that embeddings can run.
+      if (localStorage.getItem('custom_canvas_token')) {
+        const list = courses.length ? courses : await fetchCourses();
+        if (list.length) startMaterialsSync(list);
+      }
     } catch (e: any) {
       const raw = e?.message || String(e);
       const hint = /failed to fetch|networkerror|load failed/i.test(raw)
@@ -225,6 +282,12 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
       setIsVerifyingLlm(false);
     }
   };
+
+  useEffect(() => {
+    return () => {
+      materialsSyncAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -311,6 +374,61 @@ export default function TeacherCourseSelection({ onLogout }: { onLogout?: () => 
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col items-center justify-center relative z-10 px-6 py-32">
+        {materialsSync && materialsSync.phase !== 'blocked' && (
+          <div
+            className={`fixed top-24 left-1/2 -translate-x-1/2 z-40 max-w-xl w-[min(92vw,36rem)] rounded-2xl border-2 px-4 py-3 shadow-lg backdrop-blur-md ${
+              materialsSync.phase === 'done'
+                ? materialsSync.filesFailed > 0
+                  ? 'border-amber-400/60 bg-amber-50/95 dark:bg-amber-950/80 text-amber-900 dark:text-amber-100'
+                  : 'border-emerald-400/60 bg-emerald-50/95 dark:bg-emerald-950/80 text-emerald-900 dark:text-emerald-100'
+                : materialsSync.phase === 'cancelled'
+                  ? 'border-zinc-400/60 bg-zinc-50/95 dark:bg-zinc-900/80 text-zinc-800 dark:text-zinc-100'
+                  : 'border-indigo-400/60 bg-white/95 dark:bg-zinc-900/90 text-zinc-900 dark:text-zinc-100'
+            }`}
+            role="status"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-widest opacity-70 mb-1">
+                  {materialsSync.phase === 'active'
+                    ? 'Active + late previous first'
+                    : materialsSync.phase === 'upcoming'
+                      ? 'Upcoming semesters next'
+                      : materialsSync.phase === 'older'
+                        ? 'Older courses last'
+                        : 'Materials sync'}
+                </p>
+                <p className="text-sm font-semibold leading-snug break-words">{materialsSync.message}</p>
+                {(materialsSync.phase === 'active' || materialsSync.phase === 'upcoming' || materialsSync.phase === 'older') && materialsSync.courseTotal > 0 && (
+                  <p className="text-[11px] mt-1 opacity-70">
+                    Course {materialsSync.courseIndex}/{materialsSync.courseTotal}
+                    {materialsSync.fileTotal > 0 ? ` · file ${materialsSync.fileIndex}/${materialsSync.fileTotal}` : ''}
+                    {` · ${materialsSync.filesIndexed} updated · ${materialsSync.filesFailed} failed`}
+                  </p>
+                )}
+              </div>
+              {(materialsSync.phase === 'active' || materialsSync.phase === 'upcoming' || materialsSync.phase === 'older') && (
+                <button
+                  type="button"
+                  className="shrink-0 text-[10px] font-black uppercase tracking-widest opacity-70 hover:opacity-100"
+                  onClick={() => materialsSyncAbortRef.current?.abort()}
+                >
+                  Pause
+                </button>
+              )}
+              {(materialsSync.phase === 'done' || materialsSync.phase === 'cancelled') && (
+                <button
+                  type="button"
+                  className="shrink-0 text-[10px] font-black uppercase tracking-widest opacity-70 hover:opacity-100"
+                  onClick={() => setMaterialsSync(null)}
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="max-w-4xl w-full text-center mb-16 relative">
            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-500/20 rounded-full blur-[120px] pointer-events-none -z-10"></div>
           

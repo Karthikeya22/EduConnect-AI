@@ -60,6 +60,33 @@ def _is_schema_missing_error(err: Exception) -> bool:
     return any(marker in msg for marker in _SCHEMA_MISSING_MARKERS)
 
 
+def _strip_nul(value: str | None) -> str:
+    """Postgres text rejects U+0000; PDF extractors sometimes embed it."""
+    return (value or "").replace("\x00", "")
+
+
+def _registry_error_code(exc: BaseException) -> str:
+    """Stable last_error codes for deterministic UI retry."""
+    text = str(exc)
+    lower = text.lower()
+    if "22p05" in lower or "\\u0000" in text or "\x00" in text or "cannot be converted to text" in lower:
+        return "NUL_IN_TEXT"
+    if "57014" in lower or "statement timeout" in lower:
+        return "DB_TIMEOUT"
+    return text[:500]
+
+
+def _file_ids_from_scope_keys(course_id: str, scope_keys: list[str] | None) -> list[str]:
+    prefix = f"course:{course_id}:file:"
+    out: list[str] = []
+    for sk in scope_keys or []:
+        if isinstance(sk, str) and sk.startswith(prefix):
+            fid = sk[len(prefix):].strip()
+            if fid:
+                out.append(fid)
+    return out
+
+
 def embed_texts(
     texts: list[str],
     api_key: str | None = None,
@@ -96,6 +123,14 @@ async def activate_embedding_batch(
     """
     if len(rows) != len({r["chunk_index"] for r in rows}):
         raise ValueError("duplicate chunk_index in batch")
+    clean_rows: list[dict] = []
+    for r in rows:
+        clean = dict(r)
+        if "chunk_text" in clean:
+            clean["chunk_text"] = _strip_nul(clean.get("chunk_text"))
+        if "source_title" in clean:
+            clean["source_title"] = _strip_nul(str(clean.get("source_title") or ""))
+        clean_rows.append(clean)
     batch_id = str(uuid.uuid4())
     cfg = get_provider(provider)
     config = {**(extra_config or {}), **space.config(), "index_version": INDEX_VERSION, "lms_host": trusted_lms_host()}
@@ -113,7 +148,7 @@ async def activate_embedding_batch(
         "p_assignment_id": assignment_id,
         "p_course_id": course_id,
         "p_canvas_file_id": canvas_file_id,
-        "p_rows": rows,
+        "p_rows": clean_rows,
     }
     sb = get_supabase()
     try:
@@ -246,18 +281,41 @@ async def assert_embedding_space_compatible(
     return status
 
 
-async def mark_course_files_pending_reingest(course_id: str, *, reason: str = "REINGEST_REQUIRED") -> int:
-    """Mark course_file_ingest rows pending so the UI/auto-ingest will reindex them."""
+async def mark_course_files_pending_reingest(
+    course_id: str,
+    *,
+    reason: str = "REINGEST_REQUIRED",
+    mismatched_scope_keys: list[str] | None = None,
+) -> int:
+    """Mark mismatched course_file_ingest rows pending so UI/auto-ingest reindexes them.
+
+    When mismatched_scope_keys is provided, only course-file scopes are marked.
+    Assignment-only mismatches mark nothing. An empty list means corpus-wide
+    (legacy unknown provenance) and marks every registry row for the course.
+    chunk_count is preserved so prior index evidence stays visible until replaced.
+    """
     if not course_id:
         return 0
 
+    file_ids: list[str] | None
+    if mismatched_scope_keys is None:
+        file_ids = None
+    else:
+        file_ids = _file_ids_from_scope_keys(str(course_id), mismatched_scope_keys)
+        if mismatched_scope_keys and not file_ids:
+            return 0
+        if not file_ids:
+            file_ids = None
+
     def _mark(client) -> int:
-        res = (
+        q = (
             client.table("course_file_ingest")
             .update({"status": "pending", "last_error": str(reason)[:500]})
             .eq("course_id", str(course_id))
-            .execute()
         )
+        if file_ids is not None:
+            q = q.in_("canvas_file_id", file_ids)
+        res = q.execute()
         data = res.data or []
         return len(data) if isinstance(data, list) else 0
 
@@ -274,6 +332,31 @@ async def mark_course_files_pending_reingest(course_id: str, *, reason: str = "R
                 return 0
         print(f"[course_cache] mark pending reingest failed: {e}")
         return 0
+
+
+async def mark_course_file_failed(
+    course_id: str,
+    canvas_file_id: str,
+    *,
+    filename: str = "",
+    updated_at: str = "",
+    last_error: str = "",
+) -> None:
+    """Persist a file-level ingest failure even when parse/download never reached ingest_course_file."""
+    if not course_id or not canvas_file_id:
+        return
+    try:
+        await _upsert_registry({
+            "course_id": str(course_id),
+            "canvas_file_id": str(canvas_file_id),
+            "filename": filename or "",
+            "updated_at": updated_at or "",
+            "status": "failed",
+            "chunk_count": 0,
+            "last_error": str(last_error or "INGEST_FAILED")[:500],
+        })
+    except Exception as e:
+        print(f"[course_cache] mark failed registry write skipped: {e}")
 
 
 def course_cache_is_fresh(
@@ -346,6 +429,8 @@ async def ingest_course_material(
 
     sb = get_supabase()
 
+    course_material_text = _strip_nul(course_material_text)
+    source_name = _strip_nul(source_name) or "Course Material"
     chunks = _splitter.split_text(course_material_text) if course_material_text else []
     if not chunks and course_material_text:
         chunks = [course_material_text[:1000]]
@@ -592,8 +677,8 @@ async def ingest_course_file(
             }
 
     aid = f"course:{course_id}"
-    # Postgres text rejects NUL; some PDFs extract with embedded \x00.
-    course_material_text = (course_material_text or "").replace("\x00", "")
+    course_material_text = _strip_nul(course_material_text)
+    filename = _strip_nul(filename) or filename
 
     async def _legacy_fallback() -> dict:
         result = await ingest_course_material(
@@ -692,7 +777,7 @@ async def ingest_course_file(
                 "updated_at": updated_at,
                 "status": "failed",
                 "chunk_count": 0,
-                "last_error": str(e)[:500],
+                "last_error": _registry_error_code(e),
             })
         except Exception:
             pass

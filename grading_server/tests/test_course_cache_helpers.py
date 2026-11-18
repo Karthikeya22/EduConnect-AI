@@ -195,3 +195,69 @@ def test_cached_course_file_hit_skips_download_when_fresh():
     assert hit["cached"] is True
     assert hit["chunks_stored"] == 4
     assert hit["filename"] == "m9_reading.pdf"
+
+
+def test_strip_nul_and_activate_strips_chunk_text():
+    assert ingest_service._strip_nul("a\x00b") == "ab"
+    assert ingest_service._registry_error_code(RuntimeError("code': '22P05'")) == "NUL_IN_TEXT"
+    assert ingest_service._registry_error_code(RuntimeError("canceling statement due to statement timeout")) == "DB_TIMEOUT"
+
+    fake_sb = MagicMock()
+    space = space_for_provider("openai")
+    with patch.object(ingest_service, "get_supabase", return_value=fake_sb), \
+            patch.object(ingest_service, "trusted_lms_host", return_value="canvas.test"):
+        asyncio.new_event_loop().run_until_complete(
+            ingest_service.activate_embedding_batch(
+                scope_key="course:c1:file:f1",
+                space=space,
+                provider="openai",
+                rows=[{
+                    "assignment_id": "course:c1",
+                    "course_id": "c1",
+                    "canvas_file_id": "f1",
+                    "chunk_text": "hello\x00world",
+                    "chunk_index": 0,
+                    "source_title": "a\x00.pdf",
+                    "embedding": [0.1] * 768,
+                }],
+                assignment_id=None,
+                course_id="c1",
+                canvas_file_id="f1",
+            )
+        )
+    name, params = fake_sb.rpc.call_args[0]
+    assert name == "activate_embedding_batch"
+    assert params["p_rows"][0]["chunk_text"] == "helloworld"
+    assert params["p_rows"][0]["source_title"] == "a.pdf"
+    assert "\x00" not in params["p_rows"][0]["chunk_text"]
+
+
+def test_mark_pending_reingest_scopes_to_mismatched_file_keys():
+    fake_sb = MagicMock()
+    chain = fake_sb.table.return_value.update.return_value.eq.return_value
+    chain.in_.return_value.execute.return_value.data = [{"canvas_file_id": "f1"}]
+    with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
+        n = asyncio.new_event_loop().run_until_complete(
+            ingest_service.mark_course_files_pending_reingest(
+                "c1",
+                reason="REINGEST_REQUIRED",
+                mismatched_scope_keys=["course:c1:file:f1", "course:c1:assignment:a1"],
+            )
+        )
+    assert n == 1
+    fake_sb.table.return_value.update.return_value.eq.return_value.in_.assert_called_once_with(
+        "canvas_file_id", ["f1"]
+    )
+
+
+def test_mark_pending_reingest_assignment_only_marks_nothing():
+    fake_sb = MagicMock()
+    with patch.object(ingest_service, "get_supabase", return_value=fake_sb):
+        n = asyncio.new_event_loop().run_until_complete(
+            ingest_service.mark_course_files_pending_reingest(
+                "c1",
+                mismatched_scope_keys=["course:c1:assignment:a1"],
+            )
+        )
+    assert n == 0
+    fake_sb.table.assert_not_called()

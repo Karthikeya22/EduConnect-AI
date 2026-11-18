@@ -109,7 +109,7 @@ export function materialIndexLabel(state: MaterialIndexState): string {
   }
 }
 
-// Doc files with no ready registry row for the same Canvas updated_at (absent, failed, or stale).
+// Doc files absent/failed/pending/stale, or ready-but-broken (zero verified chunks).
 export function selectFilesNeedingIngest(
   files: CanvasCourseFile[],
   statusRows: CourseFileStatusRow[]
@@ -117,7 +117,14 @@ export function selectFilesNeedingIngest(
   const byId = new Map(statusRows.map((r) => [String(r.canvas_file_id), r]));
   return files.filter(isDocCourseFile).filter((f) => {
     const row = byId.get(String(f.id));
-    return !row || row.status !== 'ready' || (row.updated_at || '') !== sourceUpdatedAt(f);
+    if (!row) return true;
+    if (row.status !== 'ready') return true;
+    if ((row.updated_at || '') !== sourceUpdatedAt(f)) return true;
+    // ready + verified false / zero stored chunks is a broken index — reingest
+    if (row.verified === false) return true;
+    if (typeof row.stored_chunks === 'number' && row.stored_chunks <= 0) return true;
+    if (typeof row.chunk_count === 'number' && row.chunk_count <= 0) return true;
+    return false;
   });
 }
 
