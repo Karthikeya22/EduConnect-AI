@@ -39,7 +39,8 @@ def test_evidence_missing_caps_score():
         10,
     )
     assert v["status"] == "partial"
-    assert v["score"] <= 5
+    # Missing instructor evidence: ≤25% of max (ceil(10*0.25)=3)
+    assert v["score"] <= 3
     assert v.get("ungrounded_full") is True
 
 

@@ -14,7 +14,7 @@ For each: OpenAI, Gemini, OpenRouter, Claude (via OpenRouter), NVIDIA, DeepSeek,
 3. Confirm localStorage has `llm_provider` + `llm_api_key`.
 4. Ingest one short Canvas file / assignment text from Grading Hub.
 5. Grade one student submission.
-6. Switch to a *different* provider, verify, then try grade again without re-ingest → expect `REINGEST_REQUIRED` (409).
+6. Switch to a *different* provider, verify, then try grade again without re-ingest → expect a grade with `materials_status=reingesting` (not 409); materials reindex in background. Still expect 503 only for `EMBEDDING_MIGRATION_REQUIRED`.
 7. Re-ingest, then grade again → success.
 
 ## Notes

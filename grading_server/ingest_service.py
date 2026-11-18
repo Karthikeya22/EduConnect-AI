@@ -167,6 +167,56 @@ def _load_provenance_sync(assignment_id: str, course_id: str) -> tuple[list[dict
     return metas, bool(legacy)
 
 
+async def evaluate_embedding_space(
+    *,
+    assignment_id: str,
+    course_id: str,
+    space: EmbeddingSpace,
+) -> dict:
+    """Non-raising provenance check for degrade-and-grade.
+
+    Returns dict with:
+      status: active | no_corpus | reingest_required | unknown_provenance | migration_required
+      message: human-readable detail
+      mismatched: list of scope_keys when status is reingest_required
+    """
+    try:
+        metas, has_legacy_chunks = await asyncio.to_thread(_load_provenance_sync, str(assignment_id), course_id)
+    except Exception as e:
+        if _is_schema_missing_error(e):
+            return {
+                "status": "migration_required",
+                "message": "Provenance columns are missing; apply the embedding provenance migration.",
+                "mismatched": [],
+            }
+        raise
+    if has_legacy_chunks or any(not m.get("space_id") for m in metas):
+        return {
+            "status": "unknown_provenance",
+            "message": "Stored course materials have no recorded embedding space. Re-ingest them with the current provider.",
+            "mismatched": [m.get("scope_key") for m in metas if m.get("scope_key")],
+        }
+    mismatched = [
+        m["scope_key"]
+        for m in metas
+        if m["space_id"] != space.space_id or m.get("index_version") != INDEX_VERSION
+    ]
+    if mismatched:
+        return {
+            "status": "reingest_required",
+            "message": (
+                f"Materials in {', '.join(sorted(mismatched))} were embedded in a different space or index version. "
+                "Reindexing in the background; this grade uses rubric + submission only."
+            ),
+            "mismatched": mismatched,
+        }
+    return {
+        "status": "active" if metas else "no_corpus",
+        "message": "",
+        "mismatched": [],
+    }
+
+
 async def assert_embedding_space_compatible(
     *,
     assignment_id: str,
@@ -180,29 +230,50 @@ async def assert_embedding_space_compatible(
     without a recorded space), REINGEST_REQUIRED (different space or index version),
     EMBEDDING_MIGRATION_REQUIRED (provenance columns absent). Provider/model strings
     are never used to certify data.
+
+    Prefer evaluate_embedding_space() on the live grade path (degrade-and-grade).
     """
+    result = await evaluate_embedding_space(
+        assignment_id=assignment_id, course_id=course_id, space=space,
+    )
+    status = result["status"]
+    if status == "migration_required":
+        raise EmbeddingProvenanceError(result["message"], code="EMBEDDING_MIGRATION_REQUIRED")
+    if status == "unknown_provenance":
+        raise EmbeddingProvenanceError(result["message"], code="UNKNOWN_PROVENANCE")
+    if status == "reingest_required":
+        raise EmbeddingProvenanceError(result["message"], code="REINGEST_REQUIRED")
+    return status
+
+
+async def mark_course_files_pending_reingest(course_id: str, *, reason: str = "REINGEST_REQUIRED") -> int:
+    """Mark course_file_ingest rows pending so the UI/auto-ingest will reindex them."""
+    if not course_id:
+        return 0
+
+    def _mark(client) -> int:
+        res = (
+            client.table("course_file_ingest")
+            .update({"status": "pending", "last_error": str(reason)[:500]})
+            .eq("course_id", str(course_id))
+            .execute()
+        )
+        data = res.data or []
+        return len(data) if isinstance(data, list) else 0
+
     try:
-        metas, has_legacy_chunks = await asyncio.to_thread(_load_provenance_sync, str(assignment_id), course_id)
+        return await asyncio.to_thread(_mark, get_supabase())
     except Exception as e:
         if _is_schema_missing_error(e):
-            raise EmbeddingProvenanceError(
-                "Provenance columns are missing; apply the embedding provenance migration.",
-                code="EMBEDDING_MIGRATION_REQUIRED",
-            ) from e
-        raise
-    if has_legacy_chunks or any(not m.get("space_id") for m in metas):
-        raise EmbeddingProvenanceError(
-            "Stored course materials have no recorded embedding space. Re-ingest them before grading.",
-            code="UNKNOWN_PROVENANCE",
-        )
-    mismatched = [m["scope_key"] for m in metas if m["space_id"] != space.space_id or m.get("index_version") != INDEX_VERSION]
-    if mismatched:
-        raise EmbeddingProvenanceError(
-            f"Materials in {', '.join(sorted(mismatched))} were embedded in a different space or index version. "
-            "Re-ingest them with the current provider before grading.",
-            code="REINGEST_REQUIRED",
-        )
-    return "active" if metas else "no_corpus"
+            return 0
+        if _is_rls_denied(e):
+            try:
+                return await asyncio.to_thread(_mark, service_role_client())
+            except Exception:
+                print(f"[course_cache] mark pending reingest failed: {e}")
+                return 0
+        print(f"[course_cache] mark pending reingest failed: {e}")
+        return 0
 
 
 def course_cache_is_fresh(

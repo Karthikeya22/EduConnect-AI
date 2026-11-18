@@ -174,6 +174,10 @@ export interface GradingOutput {
   misconception_hint: string;
   rag_coverage_level: "HIGH" | "MEDIUM" | "LOW" | "NONE";
   strong_match_count: number;
+  materials_status?: "ready" | "reingesting";
+  rag_degraded?: boolean;
+  wrong_deliverable?: boolean;
+  wrong_deliverable_note?: string;
   referenced_materials: string[];
   criteria_verdicts: CriterionVerdict[];
   integrityEvaluation?: IntegrityEvaluation;

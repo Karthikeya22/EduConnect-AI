@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import grading_server.app as app_mod
 import grading_server.ingest_service as ingest_service
@@ -110,6 +110,16 @@ def post(sb, llm=None, body=None):
             patch.object(llm_client, "embed_texts", lambda *a, **k: [[0.1] * 768 for _ in (a[0] if a else [])] or [[0.1] * 768]), \
             patch.object(mode_mod, "resolve_experiment_mode", lambda *_a, **_k: "baseline"), \
             patch.object(ingest_service, "assert_embedding_space_compatible", _compatible), \
+            patch.object(
+                ingest_service,
+                "evaluate_embedding_space",
+                AsyncMock(return_value={"status": "active", "message": "", "mismatched": []}),
+            ), \
+            patch.object(
+                ingest_service,
+                "mark_course_files_pending_reingest",
+                AsyncMock(return_value=0),
+            ), \
             patch.object(authz, "_authorize", lambda scope: sb):
         return app_mod.app.test_client().post("/api/grade", json=body or {}, headers=HEADERS)
 

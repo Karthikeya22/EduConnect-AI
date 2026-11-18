@@ -1322,8 +1322,15 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (data.error === "BYOK_REQUIRED" || res.status === 401) {
              throw new Error(data.message || data.error || "Verify your LLM provider API key before grading.");
           }
-          if (data.error === "REINGEST_REQUIRED" || res.status === 409) {
+          if (data.error === "EMBEDDING_MIGRATION_REQUIRED" || (res.status === 503 && String(data.error || '').includes('EMBEDDING'))) {
+             throw new Error(data.message || "Embedding schema migration required before grading.");
+          }
+          if (data.error === "REINGEST_REQUIRED" || data.error === "UNKNOWN_PROVENANCE") {
+             // Legacy hard-fail path; degrade-and-grade should return 200 with materials_status.
              throw new Error(data.message || "Re-ingest course materials with your current LLM provider, then grade again.");
+          }
+          if (res.status === 409 && !isScore(data?.total) && data?.assessment_status == null) {
+             throw new Error(data.message || "Grading blocked by embedding provenance. Re-index materials, then retry.");
           }
           if (data.error === "LLM_QUOTA" || res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
              throw new Error(data.message || "LLM API quota exceeded. Wait a moment and retry.");
@@ -1404,6 +1411,23 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       const finalData = { ...backendData };
       if (integrityEvaluation) {
          finalData.integrityEvaluation = integrityEvaluation;
+      }
+
+      if (finalData.materials_status === 'reingesting' || finalData.rag_degraded) {
+        setIngestStatus({
+          type: 'warning',
+          msg: 'Course materials are reindexing for your current LLM provider. This grade used the rubric and submission only (limited material grounding).',
+        });
+        setTimeout(() => setIngestStatus(null), 8000);
+        // Kick background reindex for pending/mismatched materials.
+        void handleRefreshMaterials();
+      }
+      if (finalData.wrong_deliverable && finalData.wrong_deliverable_note) {
+        setIngestStatus({
+          type: 'warning',
+          msg: String(finalData.wrong_deliverable_note),
+        });
+        setTimeout(() => setIngestStatus(null), 10000);
       }
 
       setAiGradingData(prev => ({ ...prev, [studentId]: finalData }));
@@ -1859,6 +1883,9 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         v.title === crit.description ||
                         (crit.id && v.criterion_id && String(v.criterion_id).includes(String(crit.id)))
                     );
+                    if (verdict?.ai_generated) {
+                       return;
+                    }
                     if (verdict && isScore(verdict.score)) {
                        totalEarned += verdict.score;
                     } else if (verdict) {
@@ -2064,7 +2091,11 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                         <div key={crit.id} className="bg-zinc-50 dark:bg-white/5 border border-zinc-100 dark:border-white/10 rounded-xl p-4 transition-all duration-300 hover:border-zinc-200 dark:hover:border-white/20 shadow-sm">
                                           <div className="flex justify-between items-start mb-2">
                                             <h4 className="text-sm font-bold text-zinc-900 dark:text-white">{crit.description}</h4>
-                                            {verdict && !isScore(verdict.score) ? (
+                                            {verdict?.ai_generated ? (
+                                              <span className="text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md text-zinc-600 bg-zinc-500/10">
+                                                Advisory · not in score
+                                              </span>
+                                            ) : verdict && !isScore(verdict.score) ? (
                                               <span className="text-xs font-black px-2 py-1 rounded-md text-amber-600 bg-amber-500/10">
                                                 {formatVerdictScore(verdict)}
                                               </span>

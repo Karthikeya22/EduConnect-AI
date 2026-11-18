@@ -166,6 +166,11 @@ class GradingOutput(BaseModel):
     rag_coverage_level: Literal["HIGH", "MEDIUM", "LOW", "NONE"] = "NONE"
     strong_match_count: int = 0
     retrieval_status: RetrievalStatus = "ok"
+    # Degrade-and-grade: ready | reingesting
+    materials_status: Literal["ready", "reingesting"] = "ready"
+    rag_degraded: bool = False
+    wrong_deliverable: bool = False
+    wrong_deliverable_note: str = ""
 
     # Evidence protocol (v2+). Absent on legacy results — never treat those as newly verified.
     experiment_mode: Literal["baseline", "verification_only", "coverage_recovery"] = "baseline"

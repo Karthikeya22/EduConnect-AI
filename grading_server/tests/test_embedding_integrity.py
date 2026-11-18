@@ -181,6 +181,21 @@ def test_gate_ok_and_no_corpus():
     assert gate([]) == "no_corpus"
 
 
+def test_evaluate_embedding_space_reports_reingest_without_raising():
+    with patch.object(
+        ingest_service,
+        "_load_provenance_sync",
+        return_value=([meta("course:k1:file:f1", space=GEMINI)], False),
+    ):
+        result = run(
+            ingest_service.evaluate_embedding_space(
+                assignment_id="a1", course_id="k1", space=OPENAI
+            )
+        )
+    assert result["status"] == "reingest_required"
+    assert "course:k1:file:f1" in result["mismatched"]
+
+
 def test_gate_missing_metadata_is_unknown_provenance():
     with pytest.raises(EmbeddingProvenanceError) as e:
         gate([{"scope_key": "course:k1", "space_id": None, "index_version": None}])
@@ -227,18 +242,89 @@ def test_gate_schema_missing_is_migration_required():
     assert e.value.code == "EMBEDDING_MIGRATION_REQUIRED"
 
 
-def test_grade_endpoint_returns_409_with_code_and_no_grade():
+def test_grade_endpoint_degrades_and_grades_on_provenance_mismatch():
+    """Provenance mismatch must not 409 — schedule reingest and still grade (degraded RAG)."""
     client = app_mod.app.test_client()
     headers = {"X-LLM-Provider": "openai", "X-LLM-Api-Key": "sk-test"}
-    with patch.object(ingest_service, "_load_provenance_sync", return_value=([meta("course:11", space=None)], False)), \
-            patch.object(authz, "_authorize", lambda scope: object()), \
-            patch.object(app_mod, "get_graph") as graph:
-        res = client.post("/api/grade", headers=headers, json={
-            "assignment_id": "101", "course_id": "11", "student_id": "s1",
-            "submission_text": "A submission long enough to pass the empty-text checks for grading.",
-        })
-    assert res.status_code == 409
-    assert res.get_json()["error"] == "UNKNOWN_PROVENANCE"
+
+    async def fake_ainvoke(payload):
+        assert payload.get("rag_degraded") is True
+        assert payload.get("materials_status") == "reingesting"
+        return {
+            "final_output": {
+                "result_schema_version": 2,
+                "assessment_status": "complete",
+                "total": 7,
+                "total_max": 10,
+                "content_score": 7,
+                "content_max": 10,
+                "structure_score": 0,
+                "structure_max": 0,
+                "criteria_verdicts": [],
+                "flag_for_human": False,
+                "overall_confidence": 0.9,
+                "misconception_hint": "",
+                "rag_coverage_level": "NONE",
+                "strong_match_count": 0,
+                "referenced_materials": [],
+                "critiques": [],
+                "topic_mastery_radar": {},
+                "materials_status": "reingesting",
+                "rag_degraded": True,
+            }
+        }
+
+    graph_obj = MagicMock()
+    graph_obj.ainvoke = fake_ainvoke
+    with patch.object(
+        ingest_service,
+        "_load_provenance_sync",
+        return_value=([meta("course:11", space=GEMINI)], False),
+    ), patch.object(
+        ingest_service, "mark_course_files_pending_reingest", return_value=2
+    ) as mark, patch.object(
+        authz, "_authorize", lambda scope: object()
+    ), patch.object(app_mod, "get_graph", return_value=graph_obj):
+        res = client.post(
+            "/api/grade",
+            headers=headers,
+            json={
+                "assignment_id": "101",
+                "course_id": "11",
+                "student_id": "s1",
+                "submission_text": "A submission long enough to pass the empty-text checks for grading.",
+            },
+        )
+    assert res.status_code == 200, res.get_json()
+    body = res.get_json()
+    assert body["total"] == 7
+    assert body["materials_status"] == "reingesting"
+    assert body.get("rag_coverage_level") in ("LOW", "NONE")
+    mark.assert_called()
+
+
+def test_grade_endpoint_still_blocks_embedding_migration_required():
+    client = app_mod.app.test_client()
+    headers = {"X-LLM-Provider": "openai", "X-LLM-Api-Key": "sk-test"}
+    with patch.object(
+        ingest_service,
+        "_load_provenance_sync",
+        side_effect=Exception("column course_material_chunks.embedding_space_id does not exist"),
+    ), patch.object(authz, "_authorize", lambda scope: object()), patch.object(
+        app_mod, "get_graph"
+    ) as graph:
+        res = client.post(
+            "/api/grade",
+            headers=headers,
+            json={
+                "assignment_id": "101",
+                "course_id": "11",
+                "student_id": "s1",
+                "submission_text": "A submission long enough to pass the empty-text checks for grading.",
+            },
+        )
+    assert res.status_code == 503
+    assert res.get_json()["error"] == "EMBEDDING_MIGRATION_REQUIRED"
     graph.assert_not_called()
 
 

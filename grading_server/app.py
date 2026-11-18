@@ -154,6 +154,10 @@ class GradingState(TypedDict):
     evidence_chat_json: object
     assessment_policy: dict | None
     policy_lookup_status: str | None
+    rag_degraded: bool
+    materials_status: str
+    wrong_deliverable: bool
+    wrong_deliverable_note: str
 
 
 def _llm_creds(state: dict) -> tuple[str | None, str | None]:
@@ -599,6 +603,47 @@ def _concept_alias_hit(req_lower: str, hay: str) -> bool:
     return False
 
 
+def _local_evidence_haystack(anchor: str, submission_text: str, *, radius: int = 450) -> str:
+    """Criterion-local concept haystack: evidence_anchor plus nearby submission excerpt."""
+    a = (anchor or "").strip()
+    if not a or a.lower() in ("not found", "n/a", "none"):
+        return a
+    sub = submission_text or ""
+    if not sub:
+        return a
+    sub_l = sub.lower()
+    raw_idx = -1
+    # Prefer a distinctive mid-quote span so minor LLM paraphrase at the ends still locates.
+    toks = re.findall(r"[A-Za-z0-9%]{2,}", a)
+    candidates: list[str] = []
+    if len(a) >= 12:
+        candidates.append(a[: min(64, len(a))].lower())
+    if len(toks) >= 4:
+        mid = toks[1:7] if len(toks) > 6 else toks[:6]
+        candidates.append(" ".join(mid).lower())
+        candidates.append(" ".join(toks[:6]).lower())
+    for cand in candidates:
+        if len(cand) < 10:
+            continue
+        raw_idx = sub_l.find(cand[:72])
+        if raw_idx >= 0:
+            break
+    if raw_idx < 0 and len(toks) >= 3:
+        # Fallback: locate by first 3 content tokens in order.
+        pattern = r".{0,40}".join(re.escape(t.lower()) for t in toks[:4])
+        m = re.search(pattern, sub_l)
+        if m:
+            raw_idx = m.start()
+    if raw_idx < 0:
+        return a
+    start = max(0, raw_idx - radius)
+    end = min(len(sub), raw_idx + max(len(a), 80) + radius)
+    excerpt = sub[start:end].strip()
+    if not excerpt or excerpt.lower() == a.lower():
+        return a
+    return f"{a}\n{excerpt}"
+
+
 def _infer_covered_concepts(required: list, covered: list, haystack: str) -> list[str]:
     """Fill covered_concepts from submission/evidence text when the LLM left them empty/sparse."""
     req_list = [str(r).strip() for r in (required or []) if str(r).strip()]
@@ -844,6 +889,39 @@ def _criterion_theme(name: str) -> str | None:
         if needle in n:
             return theme
     return None
+
+
+def _cap_duplicate_evidence_anchors(verdicts: list[dict]) -> list[dict]:
+    """First instructor use of an evidence_anchor keeps score; later duplicates ≤50%."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for v in verdicts:
+        row = dict(v)
+        if row.get("ai_generated") or row.get("score") is None:
+            out.append(row)
+            continue
+        anchor = str(row.get("evidence_anchor") or "").strip().lower()
+        if not anchor or anchor in ("not found", "n/a", "none"):
+            out.append(row)
+            continue
+        key = " ".join(anchor.split())
+        if key in seen:
+            max_score = _as_points(row.get("max_score"), 0.0)
+            cap = max(0.0, math.ceil(max_score * 0.50))
+            score = _as_points(row.get("score"), 0.0)
+            if score > cap:
+                row["score"] = cap
+                just = str(row.get("justification") or "")
+                note = "Score capped: reused evidence_anchor already credited on another criterion."
+                if note not in just:
+                    row["justification"] = (just + "\n\n" + note).strip()
+                if str(row.get("status") or "").lower() == "full":
+                    row["status"] = "partial"
+            row["duplicate_evidence_anchor"] = True
+        else:
+            seen.add(key)
+        out.append(row)
+    return out
 
 
 def _dedupe_overlapping_ai_penalties(verdicts: list[dict]) -> list[dict]:
@@ -1178,6 +1256,14 @@ def _normalize_rubric(criteria: list | None) -> list[dict]:
 
 def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     """Enforce status/score sync, evidence/placement/material/concept caps."""
+    # Wrong-deliverable zeros must survive post-verify / narrative restores.
+    if v.get("wrong_deliverable") and not v.get("ai_generated"):
+        max_score = _as_points(max_score, _as_points(v.get("max_score"), 0.0))
+        v["max_score"] = max_score
+        v["score"] = 0.0
+        v["status"] = "missing"
+        return v
+
     max_score = _as_points(max_score)
     if v.get("score") is None:
         # Not assessed: no score exists to cap, and it must never become 0.
@@ -1217,15 +1303,23 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     claims_full = _justification_claims_full_credit(just_text)
     teacher_notes: list[str] = []  # only real scoring explanations shown to teachers
 
-    if anchor_missing and not (integrity_crit and positive_just and not hard_fail):
-        cap = max(0, math.ceil(max_score * 0.50))
+    # Missing verifiable quote: cap instructor criteria at ≤25% (no restore later).
+    if anchor_missing and not integrity_crit:
+        cap = max(0, math.ceil(max_score * 0.25))
         if score > cap:
             score = cap
             teacher_notes.append("Score capped: no verifiable student evidence_anchor.")
         if status == "full":
             status = "partial"
             v["ungrounded_full"] = True
-    # else: integrity soft-check is silent — no teacher-facing diagnostic spam
+    elif anchor_missing and integrity_crit:
+        # Integrity without a quote: keep a soft advisory score but never restore to full below.
+        cap = max(0, math.ceil(max_score * 0.25))
+        if score > cap:
+            score = cap
+            teacher_notes.append("Score capped: no verifiable student evidence_anchor.")
+        if status == "full":
+            status = "partial"
 
     section_map_reliable = v.get("section_map_reliable")
     if section_map_reliable is None:
@@ -1282,8 +1376,9 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     has_evidence = not anchor_missing
     # Never invent "demonstrated" coverage when there is no verifiable student quote,
     # and never keep a concept that the same verdict also lists as missing.
+    # Concept matching is criterion-local (anchor + nearby excerpt), not whole-submission.
     if isinstance(required, list) and len(required) > 0 and not integrity_crit and has_evidence:
-        haystack = " ".join([submission_text, anchor])
+        haystack = _local_evidence_haystack(anchor, submission_text)
         covered = _infer_covered_concepts(required, covered, haystack)
     covered = _reconcile_covered_concepts(
         covered, v.get("missing_keywords") or [], has_evidence=has_evidence
@@ -1319,8 +1414,8 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
                     f"Score adjusted for concept match rate ({hit}/{len(req_list)} auto-matched in text)."
                 )
 
-    # Academic Integrity leniency: reasoning that argues for credit must not land near zero.
-    if integrity_crit and not hard_fail and positive_just:
+    # Academic Integrity leniency only when a verifiable quote exists.
+    if integrity_crit and not hard_fail and positive_just and not anchor_missing:
         floor_pts = max(1, math.ceil(max_score * 0.75)) if max_score > 1 else max_score
         restore = max(floor_pts, min(raw_score, max_score))
         if score < restore:
@@ -1329,12 +1424,13 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
             status = "partial" if score < max_score else "full"
 
     # Full-credit narrative + evidence → award full points (concept graph cannot veto).
+    # Never restore full credit when the evidence anchor is missing.
     if (
         claims_full
         and not hard_fail
         and not denies_credit
         and alignment != "contradicts"
-        and (not anchor_missing or integrity_crit)
+        and not anchor_missing
     ):
         if score < max_score:
             score = max_score
@@ -1347,7 +1443,7 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
         and not hard_fail
         and not denies_credit
         and alignment != "contradicts"
-        and (not anchor_missing or integrity_crit)
+        and not anchor_missing
     ):
         floor_ratio = 0.75 if integrity_crit else 0.70
         floor_pts = max(1, math.ceil(max_score * floor_ratio)) if max_score > 0 else 0
@@ -2205,14 +2301,17 @@ async def run_grade(state: GradingState) -> dict:
             criterion_title, criterion_desc, api_key=api_key, provider=provider,
             deep=bool(state.get("deep_retrieve")),
         )
-        # 2. Multi-Hop Retrieve
-        retrieved_chunks, retrieval_status = await _multihop_retrieve(
-            sub_queries,
-            aid,
-            api_key=api_key,
-            course_id=state.get("course_id"),
-            provider=provider,
-        )
+        # 2. Multi-Hop Retrieve (skipped when provenance forces degrade-and-grade)
+        if state.get("rag_degraded"):
+            retrieved_chunks, retrieval_status = [], "ok"
+        else:
+            retrieved_chunks, retrieval_status = await _multihop_retrieve(
+                sub_queries,
+                aid,
+                api_key=api_key,
+                course_id=state.get("course_id"),
+                provider=provider,
+            )
 
         # Build context from semantically retrieved course material
         if retrieval_status == "ok":
@@ -2307,8 +2406,28 @@ async def run_grade(state: GradingState) -> dict:
                 seen_chunks.add(cid)
                 all_chunks.append(ch)
 
+    verdicts = _cap_duplicate_evidence_anchors(verdicts)
+
+    from grading_server.assessment_policy.deliverable_match import (
+        apply_wrong_deliverable_to_verdicts,
+        detect_wrong_deliverable,
+    )
+
+    deliverable = detect_wrong_deliverable(
+        submission_text=str(state.get("submission_text") or ""),
+        filenames=list(state.get("submission_filenames") or []),
+        assignment_name=str(state.get("assignment_name") or ""),
+        assignment_description=str(state.get("assignment_description") or ""),
+        is_proposal=bool(state.get("is_proposal")),
+    )
+    if deliverable.wrong_deliverable:
+        verdicts = apply_wrong_deliverable_to_verdicts(verdicts, wrong=True)
+
     force_flag_for_human = False
     for v in verdicts:
+        # AI-injected advisory criteria never force human review.
+        if v.get("ai_generated"):
+            continue
         if (
             v.get("score") is None
             or v.get("ungrounded_full")
@@ -2355,6 +2474,8 @@ async def run_grade(state: GradingState) -> dict:
         "verdicts": verdicts,
         "loop_count": state.get("loop_count", 0) + 1,
         "force_flag_for_human": force_flag_for_human,
+        "wrong_deliverable": bool(deliverable.wrong_deliverable),
+        "wrong_deliverable_note": deliverable.teacher_note if deliverable.wrong_deliverable else "",
         "relevant_chunks": all_chunks,
         "is_proposal": is_proposal,
     }
@@ -2368,6 +2489,16 @@ class LLMCritiquePayload(BaseModel):
 
 # Parallel Critique Helper — Actually calls the LLM
 async def _cp(v, api_key=None, provider=None):
+    # AI-injected advisory criteria never force human review via critique aggregation.
+    if v.get("ai_generated"):
+        return CritiqueResult(
+            criterion_id=v["criterion_id"],
+            is_supported=True,
+            is_justified=True,
+            confidence=0.95,
+            flag_for_human=False,
+            reasoning="AI advisory criterion — scored for display only; excluded from human-flag aggregation.",
+        ).model_dump()
     if v.get("score") is None:
         return CritiqueResult(
             criterion_id=v["criterion_id"],
@@ -2504,6 +2635,11 @@ async def run_output(state: GradingState) -> dict:
     raw_verdicts = list(state.get("verdicts", []) or [])
     raw_verdicts = _dedupe_overlapping_ai_penalties(raw_verdicts)
     raw_verdicts = _soften_challenges_ethics_double_count(raw_verdicts)
+    raw_verdicts = _cap_duplicate_evidence_anchors(raw_verdicts)
+    if state.get("wrong_deliverable"):
+        from grading_server.assessment_policy.deliverable_match import apply_wrong_deliverable_to_verdicts
+
+        raw_verdicts = apply_wrong_deliverable_to_verdicts(raw_verdicts, wrong=True)
     # Final deterministic consistency pass before aggregation
     raw_verdicts, holistic_flag = _holistic_consistency_nudge(raw_verdicts)
 
@@ -2513,7 +2649,8 @@ async def run_output(state: GradingState) -> dict:
         guarded = _apply_verdict_score_guards(dict(v), _as_points(v.get("max_score")))
         # Merge guard outputs back onto the full verdict (keeps evidence_lock / claim).
         merged = {**dict(v), **{k: guarded.get(k, v.get(k)) for k in guarded}}
-        merged = _restore_evidence_lock_if_violated(merged)
+        if not merged.get("wrong_deliverable"):
+            merged = _restore_evidence_lock_if_violated(merged)
         payload = {k: merged[k] for k in merged if k in CriterionVerdict.model_fields}
         # Absent optional fields take model defaults; score stays explicit (None = not assessed).
         payload = {k: val for k, val in payload.items() if val is not None or k == "score"}
@@ -2662,7 +2799,9 @@ async def run_output(state: GradingState) -> dict:
     usable_count = sum(1 for s in sims if s >= RAG_USABLE_SIMILARITY)
     top_avg = (sum(sims[:5]) / min(5, len(sims))) if sims else 0.0
 
-    if not sims or usable_count == 0:
+    if state.get("rag_degraded"):
+        rag_coverage_level = "NONE"
+    elif not sims or usable_count == 0:
         rag_coverage_level = "NONE"
     elif strong_match_count >= 3 or top_avg >= 0.50:
         rag_coverage_level = "HIGH"
@@ -2672,6 +2811,7 @@ async def run_output(state: GradingState) -> dict:
         rag_coverage_level = "LOW"
 
     # Human review: require real uncertainty — not a single noisy critique flag.
+    # Critiques for AI advisory criteria are already non-flagging stubs from _cp.
     overall_confidence = sum(c.confidence for c in critiques) / len(critiques) if critiques else 0.9
     flagged_count = sum(1 for c in critiques if c.flag_for_human)
     majority_flagged = flagged_count >= max(1, (len(critiques) + 1) // 2) if critiques else False
@@ -2735,6 +2875,13 @@ async def run_output(state: GradingState) -> dict:
         referenced_materials=referenced_materials,
         rag_coverage_level=rag_coverage_level,
         strong_match_count=strong_match_count,
+        materials_status=(
+            "reingesting" if state.get("rag_degraded") or str(state.get("materials_status") or "") == "reingesting"
+            else "ready"
+        ),
+        rag_degraded=bool(state.get("rag_degraded")),
+        wrong_deliverable=bool(state.get("wrong_deliverable")),
+        wrong_deliverable_note=str(state.get("wrong_deliverable_note") or ""),
         experiment_mode=experiment_mode,
         evidence_protocol_version=EVIDENCE_PROTOCOL_VERSION,
         evidence=evidence_block if isinstance(evidence_block, dict) else None,
@@ -2753,6 +2900,11 @@ async def run_output(state: GradingState) -> dict:
     res["policy_lookup_status"] = state.get("policy_lookup_status")
     # Include submission concepts for Knowledge Graph updates on the frontend
     res["submission_concepts"] = state.get("submission_concepts", [])
+    materials_status = str(state.get("materials_status") or ("reingesting" if state.get("rag_degraded") else "ready"))
+    res["materials_status"] = materials_status
+    res["rag_degraded"] = bool(state.get("rag_degraded"))
+    res["wrong_deliverable"] = bool(state.get("wrong_deliverable"))
+    res["wrong_deliverable_note"] = str(state.get("wrong_deliverable_note") or "")
     started = state.get("grade_started_at")
     if isinstance(started, (int, float)) and started > 0:
         res["_pipeline_duration_seconds"] = round(time.time() - float(started), 2)
@@ -3145,15 +3297,45 @@ async def grade_submission():
             f"refs={genre_signals.get('has_references')}"
         )
 
-        from grading_server.ingest_service import assert_embedding_space_compatible
+        from grading_server.ingest_service import (
+            evaluate_embedding_space,
+            mark_course_files_pending_reingest,
+        )
+        rag_degraded = False
+        materials_status = "ready"
         try:
-            await assert_embedding_space_compatible(
+            space_eval = await evaluate_embedding_space(
                 assignment_id=str(data.get("assignment_id") or ""),
                 course_id=str(data.get("course_id") or ""),
                 space=space_for_provider(llm_provider),
             )
         except EmbeddingError as emb_err:
             return _embedding_error_response(emb_err)
+
+        space_status = str(space_eval.get("status") or "")
+        if space_status == "migration_required":
+            return _embedding_error_response(
+                EmbeddingProvenanceError(
+                    space_eval.get("message")
+                    or "Provenance columns are missing; apply the embedding provenance migration.",
+                    code="EMBEDDING_MIGRATION_REQUIRED",
+                )
+            )
+        if space_status in ("reingest_required", "unknown_provenance"):
+            rag_degraded = True
+            materials_status = "reingesting"
+            course_for_reingest = str(data.get("course_id") or request.form.get("course_id") or "")
+            try:
+                await mark_course_files_pending_reingest(
+                    course_for_reingest,
+                    reason=space_status.upper(),
+                )
+            except Exception as mark_err:
+                print(f"[GRADE] mark pending reingest failed: {mark_err}", flush=True)
+            print(
+                f"[GRADE] degrade-and-grade materials_status=reingesting reason={space_status}",
+                flush=True,
+            )
 
         from grading_server.evidence.mode import resolve_experiment_mode
 
@@ -3163,7 +3345,8 @@ async def grade_submission():
         t_graph = time.time()
         print(
             f"[GRADE] start student={data.get('student_id')} assignment={data.get('assignment_id')} "
-            f"chars={len(submission_text)} extract_s={round(t_graph - s, 2)}",
+            f"chars={len(submission_text)} extract_s={round(t_graph - s, 2)} "
+            f"rag_degraded={rag_degraded}",
             flush=True,
         )
         final = await get_graph().ainvoke({
@@ -3189,6 +3372,8 @@ async def grade_submission():
             "experiment_mode": experiment_mode,
             "extraction_failed": False,
             "extraction_limitations": [],
+            "rag_degraded": rag_degraded,
+            "materials_status": materials_status,
             "evidence_chat_json": (
                 (lambda prompt, provider=None, api_key=None: chat_json(
                     prompt, provider=provider or llm_provider, api_key=api_key or llm_api_key
@@ -3204,6 +3389,9 @@ async def grade_submission():
         res["extracted_submission_text"] = submission_text
         res["submission_genre"] = submission_genre
         res["genre_signals"] = genre_signals
+        res["materials_status"] = res.get("materials_status") or materials_status
+        if rag_degraded and res.get("rag_coverage_level") not in ("LOW", "NONE"):
+            res["rag_coverage_level"] = "NONE"
         print(
             f"[GRADE] done student={data.get('student_id')} "
             f"graph_s={round(time.time() - t_graph, 2)} total_s={res['_pipeline_duration_seconds']}",
