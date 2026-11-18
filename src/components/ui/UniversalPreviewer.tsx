@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import * as Icons from '@/src/components/ui/Icons';
 import { Skeleton } from '@/src/components/ui/Skeleton';
 import { activeCourseId, authErrorMessage, gradingAuthHeaders } from '@/src/lib/gradingApi';
+import { isStaleChunkError, reloadOnceForStaleChunk } from '@/src/lib/staleChunkReload';
 import { gradingApiBase } from '@/src/lib/llmProviders';
 
 interface UniversalPreviewerProps {
@@ -402,6 +403,7 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
         }
       } catch (err: any) {
         if (cancelled) return;
+        if (isStaleChunkError(err) && reloadOnceForStaleChunk()) return;
         console.error("Preview extraction failure:", err);
         setError(`Native preview failed: ${err.message || 'Cannot read file'}`);
       } finally {
@@ -465,6 +467,8 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
         }
       } catch (err: any) {
         if (cancelled) return;
+        // After a Vercel deploy, old tabs 404 hashed chunks — reload once instead of a dead viewer.
+        if (isStaleChunkError(err) && reloadOnceForStaleChunk()) return;
         console.error('docx-preview failed, falling back to mammoth', err);
         try {
           const mammoth = await import('mammoth');
@@ -481,7 +485,9 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
           const safeHtml = unwrapHtmlAnchors(result.value || '');
           docxContainerRef.current.innerHTML = `<div class="docx-mammoth-fallback prose max-w-none p-12 bg-white">${safeHtml}</div>`;
         } catch (fallbackErr: any) {
-          if (!cancelled) setError(`Word viewer failed: ${fallbackErr?.message || err?.message || 'Cannot render document'}`);
+          if (cancelled) return;
+          if (isStaleChunkError(fallbackErr) && reloadOnceForStaleChunk()) return;
+          setError(`Word viewer failed: ${fallbackErr?.message || err?.message || 'Cannot render document'}`);
         }
       }
     })();
@@ -511,6 +517,7 @@ export const UniversalPreviewer: React.FC<UniversalPreviewerProps> = ({ url, fil
           </div>
           <button 
             onClick={() => {
+              if (isStaleChunkError(error) && reloadOnceForStaleChunk()) return;
               fileBufferCache.delete(url);
               setError(null);
               setDocxBuffer(null);

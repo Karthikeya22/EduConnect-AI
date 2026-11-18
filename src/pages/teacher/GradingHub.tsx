@@ -329,10 +329,12 @@ function ExternalSubmissionViewer({
 /** Generic https link-only submissions (Power BI, docs, dashboards, etc.). */
 function LinkSubmissionViewer({
   url,
+  courseId,
   initialText,
   onResolved,
 }: {
   url: string;
+  courseId?: string;
   initialText?: string;
   onResolved?: (payload: { text: string; html: string; embedBlocked: boolean }) => void;
 }) {
@@ -358,7 +360,10 @@ function LinkSubmissionViewer({
         const res = await fetch(`${gradingApiBase()}/api/fetch-public-link`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ url, course_id: activeCourseId() }),
+          body: JSON.stringify({
+            url,
+            course_id: courseId || activeCourseId(),
+          }),
         });
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
@@ -383,7 +388,7 @@ function LinkSubmissionViewer({
     return () => {
       cancelled = true;
     };
-  }, [url]);
+  }, [url, courseId]);
 
   return (
     <div className="h-full flex flex-col bg-white dark:bg-[#0F172A] min-h-0" data-testid="link-submission-viewer">
@@ -2219,6 +2224,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                 return (
                                   <LinkSubmissionViewer
                                     url={externalUrl}
+                                    courseId={selectedCourse ? String(selectedCourse) : undefined}
                                     initialText={gradingTextByStudent[String(student.id)] || ''}
                                     onResolved={onLinkResolved}
                                   />
