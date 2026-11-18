@@ -297,24 +297,58 @@ export const canvasAPI = {
         }
     },
 
+    async listCourseFilesFromCanvas(courseId: string) {
+        const token = localStorage.getItem('custom_canvas_token');
+        if (!token) {
+            throw new Error('Connect your Canvas API token (Course Selection → Verify Canvas) to load course files.');
+        }
+        const headers = { Authorization: `Bearer ${token}` };
+        const all: any[] = [];
+        const seen = new Set<string>();
+        let url: string | null = `/canvas-api/api/v1/courses/${encodeURIComponent(courseId)}/files?per_page=100`;
+        for (let page = 0; page < 30 && url; page++) {
+            const res = await fetch(url, { headers });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Canvas files ${res.status}: ${text.slice(0, 180)}`);
+            }
+            const body = await res.json();
+            if (!Array.isArray(body)) break;
+            for (const file of body) {
+                const id = file?.id != null ? String(file.id) : '';
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                all.push(file);
+            }
+            const link = res.headers.get('Link') || '';
+            const next = link.match(/<([^>]+)>;\s*rel="next"/);
+            if (!next) break;
+            url = next[1].replace(/^https:\/\/[^/]+/, '/canvas-api');
+        }
+        return all;
+    },
+
     async getCourseFiles(courseId: string) {
+        let edgeFiles: any[] | null = null;
         try {
             const { data, error } = await supabase.functions.invoke('canvas-get-course-files', {
                 body: { courseId },
                 headers: this.getCustomHeaders()
             });
-            if (error) {
-                const msg = data?.error || error.message || "Failed to fetch course files";
-                console.error("Canvas API getCourseFiles Error:", msg, { data, error });
-                throw new Error(msg);
-            }
-            if (!data) throw new Error("No data returned from getCourseFiles");
-            if (data?.error) throw new Error(data.error);
-            return data;
+            if (!error && Array.isArray(data)) edgeFiles = data;
+            if (edgeFiles && edgeFiles.length > 0) return edgeFiles;
+            const msg = data?.error || error?.message;
+            if (msg) console.warn('canvas-get-course-files unavailable, listing Canvas directly:', msg);
         } catch (e: any) {
-            console.error("canvasAPI.getCourseFiles critical failure:", e);
-            throw e;
+            console.warn('canvas-get-course-files failed, listing Canvas directly:', e);
         }
+        try {
+            const direct = await this.listCourseFilesFromCanvas(courseId);
+            if (direct.length > 0) return direct;
+        } catch (e: any) {
+            if (!edgeFiles) throw e;
+        }
+        return edgeFiles || [];
     },
 
     async downloadCanvasFile(url: string) {

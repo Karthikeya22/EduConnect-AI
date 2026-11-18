@@ -14,6 +14,13 @@ interface CanvasFile {
   'content-type'?: string;
 }
 
+interface IndexedMaterial {
+  canvas_file_id: string;
+  filename: string;
+  status?: string;
+  chunk_count?: number;
+}
+
 const INGEST_EXTS = ['.pdf', '.docx', '.txt', '.pptx'];
 
 function isIngestibleName(name: string): boolean {
@@ -30,6 +37,7 @@ interface CourseMaterialsModalProps {
 
 export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngestSuccess }: CourseMaterialsModalProps) {
   const [files, setFiles] = useState<CanvasFile[]>([]);
+  const [indexed, setIndexed] = useState<IndexedMaterial[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<number>>(new Set());
@@ -55,7 +63,15 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     const fetchFiles = async () => {
       try {
         setLoading(true);
-        const data = await canvasAPI.getCourseFiles(courseId);
+        const [data, statusRes] = await Promise.all([
+          canvasAPI.getCourseFiles(courseId),
+          fetch(
+            `${gradingApiBase()}/api/ingest/course-status?course_id=${encodeURIComponent(courseId)}`,
+            { headers: { ...(await gradingAuthHeaders()) } },
+          ).then(async (res) => (res.ok ? res.json() : { files: [] })).catch(() => ({ files: [] })),
+        ]);
+        const rows: IndexedMaterial[] = Array.isArray(statusRes?.files) ? statusRes.files : [];
+        setIndexed(rows.filter((row) => row.filename));
         if (Array.isArray(data)) {
           // Show every Canvas file returned (all folders). Ingest still only for supported docs.
           const sorted = [...data].sort((a, b) =>
@@ -106,24 +122,30 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     let current = 0;
 
     try {
-      // 1. Ingest Canvas Files
+      // 1. Ingest Canvas files. Already-indexed files return immediately.
+      requireLlmCredentials();
       for (const file of canvasFilesToIngest) {
         current++;
         setIngestProgress({ current, total: totalFiles, currentFileName: file.display_name });
-        
-        const blob = await canvasAPI.downloadCanvasFile(file.url);
-        const formData = new FormData();
-        formData.append('assignment_id', assignmentId);
-        formData.append('course_id', courseId);
-        formData.append('file', blob, file.display_name);
 
-        const headers: any = { ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
-        requireLlmCredentials();
+        const headers: any = {
+          'Content-Type': 'application/json',
+          ...llmAuthHeaders(),
+          ...(await gradingAuthHeaders()),
+        };
 
-        const res = await fetch(`${apiBase}/api/ingest/file`, {
+        const res = await fetch(`${apiBase}/api/ingest/canvas-url`, {
           method: 'POST',
           headers,
-          body: formData
+          body: JSON.stringify({
+            assignment_id: assignmentId,
+            course_id: courseId,
+            url: file.url,
+            filename: file.display_name,
+            canvas_file_id: String(file.id),
+            updated_at: file.updated_at || '',
+            canvas_token: localStorage.getItem('custom_canvas_token') || '',
+          }),
         });
 
         if (!res.ok) {
@@ -213,9 +235,27 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               <div className="flex items-center justify-center p-8">
                 <span className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></span>
               </div>
-            ) : files.length === 0 ? (
+            ) : files.length === 0 && indexed.length === 0 ? (
               <div className="text-sm text-zinc-500 italic py-6 text-center">
                 No files found in this course Files tree (all folders).
+              </div>
+            ) : files.length === 0 ? (
+              <div className="border border-emerald-200 dark:border-emerald-500/20 rounded-xl overflow-hidden divide-y divide-emerald-100 dark:divide-white/10 max-h-[300px] overflow-y-auto">
+                <div className="px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-500/10">
+                  Canvas did not return a file list. These class materials are already indexed and are what grading uses.
+                </div>
+                {indexed.map((row) => (
+                  <div key={row.canvas_file_id || row.filename} className="flex items-center p-3">
+                    <Icons.IconFile className="w-5 h-5 mr-3 text-emerald-500" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-zinc-900 dark:text-zinc-200 truncate">{row.filename}</div>
+                      <div className="text-[10px] text-zinc-500">
+                        {row.status === 'ready' ? 'Indexed' : row.status || 'Indexed'}
+                        {row.chunk_count ? ` · ${row.chunk_count} chunks` : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="border border-zinc-200 dark:border-white/10 rounded-xl overflow-hidden divide-y divide-zinc-200 dark:divide-white/10 max-h-[300px] overflow-y-auto custom-scrollbar">
@@ -309,18 +349,27 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
         <div className="p-6 border-t border-zinc-200 dark:border-white/10 shrink-0 flex items-center justify-between bg-transparent">
           <div className="text-xs font-medium text-zinc-500">
-            {selectedFiles.size + localFiles.length} files selected for ingestion
+            {files.length === 0 && indexed.length > 0
+              ? `${indexed.length} class materials already indexed`
+              : `${selectedFiles.size + localFiles.length} files selected for ingestion`}
           </div>
           
           <button
-            onClick={handleIngest}
-            disabled={isIngesting || (selectedFiles.size === 0 && localFiles.length === 0)}
+            onClick={files.length === 0 && indexed.length > 0 && selectedFiles.size === 0 && localFiles.length === 0
+              ? () => { onIngestSuccess(); onClose(); }
+              : handleIngest}
+            disabled={isIngesting || (selectedFiles.size === 0 && localFiles.length === 0 && indexed.length === 0)}
             className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
           >
             {isIngesting ? (
               <>
                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
                 Ingesting ({ingestProgress?.current}/{ingestProgress?.total})...
+              </>
+            ) : files.length === 0 && indexed.length > 0 && localFiles.length === 0 ? (
+              <>
+                <Icons.IconSparkles className="w-4 h-4 mr-2" />
+                Grade with these materials
               </>
             ) : (
               <>

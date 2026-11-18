@@ -1,6 +1,6 @@
 """Unit tests for course file cache helpers (mocked Supabase)."""
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import grading_server.ingest_service as ingest_service
 from grading_server.utils.embedding_space import INDEX_VERSION, space_for_provider
 
@@ -175,3 +175,23 @@ def test_ingest_course_file_reembeds_when_meta_only_matches_provider():
                 )
     emb.assert_called_once()
     assert result["cached"] is False
+
+
+def test_cached_course_file_hit_skips_download_when_fresh():
+    meta = {
+        "scope_key": "course:c1:file:f1",
+        "space_id": space_for_provider("openai").space_id,
+        "index_version": INDEX_VERSION,
+        "lms_host": ingest_service.trusted_lms_host(),
+    }
+    with patch.object(ingest_service, "lookup_course_file", new=AsyncMock(return_value={
+        "course_id": "c1", "canvas_file_id": "f1", "updated_at": "t1", "status": "ready",
+        "chunk_count": 4, "filename": "m9_reading.pdf",
+    })):
+        with patch.object(ingest_service, "get_embedding_meta", new=AsyncMock(return_value=meta)):
+            hit = asyncio.new_event_loop().run_until_complete(
+                ingest_service.cached_course_file_hit("c1", "f1", "t1", provider="openai")
+            )
+    assert hit["cached"] is True
+    assert hit["chunks_stored"] == 4
+    assert hit["filename"] == "m9_reading.pdf"

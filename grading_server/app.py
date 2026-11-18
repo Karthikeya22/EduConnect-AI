@@ -4411,6 +4411,18 @@ async def ingest_canvas_url():
         if not assignment_id or not file_url:
             return jsonify({"error": "assignment_id and url are required"}), 400
 
+        course_id = data.get("course_id")
+        canvas_file_id = data.get("canvas_file_id")
+        updated_at = data.get("updated_at") or ""
+        llm_provider, llm_api_key = resolve_llm_credentials(request)
+        if course_id and canvas_file_id and llm_provider:
+            from grading_server.ingest_service import cached_course_file_hit
+            hit = await cached_course_file_hit(
+                str(course_id), str(canvas_file_id), str(updated_at), provider=llm_provider,
+            )
+            if hit:
+                return jsonify(hit), 200
+
         try:
             file_bytes = await asyncio.to_thread(_download_canvas_bytes, str(file_url), canvas_token)
         except ValueError as e:
@@ -4435,10 +4447,6 @@ async def ingest_canvas_url():
 
         from grading_server.ingest_service import ingest_course_file, ingest_course_material
 
-        course_id = data.get("course_id")
-        canvas_file_id = data.get("canvas_file_id")
-        updated_at = data.get("updated_at") or ""
-        llm_provider, llm_api_key = resolve_llm_credentials(request)
         if not llm_provider or not llm_api_key:
             return byok_required_response()
 

@@ -420,6 +420,37 @@ def _lookup_course_file_sync(course_id: str, canvas_file_id: str):
     )
 
 
+async def cached_course_file_hit(
+    course_id: str,
+    canvas_file_id: str,
+    updated_at: str,
+    *,
+    provider: str,
+) -> dict | None:
+    """Return a skip payload when this Canvas file is already embedded. No download."""
+    existing = await lookup_course_file(course_id, canvas_file_id)
+    if not existing or existing.get("status") != "ready":
+        return None
+    scope_key = course_file_scope_key(course_id, canvas_file_id)
+    meta = await get_embedding_meta(scope_key)
+    space = space_for_provider(provider)
+    if not course_cache_is_fresh(
+        existing, meta,
+        course_id=course_id,
+        canvas_file_id=canvas_file_id,
+        updated_at=updated_at or "",
+        space=space,
+    ):
+        return None
+    return {
+        "status": "success",
+        "skipped": True,
+        "cached": True,
+        "chunks_stored": int(existing.get("chunk_count") or 0),
+        "filename": existing.get("filename") or "",
+    }
+
+
 async def lookup_course_file(course_id: str, canvas_file_id: str) -> dict | None:
     try:
         resp = await asyncio.to_thread(_lookup_course_file_sync, course_id, canvas_file_id)
