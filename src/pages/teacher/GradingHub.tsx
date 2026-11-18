@@ -1084,7 +1084,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     }
   };
 
-  // Auto-ingest when assignment is selected
+  // Auto-index course materials when an assignment opens. Already-ready files are
+  // skipped (no download / no re-embed). Only new or changed Canvas files are read.
   useEffect(() => {
     if (!selectedCourse || !selectedAssignment) return;
 
@@ -1093,7 +1094,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     }
 
     const runAutoIngest = async () => {
-      setIngestStatus({ type: 'loading', msg: 'Reading class materials, please wait...' });
+      setIngestStatus({ type: 'loading', msg: 'Checking class materials...' });
       try {
         await requireGradingSession();
         const health = await fetch(`${gradingApiBase()}/api/health`).then((r) => r.json()).catch(() => null);
@@ -1105,9 +1106,32 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
         await postAssignmentIngest(selectedAssignment);
 
-        const files = await canvasAPI.getCourseFiles(selectedCourse);
+        const [files, statusRows] = await Promise.all([
+          canvasAPI.getCourseFiles(selectedCourse),
+          fetchCourseFileStatus(),
+        ]);
+        const allFiles = Array.isArray(files) ? files as CanvasCourseFile[] : [];
+        const pending = selectFilesNeedingIngest(allFiles, statusRows);
+        const totalReadable = selectFilesNeedingIngest(allFiles, []).length;
+        const alreadyReady = Math.max(0, totalReadable - pending.length);
+
+        if (pending.length === 0) {
+          setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
+          setIngestStatus({
+            type: 'success',
+            msg: `${alreadyReady} of ${totalReadable} course files indexed (already up to date).`,
+          });
+          setTimeout(() => setIngestStatus(null), 5000);
+          return;
+        }
+
+        setIngestStatus({
+          type: 'loading',
+          msg: `Indexing ${pending.length} new or updated material${pending.length === 1 ? '' : 's'}...`,
+        });
+
         const { phaseA, phaseB } = selectPhaseFiles(
-          Array.isArray(files) ? files as CanvasCourseFile[] : [],
+          pending,
           currentItem?.name || currentItem?.title || '',
           5
         );
@@ -1116,7 +1140,11 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
         let succeeded = 0;
         let failed = 0;
-        for (const file of phaseA) {
+        for (const [i, file] of phaseA.entries()) {
+          setIngestStatus({
+            type: 'loading',
+            msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}`,
+          });
           try {
             const result = await ingestFile(file);
             succeeded += 1;
@@ -1131,12 +1159,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         }
 
         setIngestedAssignments(prev => new Set(prev).add(selectedAssignment));
+        const readyNow = alreadyReady + succeeded;
         const phaseAStatus: { type: 'success' | 'warning', msg: string } = failed > 0
           ? {
               type: 'warning',
-              msg: `Materials partially indexed — ${failed} of ${failed + succeeded} file${failed + succeeded === 1 ? '' : 's'} failed. Grading may miss some context.`
+              msg: `${readyNow} of ${totalReadable} course files indexed — ${failed} failed. Grading may miss some context.`,
             }
-          : { type: 'success', msg: 'Materials auto-ingested' };
+          : {
+              type: 'success',
+              msg: `${readyNow} of ${totalReadable} course files indexed.`,
+            };
         setIngestStatus(phaseAStatus);
 
         if (phaseB.length > 0) {
@@ -1152,7 +1184,12 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 console.error(`Background ingest failed: ${file.display_name}`, e);
               }
             }
-            setIngestStatus(phaseAStatus);
+            setIngestStatus({
+              type: failed > 0 ? 'warning' : 'success',
+              msg: failed > 0
+                ? `${totalReadable - failed} of ${totalReadable} course files indexed — ${failed} failed. Grading may miss some context.`
+                : `${totalReadable} of ${totalReadable} course files indexed.`,
+            });
             setTimeout(() => setIngestStatus(null), 5000);
           })();
         } else {
