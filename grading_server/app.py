@@ -4236,8 +4236,153 @@ _CANVAS_FILE_HOSTS = (
     "instructure-uploads.s3.amazonaws.com",
     # Current Canvas student-file CDN (e.g. a13-….cluster13.canvas-user-content.com)
     "canvas-user-content.com",
+    # Canvas Studio / Kaltura delivery hosts that media_sources may redirect to.
+    "kaltura.com",
+    "kaltura.nordu.net",
 )
 _MAX_REDIRECTS = 5
+
+
+def _normalize_canvas_file_url(file_url: str) -> str:
+    """Turn browser proxy paths into absolute Canvas URLs for the grading server."""
+    u = str(file_url or "").strip()
+    if not u:
+        return u
+    host = trusted_lms_host()
+    if u.startswith("/canvas-api/"):
+        return f"https://{host}{u[len('/canvas-api'):]}"
+    if u.startswith("/") and host:
+        return f"https://{host}{u}"
+    return u
+
+
+def _canvas_api_headers(canvas_token: str) -> dict:
+    return {"Authorization": f"Bearer {canvas_token}", "User-Agent": "EduConnect-AI/1.0"}
+
+
+def _fetch_canvas_file_meta(canvas_file_id: str, canvas_token: str) -> dict:
+    host = trusted_lms_host()
+    if not host:
+        raise ValueError("CANVAS_BASE_URL is not configured")
+    r = requests.get(
+        f"https://{host}/api/v1/files/{canvas_file_id}",
+        headers=_canvas_api_headers(canvas_token),
+        timeout=20,
+        allow_redirects=False,
+    )
+    if r.status_code != 200:
+        raise ValueError(f"Canvas file lookup failed: {r.status_code}")
+    data = r.json() if r.content else {}
+    if not isinstance(data, dict):
+        raise ValueError("Canvas file lookup returned unexpected data")
+    return data
+
+
+def _pick_media_source_url(sources: list) -> str | None:
+    """Prefer an MP4/WebM stream URL from Canvas media_sources."""
+    ranked: list[tuple[int, str]] = []
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        url = str(src.get("url") or "").strip()
+        if not url:
+            continue
+        content_type = str(src.get("content_type") or src.get("contentType") or "").lower()
+        container = str(src.get("container") or "").lower()
+        score = int(src.get("bitrate") or src.get("width") or src.get("size") or 0)
+        if "mp4" in content_type or container == "mp4" or url.lower().endswith(".mp4"):
+            score += 1_000_000
+        elif "webm" in content_type or container == "webm":
+            score += 500_000
+        ranked.append((score, url))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
+def _media_source_url(media_entry_id: str, canvas_token: str) -> str | None:
+    host = trusted_lms_host()
+    if not host or not media_entry_id:
+        return None
+    r = requests.get(
+        f"https://{host}/api/v1/media_objects/{media_entry_id}/media_sources",
+        headers=_canvas_api_headers(canvas_token),
+        timeout=20,
+        allow_redirects=False,
+    )
+    if r.status_code != 200:
+        return None
+    data = r.json() if r.content else None
+    if isinstance(data, list):
+        return _pick_media_source_url(data)
+    if isinstance(data, dict):
+        sources = data.get("media_sources") or data.get("sources") or []
+        if isinstance(sources, list):
+            return _pick_media_source_url(sources)
+    return None
+
+
+def _resolve_canvas_download_url(
+    *,
+    file_url: str | None,
+    canvas_file_id: str | None,
+    canvas_token: str | None,
+) -> str:
+    """Prefer a fresh Files API URL; fall back to Media Objects for Studio/video stubs."""
+    meta: dict = {}
+    if canvas_file_id and canvas_token:
+        try:
+            meta = _fetch_canvas_file_meta(str(canvas_file_id), str(canvas_token))
+            fresh = meta.get("url") or meta.get("download_url")
+            if fresh:
+                return str(fresh)
+            media_id = meta.get("media_entry_id")
+            if media_id:
+                media_url = _media_source_url(str(media_id), str(canvas_token))
+                if media_url:
+                    return media_url
+        except Exception as e:
+            print(f"[canvas-download] resolve via file id failed: {e}", flush=True)
+
+    if file_url:
+        return _normalize_canvas_file_url(str(file_url))
+    raise ValueError("No Canvas download URL available for this file")
+
+
+def _download_canvas_file_bytes(
+    *,
+    file_url: str | None,
+    canvas_file_id: str | None,
+    canvas_token: str | None,
+) -> bytes:
+    """Download course-file bytes, refreshing stale Canvas URLs and media stubs."""
+    resolved = _resolve_canvas_download_url(
+        file_url=file_url,
+        canvas_file_id=canvas_file_id,
+        canvas_token=canvas_token,
+    )
+    try:
+        return _download_canvas_bytes(resolved, canvas_token)
+    except ValueError as first_err:
+        # Listed file URLs expire; media stubs 404 on /files/.../download.
+        if "404" not in str(first_err) or not (canvas_file_id and canvas_token):
+            raise
+        meta = {}
+        try:
+            meta = _fetch_canvas_file_meta(str(canvas_file_id), str(canvas_token))
+        except Exception:
+            raise first_err
+        media_id = meta.get("media_entry_id")
+        if not media_id:
+            raise first_err
+        media_url = _media_source_url(str(media_id), str(canvas_token))
+        if not media_url:
+            raise ValueError(
+                "This Canvas media file has no downloadable stream URL. "
+                "Open it in Canvas Studio or upload a transcript/PDF of the lecture."
+            ) from first_err
+        return _download_canvas_bytes(media_url, canvas_token)
 
 
 def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> bytes:
@@ -4431,11 +4576,11 @@ async def ingest_canvas_url():
         filename = (data.get("filename") or "").lower()
         canvas_token = data.get("canvas_token") or request.headers.get("X-Canvas-Token")
 
-        if not assignment_id or not file_url:
-            return jsonify({"error": "assignment_id and url are required"}), 400
+        canvas_file_id = data.get("canvas_file_id")
+        if not assignment_id or (not file_url and not canvas_file_id):
+            return jsonify({"error": "assignment_id and url (or canvas_file_id) are required"}), 400
 
         course_id = data.get("course_id")
-        canvas_file_id = data.get("canvas_file_id")
         updated_at = data.get("updated_at") or ""
         llm_provider, llm_api_key = resolve_llm_credentials(request)
         if course_id and canvas_file_id and llm_provider:
@@ -4447,7 +4592,12 @@ async def ingest_canvas_url():
                 return jsonify(hit), 200
 
         try:
-            file_bytes = await asyncio.to_thread(_download_canvas_bytes, str(file_url), canvas_token)
+            file_bytes = await asyncio.to_thread(
+                _download_canvas_file_bytes,
+                file_url=str(file_url) if file_url else None,
+                canvas_file_id=str(canvas_file_id) if canvas_file_id else None,
+                canvas_token=canvas_token,
+            )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
