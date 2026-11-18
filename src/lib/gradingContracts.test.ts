@@ -50,7 +50,7 @@ assert(
     html.includes('Assessed so far 3 of 4 assessable pts'),
   'collapsed view shows assessed subtotal only',
 );
-assert(html.includes('Assessment policy'), 'assessment policy panel present');
+assert(!html.includes('Assessment policy'), 'assessment policy panel hidden from faculty UI');
 assert(!html.includes('EVALUATION SCORE') && !/0\/0|NaN/.test(html), 'no final score for reference-limited draft');
 
 // infrastructure failure of retrieval on a reference criterion is never a zero
@@ -145,8 +145,8 @@ const withEvidence: GradingOutput = {
   ],
 };
 const evidenceHtml = renderToStaticMarkup(createElement(GradingResult, { result: withEvidence }));
-assert(evidenceHtml.includes('Evidence policy:'), 'evidence policy indicator');
-assert(evidenceHtml.includes('Evidence checks + recovery when needed'), 'automatic policy label');
+assert(!evidenceHtml.includes('Evidence policy:'), 'faculty UI hides evidence-policy metadata');
+assert(!evidenceHtml.includes('Assessment policy'), 'faculty UI hides assessment-policy panel');
 assert(
   evidenceHtml.includes('Why this score') || evidenceHtml.includes('Score snapshot'),
   'evidence panel'
@@ -165,7 +165,7 @@ const legacyV1 = { ...refLimited, result_schema_version: 1 } as GradingOutput;
 const legacyHtml = renderToStaticMarkup(createElement(GradingResult, { result: legacyV1 }));
 assert(legacyHtml.includes('LEGACY DRAFT') || summarizeGrade(legacyV1).kind === 'incomplete', 'v1 result stays unverified');
 assert(summarizeGrade(legacyV1).kind === 'incomplete' && (summarizeGrade(legacyV1) as any).legacy === true, 'schema v1 is legacy');
-assert(legacyHtml.includes('Not applied on this legacy draft'), 'legacy draft does not claim active evidence policy');
+assert(!legacyHtml.includes('Evidence policy:'), 'legacy draft also hides evidence-policy metadata');
 
 assert(fetchCalls === 0, `network calls: ${fetchCalls}`);
 console.log('gradingContracts.test.ts PASS');

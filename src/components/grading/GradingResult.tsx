@@ -5,218 +5,14 @@ import {
   CriterionVerdict,
   CriterionClaim,
   SourceUnit,
-  AssessmentPolicy,
 } from '../../types/grading';
 import { formatVerdictScore, isScore, summarizeGrade } from '../../lib/gradeDisplay';
-import { gradingApiBase, llmAuthHeaders } from '../../lib/llmProviders';
-import { gradingAuthHeaders } from '../../lib/gradingApi';
 
 interface GradingResultProps {
   result: GradingOutput;
   rubricContext?: any[];
   onEvidenceAnchorClick?: (anchor: string) => void;
   onEvidenceUnitClick?: (unit: SourceUnit) => void;
-  onPolicyUpdated?: (policy: AssessmentPolicy) => void;
-  onReassessUnderPolicy?: (policy: AssessmentPolicy) => void;
-}
-
-function AssessmentPolicyPanel({
-  result,
-  onPolicyUpdated,
-  onReassessUnderPolicy,
-}: {
-  result: GradingOutput;
-  onPolicyUpdated?: (policy: AssessmentPolicy) => void;
-  onReassessUnderPolicy?: (policy: AssessmentPolicy) => void;
-}) {
-  const policy = result.assessment_policy || null;
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  const origin =
-    result.policy_origin ||
-    policy?.origin ||
-    (result.rubric_missing ? 'absent' : 'instructor');
-  const lifecycle = result.policy_lifecycle || policy?.lifecycle || '—';
-  const label =
-    result.policy_label ||
-    (result.policy_provisional
-      ? 'Provisional — inferred assessment policy'
-      : result.policy_formative_only
-        ? 'Formative only — insufficient assignment policy'
-        : null);
-
-  const callPolicy = async (path: string, body?: Record<string, unknown>) => {
-    if (!policy?.policy_id || policy.version == null) return;
-    setBusy(path);
-    setMessage(null);
-    try {
-      const res = await fetch(
-        `${gradingApiBase()}/api/assessment-policy/${encodeURIComponent(policy.policy_id)}/v/${policy.version}${path}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...llmAuthHeaders(),
-            ...(await gradingAuthHeaders()),
-          },
-          body: JSON.stringify({
-            course_id: policy.course_id,
-            assignment_id: policy.assignment_id,
-            ...(body || {}),
-          }),
-        }
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || data.error || 'Policy action failed');
-      }
-      onPolicyUpdated?.(data as AssessmentPolicy);
-      setMessage(path.includes('approve') ? 'Approved exact policy version.' : 'Saved as a new policy version.');
-    } catch (e: any) {
-      setMessage(e?.message || 'Policy action failed');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <div
-      className="bg-white dark:bg-[#151D2C] border border-zinc-100 dark:border-white/5 rounded-xl p-3 shadow-lg space-y-2"
-      data-testid="assessment-policy-panel"
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="text-[9px] font-black text-zinc-500 uppercase tracking-[0.2em]">Assessment policy</div>
-          <div className="mt-1 text-[12px] font-bold text-zinc-900 dark:text-zinc-100">
-            {label || (origin === 'instructor' ? 'Instructor rubric' : String(origin))}
-          </div>
-          <div className="mt-0.5 text-[10px] text-zinc-500">
-            Origin: {origin} · Status: {lifecycle}
-            {result.policy_version != null ? ` · Result pinned to v${result.policy_version}` : ''}
-            {result.policy_content_hash ? ` · hash ${String(result.policy_content_hash).slice(0, 10)}…` : ''}
-          </div>
-        </div>
-      </div>
-
-      {result.policy_provisional && (
-        <div
-          role="status"
-          data-testid="provisional-policy-banner"
-          className="p-2 px-3 bg-amber-50 dark:bg-amber-500/10 rounded-lg text-[10px] font-bold text-amber-800 dark:text-amber-300"
-        >
-          Provisional — inferred assessment policy. Not instructor-authored. Inspect and approve when ready.
-        </div>
-      )}
-
-      {result.policy_formative_only && (
-        <div
-          role="status"
-          data-testid="formative-policy-banner"
-          className="p-2 px-3 bg-zinc-50 dark:bg-white/5 rounded-lg text-[10px] text-zinc-700 dark:text-zinc-300"
-        >
-          Formative observations only — no authoritative assignment total. Supply clearer expectations or choose an
-          approved template to enable scoring.
-        </div>
-      )}
-
-      {policy?.maximum_score != null && (
-        <div className="text-[10px] text-zinc-600 dark:text-zinc-400">
-          Maximum score: {policy.maximum_score}
-          {policy.weighting_mode ? ` · weighting: ${policy.weighting_mode}` : ''}
-        </div>
-      )}
-
-      {(policy?.weighting_assumptions?.length || policy?.disclosed_assumptions?.length) ? (
-        <details className="text-[10px] text-zinc-600 dark:text-zinc-400">
-          <summary className="cursor-pointer font-bold text-zinc-700 dark:text-zinc-300">Assumptions (explicit vs inferred)</summary>
-          <ul className="mt-1 list-disc pl-4 space-y-0.5">
-            {(policy.disclosed_assumptions || []).map((a, i) => (
-              <li key={`d-${i}`}>{a}</li>
-            ))}
-            {(policy.weighting_assumptions || []).map((a, i) => (
-              <li key={`w-${i}`}>{a}</li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-
-      {policy?.criteria?.length ? (
-        <div className="space-y-2 pt-1">
-          {policy.criteria.map((c) => (
-            <div key={c.criterion_id} className="border border-zinc-100 dark:border-white/10 rounded-lg p-2">
-              <div className="flex justify-between gap-2">
-                <div className="text-[11px] font-bold text-zinc-900 dark:text-zinc-100">{c.title}</div>
-                <div className="text-[10px] text-zinc-500 whitespace-nowrap">
-                  {c.max_points} pts · {(c.weight * 100).toFixed(1)}%
-                </div>
-              </div>
-              <div className="text-[10px] text-zinc-600 dark:text-zinc-400 mt-0.5">{c.description}</div>
-              <div className="text-[9px] uppercase tracking-wider text-zinc-500 mt-1">
-                {c.provenance.replace(/_/g, ' ')}
-                {c.evidence_policy === 'requires_reference' ? ' · requires reference' : ''}
-              </div>
-              {c.source_excerpts?.map((ex, i) => (
-                <div key={i} className="mt-1 text-[10px] text-zinc-500 border-l-2 border-zinc-200 dark:border-white/10 pl-2">
-                  Req: {ex.requirement_id}
-                  {ex.location ? ` · ${ex.location}` : ''}
-                  <div className="italic text-zinc-600 dark:text-zinc-400">“{ex.excerpt}”</div>
-                </div>
-              ))}
-              {c.disclosed_assumptions?.length ? (
-                <div className="mt-1 text-[10px] text-amber-700 dark:text-amber-400">
-                  Inferred: {c.disclosed_assumptions.join(' ')}
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      ) : origin === 'instructor' ? (
-        <div className="text-[10px] text-zinc-500">Using instructor-authored rubric criteria from Canvas/ingest.</div>
-      ) : null}
-
-      {policy && policy.origin !== 'instructor' && (
-        <div className="flex flex-wrap gap-2 pt-1">
-          <button
-            type="button"
-            className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded bg-zinc-100 dark:bg-white/10"
-            disabled={!!busy}
-            onClick={() => callPolicy('/approve')}
-          >
-            {busy === '/approve' ? 'Approving…' : 'Approve this version'}
-          </button>
-          <button
-            type="button"
-            className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded bg-zinc-100 dark:bg-white/10"
-            disabled={!!busy}
-            onClick={() =>
-              callPolicy('/edit', {
-                policy: {
-                  ...policy,
-                  disclosed_assumptions: [
-                    ...(policy.disclosed_assumptions || []),
-                    'Instructor edited into a new policy version.',
-                  ],
-                },
-              })
-            }
-          >
-            {busy === '/edit' ? 'Saving…' : 'Edit → new version'}
-          </button>
-          {onReassessUnderPolicy && (
-            <button
-              type="button"
-              className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
-              onClick={() => onReassessUnderPolicy(policy)}
-            >
-              Reassess under this version
-            </button>
-          )}
-        </div>
-      )}
-      {message && <div className="text-[10px] text-zinc-600 dark:text-zinc-400">{message}</div>}
-    </div>
-  );
 }
 
 const CLAIM_TYPE_LABELS: Record<string, string> = {
@@ -526,8 +322,6 @@ export const GradingResult: React.FC<GradingResultProps> = ({
   rubricContext = [],
   onEvidenceAnchorClick,
   onEvidenceUnitClick,
-  onPolicyUpdated,
-  onReassessUnderPolicy,
 }) => {
   const [openCriterion, setOpenCriterion] = useState<string | null>(null);
   const summary = summarizeGrade(result);
@@ -535,23 +329,8 @@ export const GradingResult: React.FC<GradingResultProps> = ({
   const dimLabel = (score: number | null | undefined, max?: number) =>
     complete && isScore(score) ? `${score}/${max || '?'}` : '—';
   const sourceUnits: SourceUnit[] = result.evidence?.source_units || [];
-  const isLegacyDraft = summary.kind === 'incomplete' && summary.legacy;
   const provisionalPolicy = summary.provisionalPolicy;
   const formativeOnly = summary.kind === 'incomplete' && summary.formativeOnly;
-  const researchMode = result.experiment_mode;
-  const evidencePolicyLabel = isLegacyDraft
-    ? 'Not applied on this legacy draft — reassess to run evidence checks'
-    : researchMode === 'obligation_recovery'
-      ? 'Obligation-driven recovery (research mode D)'
-      : researchMode === 'coverage_recovery'
-      ? 'Evidence checks + recovery when needed'
-      : researchMode === 'verification_only'
-        ? 'Evidence checks only'
-        : researchMode === 'baseline'
-          ? 'Standard grading path'
-          : result.evidence_protocol_version != null
-            ? 'Evidence checks + recovery when needed'
-            : 'Pending reassessment';
 
   const copyToClipboard = () => {
     const headline = complete
@@ -676,19 +455,6 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
           </div>
         )}
 
-        <div
-          role="status"
-          data-testid="research-mode-indicator"
-          className="p-2 px-3 bg-zinc-50 dark:bg-white/5 rounded-lg text-[10px] text-zinc-600 dark:text-zinc-400 relative z-10"
-        >
-          Evidence policy:{' '}
-          <span className="font-bold text-zinc-800 dark:text-zinc-200">{evidencePolicyLabel}</span>
-          {result.evidence_protocol_version != null
-            ? ` · protocol v${result.evidence_protocol_version}`
-            : ''}
-          {summary.kind === 'incomplete' && summary.legacy ? ' · legacy draft (unverified)' : ''}
-        </div>
-
         {summary.kind === 'incomplete' && summary.legacy && (
           <div role="status" className="p-2.5 px-3 bg-zinc-50 dark:bg-white/5 rounded-lg text-[10px] text-zinc-700 dark:text-zinc-300 relative z-10">
             This draft predates result versioning, so its scores and total are shown for reference only and are not verified. Use Reassess to produce a verified draft; the original is kept.
@@ -701,12 +467,6 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
           </div>
         )}
       </div>
-
-      <AssessmentPolicyPanel
-        result={result}
-        onPolicyUpdated={onPolicyUpdated}
-        onReassessUnderPolicy={onReassessUnderPolicy}
-      />
 
       {/* Section C: Rubric Walkthrough */}
       <div className="space-y-3">

@@ -2382,34 +2382,6 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                  rubricContext={currentAuthItem?.rubric || []}
                                  onEvidenceAnchorClick={(text) => setHighlightText(text)}
                                  onEvidenceUnitClick={(unit) => setHighlightText(unit.text)}
-                                 onPolicyUpdated={(policy) => {
-                                   setAiGradingData((prev) => {
-                                     const cur = prev[selectedStudent!];
-                                     if (!cur) return prev;
-                                     const next = {
-                                       ...cur,
-                                       assessment_policy: policy,
-                                       policy_id: policy.policy_id,
-                                       policy_version: policy.version,
-                                       policy_content_hash: policy.content_hash,
-                                       policy_origin: policy.origin,
-                                       policy_lifecycle: policy.lifecycle,
-                                       policy_provisional: policy.lifecycle === 'frozen_provisional',
-                                       policy_formative_only: Boolean(policy.formative_only),
-                                       policy_label:
-                                         policy.lifecycle === 'approved'
-                                           ? 'Approved assessment policy'
-                                           : policy.formative_only
-                                             ? 'Formative only — insufficient assignment policy'
-                                             : 'Provisional — inferred assessment policy',
-                                     };
-                                     if (selectedCourse && selectedAssignment) {
-                                       saveAiGrade(selectedCourse, selectedAssignment, selectedStudent!, next);
-                                     }
-                                     return { ...prev, [selectedStudent!]: next };
-                                   });
-                                 }}
-                                 onReassessUnderPolicy={() => handleFetchAiGrade(selectedStudent!)}
                               />
                             </div>
                           ) : (
