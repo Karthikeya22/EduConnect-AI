@@ -3642,7 +3642,7 @@ from html.parser import HTMLParser
 # Only Canvas-hosted files may be fetched server-side; the download is
 # authenticated with the caller's Canvas token, so an arbitrary URL would let a
 # client turn this route into an SSRF proxy.
-MAX_CANVAS_DOWNLOAD_BYTES = 25 * 1024 * 1024
+MAX_CANVAS_DOWNLOAD_BYTES = 100 * 1024 * 1024
 MAX_EXTERNAL_SUBMISSION_BYTES = 5 * 1024 * 1024
 EXTERNAL_SUBMISSION_HOSTS = {"42lines.net", "harmonizelearning.com"}
 
@@ -4511,7 +4511,7 @@ def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> by
 
         declared_length = r.headers.get("Content-Length")
         if declared_length and declared_length.isdigit() and int(declared_length) > MAX_CANVAS_DOWNLOAD_BYTES:
-            raise ValueError("File is too large (limit 25MB)")
+            raise ValueError("File is too large (limit 100MB)")
 
         parts: list[bytes] = []
         total = 0
@@ -4520,7 +4520,7 @@ def _download_canvas_bytes(file_url: str, canvas_token: str | None = None) -> by
                 continue
             total += len(part)
             if total > MAX_CANVAS_DOWNLOAD_BYTES:
-                raise ValueError("File is too large (limit 25MB)")
+                raise ValueError("File is too large (limit 100MB)")
             parts.append(part)
         return b"".join(parts)
 

@@ -521,6 +521,8 @@ async def ingest_course_file(
             }
 
     aid = f"course:{course_id}"
+    # Postgres text rejects NUL; some PDFs extract with embedded \x00.
+    course_material_text = (course_material_text or "").replace("\x00", "")
 
     async def _legacy_fallback() -> dict:
         result = await ingest_course_material(

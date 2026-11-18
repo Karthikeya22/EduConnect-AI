@@ -135,12 +135,12 @@ def _parse_pdf(file_bytes: bytes, api_key: str | None = None, provider: str | No
     """
     import fitz  # PyMuPDF
 
-    # Keep peak RAM down on small hosts (Render free = 512MB).
-    max_bytes = 12 * 1024 * 1024
+    # Keep peak RAM bounded on the 2GB Render instance.
+    max_bytes = 60 * 1024 * 1024
     if len(file_bytes) > max_bytes:
         raise ValueError(
             f"PDF too large ({len(file_bytes) // (1024 * 1024)}MB). "
-            "Please upload a file under 12MB for AI grading."
+            "Please upload a file under 60MB for AI grading."
         )
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")

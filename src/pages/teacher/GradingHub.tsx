@@ -358,7 +358,7 @@ function LinkSubmissionViewer({
         const res = await fetch(`${gradingApiBase()}/api/fetch-public-link`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url, course_id: activeCourseId() }),
         });
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
