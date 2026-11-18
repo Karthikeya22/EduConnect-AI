@@ -1138,6 +1138,44 @@ def _as_points(value, default: float = 0.0) -> float:
     return v
 
 
+def _normalize_criterion(c: dict | None, *, index: int = 0) -> dict | None:
+    """Ensure criterion_id / max_score exist so grading never KeyErrors on shape drift.
+
+    Accepts Canvas-native `points` and LLM quality rows that omit defaults.
+    Returns None when the row is unusable (not a dict / no identity).
+    """
+    if not isinstance(c, dict):
+        return None
+    out = dict(c)
+    cid = str(out.get("criterion_id") or out.get("id") or "").strip()
+    if not cid:
+        title = str(out.get("title") or "").strip()
+        cid = f"crit_{index}" if not title else f"crit_{index}_{title[:24]}"
+    out["criterion_id"] = cid
+    raw_max = out.get("max_score", out.get("points", out.get("max_points", 10)))
+    max_score = _as_points(raw_max, 10.0)
+    if max_score <= 0:
+        max_score = 10.0
+    out["max_score"] = max_score
+    if not out.get("title"):
+        out["title"] = cid
+    if "description" not in out or out.get("description") is None:
+        out["description"] = ""
+    if not out.get("dimension"):
+        out["dimension"] = "content"
+    return out
+
+
+def _normalize_rubric(criteria: list | None) -> list[dict]:
+    """Normalize a rubric list; drop malformed rows."""
+    out: list[dict] = []
+    for i, c in enumerate(criteria or []):
+        row = _normalize_criterion(c if isinstance(c, dict) else None, index=i)
+        if row:
+            out.append(row)
+    return out
+
+
 def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     """Enforce status/score sync, evidence/placement/material/concept caps."""
     max_score = _as_points(max_score)
@@ -1564,7 +1602,7 @@ async def run_retrieve(state: GradingState) -> dict:
                 resolution.lookup.validation_errors,
             )
 
-        rubric = list(resolution.rubric_criteria)
+        rubric = _normalize_rubric(list(resolution.rubric_criteria))
         policy = resolution.policy.model_dump() if resolution.policy else None
         lookup_status = resolution.lookup.status
 
@@ -1595,16 +1633,31 @@ async def run_retrieve(state: GradingState) -> dict:
                     provider=provider,
                 )
                 new_criteria = quality_res.get("criteria", [])
-                for nc in new_criteria:
-                    nc_dict = dict(nc)
+                injected = 0
+                for i, nc in enumerate(new_criteria):
+                    if hasattr(nc, "model_dump"):
+                        nc_dict = nc.model_dump()
+                    elif isinstance(nc, dict):
+                        nc_dict = dict(nc)
+                    else:
+                        continue
                     nc_dict["assignment_id"] = aid
                     nc_dict["title"] = f"{nc_dict.get('title', 'Criterion')} (AI-Generated)"
                     nc_dict["ai_generated"] = True
-                    rubric.append(nc_dict)
-                print(f"[RAG] Injected {len(new_criteria)} adaptive quality criteria.")
+                    if not nc_dict.get("criterion_id"):
+                        nc_dict["criterion_id"] = f"ai_quality_{i}"
+                    if nc_dict.get("max_score") is None and nc_dict.get("points") is None:
+                        nc_dict["max_score"] = 10
+                    normalized = _normalize_criterion(nc_dict, index=len(rubric) + i)
+                    if not normalized:
+                        continue
+                    rubric.append(normalized)
+                    injected += 1
+                print(f"[RAG] Injected {injected} adaptive quality criteria.")
             except Exception as e:
                 print(f"[RAG] Failed to inject dynamic quality criteria: {e}")
 
+        rubric = _normalize_rubric(rubric)
         print(
             f"[RAG] Retrieved: {len(rubric)} criteria, {len(exemplars_raw)} exemplars, "
             f"policy_lookup={lookup_status}, policy_origin={(policy or {}).get('origin')}"
@@ -1792,12 +1845,19 @@ async def _gp(
     peer_rubric_titles: list[str] | None = None,
     retrieval_status: str = "ok",
 ):
+    c = _normalize_criterion(c if isinstance(c, dict) else None) or {
+        "criterion_id": "unknown",
+        "title": "Unknown",
+        "description": "",
+        "max_score": 10.0,
+        "dimension": "content",
+    }
     criterion_title = c.get('title', c.get('criterion_id', 'Unknown'))
     criterion_desc = c.get('description', '')
-    max_score = c['max_score']
+    max_score = _as_points(c.get('max_score'), 10.0)
     genre_signals = genre_signals or {"genre": submission_genre}
     peer_rubric_titles = peer_rubric_titles or []
-    title_lower = criterion_title.lower()
+    title_lower = str(criterion_title).lower()
 
     # Heuristic for dimension if defaulted to 'content'
     dimension = c.get('dimension', 'content')
@@ -1806,8 +1866,8 @@ async def _gp(
 
     def _not_assessable(failure_kind: str, justification: str) -> dict:
         return {
-            "criterion_id": c['criterion_id'],
-            "criterion_name": c.get('title', c['criterion_id']),
+            "criterion_id": c.get('criterion_id', 'unknown'),
+            "criterion_name": c.get('title', c.get('criterion_id', 'unknown')),
             "dimension": dimension,
             "score": None,
             "max_score": max_score,
@@ -2023,8 +2083,8 @@ async def _gp(
                 pass
 
     v = {
-        "criterion_id": c['criterion_id'],
-        "criterion_name": c.get('title', c['criterion_id']),
+        "criterion_id": c.get('criterion_id', 'unknown'),
+        "criterion_name": c.get('title', c.get('criterion_id', 'unknown')),
         "dimension": dimension,
         "score": _as_points(r.get("score", 0)),
         "max_score": _as_points(max_score),
@@ -2068,7 +2128,7 @@ async def run_grade(state: GradingState) -> dict:
     from grading_server.assessment_policy.resolve import formative_observation_verdicts
     from grading_server.assessment_policy.types import AssessmentPolicy
 
-    rubric = state.get("rubric_criteria", [])
+    rubric = _normalize_rubric(state.get("rubric_criteria", []))
     exemplars = state.get("exemplars", {})
     txt = state["submission_text"]
     aid = state["assignment_id"]
@@ -2084,20 +2144,6 @@ async def run_grade(state: GradingState) -> dict:
     peer_rubric_titles = [str(c.get("title") or c.get("criterion_id") or "") for c in rubric]
     if is_proposal:
         print(f"[GRADE] proposal-style submission detected for {aid}")
-    # #region agent log
-    try:
-        import json as _json, time as _time
-        from pathlib import Path as _Path
-        _Path(r"d:\EduConnect AI\.cursor\debug-9ae70f.log").open("a", encoding="utf-8").write(_json.dumps({
-            "sessionId": "9ae70f", "runId": "post-fix", "hypothesisId": "A",
-            "location": "app.py:run_grade:proposal_detect",
-            "message": "proposal-style detection",
-            "data": {"assignment_id": aid, "is_proposal": is_proposal, "text_len": len(txt or "")},
-            "timestamp": int(_time.time() * 1000),
-        }) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     policy_raw = state.get("assessment_policy")
     if isinstance(policy_raw, dict) and policy_raw.get("formative_only"):
@@ -2113,13 +2159,46 @@ async def run_grade(state: GradingState) -> dict:
         return {"verdicts": [], "relevant_chunks": []}
 
     # Map previous critiques by criterion_id if this is a retry loop
-    prev_critiques = {c["criterion_id"]: c for c in state.get("critiques", []) if c.get("flag_for_human")}
+    prev_critiques = {
+        c["criterion_id"]: c
+        for c in state.get("critiques", [])
+        if isinstance(c, dict) and c.get("flag_for_human") and c.get("criterion_id")
+    }
 
     async def _process_criterion(c):
+        c = _normalize_criterion(c if isinstance(c, dict) else None) or {
+            "criterion_id": "unknown",
+            "title": "Unknown",
+            "description": "",
+            "max_score": 10.0,
+            "dimension": "content",
+        }
         cid = c.get("criterion_id", "")
         criterion_title = c.get('title', cid)
         criterion_desc = c.get('description', '')
+        try:
+            return await _process_criterion_inner(c, cid, criterion_title, criterion_desc)
+        except Exception as e:
+            print(f"[GRADE] Criterion {cid} failed without crashing grade: {type(e).__name__}: {e}")
+            return ({
+                "criterion_id": cid or "unknown",
+                "criterion_name": criterion_title or cid or "Unknown",
+                "dimension": c.get("dimension", "content"),
+                "score": None,
+                "max_score": _as_points(c.get("max_score"), 10.0),
+                "status": "not_assessable",
+                "failure_kind": "processing_failed",
+                "retrieval_status": "infrastructure_error",
+                "justification": (
+                    f"Not assessed: processing failed ({type(e).__name__}). "
+                    "Requires regrade or human review."
+                ),
+                "evidence_anchor": "not found",
+                "ai_generated": bool(c.get("ai_generated", False)),
+                "material_alignment": "neutral",
+            }, [])
 
+    async def _process_criterion_inner(c, cid, criterion_title, criterion_desc):
         provider, api_key = _llm_creds(state)
         # 1. Decompose
         sub_queries = await _decompose_criterion(
@@ -3200,6 +3279,24 @@ async def grade_submission():
                  "error": "SERVER_RESTARTED",
                  "message": "Grading server restarted mid-request. Please click Grade again.",
              }), 503
+        # Rubric shape bugs (missing max_score/criterion_id) must not blame the LLM key or materials.
+        missing_field = None
+        if isinstance(e, KeyError):
+            missing_field = str(e).strip("'\"")
+        if missing_field in ("max_score", "criterion_id") or (
+            type(e).__name__ == "KeyError" and "max_score" in err_msg
+        ):
+             field = missing_field or "max_score"
+             return jsonify({
+                 "error": "RUBRIC_INVALID",
+                 "message": (
+                     "The rubric used for grading is missing required fields "
+                     f"({field}). Re-send the Canvas rubric (Refresh / open the assignment), "
+                     "then grade again."
+                 ),
+                 "validation_errors": [f"missing field: {field}"],
+                 "require_instructor_decision": True,
+             }), 422
         # Never echo raw ValidationError / provider dumps to the browser.
         return jsonify({
             "error": "GRADING_FAILED",

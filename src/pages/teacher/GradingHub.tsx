@@ -1323,6 +1323,12 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           if (data.error === "LLM_QUOTA" || res.status === 429 || String(data.error || '').toLowerCase().includes('quota')) {
              throw new Error(data.message || "LLM API quota exceeded. Wait a moment and retry.");
           }
+          if (data.error === "RUBRIC_INVALID" || res.status === 422) {
+             throw new Error(
+               data.message ||
+                 "Instructor rubric is invalid/unusable. Re-send the Canvas rubric, then grade again.",
+             );
+          }
           throw new Error(
             (typeof data.message === 'string' && data.message)
               || (typeof data.error === 'string' && data.error)

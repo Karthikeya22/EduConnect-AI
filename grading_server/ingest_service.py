@@ -321,7 +321,7 @@ async def ingest_course_material(
                 "course_id": course_id,
                 "title": str(c.get("title") or f"Criterion {i}"),
                 "description": str(c.get("description", "")),
-                "max_score": int(c.get("max_score", 10)),
+                "max_score": int(c.get("max_score", c.get("points", c.get("max_points", 10))) or 10),
                 "dimension": str(c.get("dimension", "content")),
             })
 
@@ -342,12 +342,12 @@ async def ingest_course_material(
         exemplar_rows = []
         for ex, emb in zip(exemplars, exemplar_embeddings):
             exemplar_rows.append({
-                "criterion_id": ex["criterion_id"],
+                "criterion_id": str(ex.get("criterion_id") or ex.get("id") or ""),
                 "assignment_id": assignment_id,
                 "course_id": course_id,
                 "submission_text": ex["submission_text"],
                 "score": int(ex["score"]),
-                "max_score": int(ex["max_score"]),
+                "max_score": int(ex.get("max_score", ex.get("points", ex.get("max_points", 10))) or 10),
                 "dimension": ex.get("dimension", "content"),
                 "embedding": emb,
             })
