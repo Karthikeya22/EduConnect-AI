@@ -476,6 +476,9 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               {!loading && files.length > 0 && (
                 <span className="normal-case tracking-normal font-medium text-zinc-500">
                   {files.length} total · {ingestibleCount} ingestible · {summary.indexed} indexed
+                  {summary.indexed === 0 && summary.stale > 0
+                    ? ` · ${summary.stale} retained (needs refresh)`
+                    : ''}
                 </span>
               )}
             </h3>

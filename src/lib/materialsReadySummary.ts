@@ -11,6 +11,8 @@ export type MaterialsReadySummary = {
   kind: MaterialsReadyKind;
   label: string;
   indexed: number;
+  /** Indexed + stale (prior chunks still on disk / in registry). Never treat as total wipe. */
+  withPriorIndex: number;
   totalReadable: number;
   pending: number;
   failed: number;
@@ -27,6 +29,7 @@ export function summarizeMaterialsReady(
       kind: 'unavailable',
       label: 'Status unavailable',
       indexed: 0,
+      withPriorIndex: 0,
       totalReadable: 0,
       pending: 0,
       failed: 0,
@@ -39,6 +42,7 @@ export function summarizeMaterialsReady(
   const byId = new Map(rows.map((r) => [String(r.canvas_file_id), r]));
   const totalReadable = selectFilesNeedingIngest(all, []).length;
   let indexed = 0;
+  let stale = 0;
   let pending = 0;
   let failed = 0;
   let broken = 0;
@@ -46,17 +50,22 @@ export function summarizeMaterialsReady(
   for (const f of all) {
     const state = materialIndexState(f, byId.get(String(f.id)));
     if (state === 'indexed') indexed += 1;
-    else if (state === 'pending' || state === 'stale' || state === 'not_indexed') pending += 1;
+    else if (state === 'stale') {
+      stale += 1;
+      pending += 1;
+    } else if (state === 'pending' || state === 'not_indexed') pending += 1;
     else if (state === 'failed') failed += 1;
     else if (state === 'broken') broken += 1;
   }
 
+  const withPriorIndex = indexed + stale;
   const needWork = selectFilesNeedingIngest(all, rows).length;
   if (totalReadable === 0) {
     return {
       kind: 'ready',
       label: 'No ingestible course files',
       indexed,
+      withPriorIndex,
       totalReadable,
       pending,
       failed,
@@ -68,6 +77,7 @@ export function summarizeMaterialsReady(
       kind: 'ready',
       label: `Ready · ${indexed}/${totalReadable} indexed`,
       indexed,
+      withPriorIndex,
       totalReadable,
       pending,
       failed,
@@ -79,16 +89,22 @@ export function summarizeMaterialsReady(
       kind: 'partial',
       label: `Partial · ${indexed}/${totalReadable} indexed (${failed + broken} failed)`,
       indexed,
+      withPriorIndex,
       totalReadable,
       pending,
       failed,
       broken,
     };
   }
+  const retainedNote =
+    indexed === 0 && withPriorIndex > 0
+      ? ` · ${withPriorIndex} retained (needs refresh)`
+      : '';
   return {
     kind: 'indexing',
-    label: `Indexing ${indexed}/${totalReadable}`,
+    label: `Indexing ${indexed}/${totalReadable}${retainedNote}`,
     indexed,
+    withPriorIndex,
     totalReadable,
     pending,
     failed,

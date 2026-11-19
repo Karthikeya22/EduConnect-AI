@@ -1,0 +1,33 @@
+# Blocks merges/pushes that reintroduce grading or materials wipe bugs.
+name: critical
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  platform-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python critical invariants
+        run: python -m grading_server.tests.test_platform_invariants
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Materials + index UI invariants
+        run: |
+          npx vite-node src/lib/courseFileRanker.test.ts
+          npx vite-node src/lib/materialsReadySummary.test.ts

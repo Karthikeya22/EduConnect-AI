@@ -51,6 +51,7 @@ from grading_server.models import (
     _coerce_str_list,
     is_legacy_result,
 )
+from grading_server.retrieval_guards import coerce_retrieval, top_chunk_similarity
 from grading_server.utils.embedding_space import (
     INDEX_VERSION,
     EmbeddingError,
@@ -2097,7 +2098,6 @@ _RETRIEVAL_UNAVAILABLE_CTX = {
     ),
 }
 
-
 async def _multihop_retrieve(
     sub_queries: list[str],
     assignment_id: str,
@@ -2158,7 +2158,7 @@ async def _multihop_retrieve(
             unique_chunks.append(c)
     if not unique_chunks:
         return [], "no_corpus"
-    if max(float(c.get("similarity") or 0) for c in unique_chunks) < RAG_USABLE_SIMILARITY:
+    if top_chunk_similarity(unique_chunks) < RAG_USABLE_SIMILARITY:
         return [], "no_useful_matches"
     return unique_chunks, "ok"
 
@@ -2570,7 +2570,6 @@ async def run_grade(state: GradingState) -> dict:
             deep=bool(state.get("deep_retrieve")),
         )
         # 2. Multi-Hop Retrieve (skipped when provenance forces degrade-and-grade)
-        # Use no_corpus — never "ok" with [] (max() on empty chunks crashed every criterion).
         if state.get("rag_degraded"):
             retrieved_chunks, retrieval_status = [], "no_corpus"
         else:
@@ -2581,14 +2580,15 @@ async def run_grade(state: GradingState) -> dict:
                 course_id=state.get("course_id"),
                 provider=provider,
             )
+        retrieved_chunks, retrieval_status = coerce_retrieval(retrieved_chunks, retrieval_status)
 
         # Build context from semantically retrieved course material
-        if retrieval_status == "ok" and retrieved_chunks:
+        if retrieval_status == "ok":
             ctx = "\n---\n".join([
                 f"[Source: {ch.get('source_title', 'Unknown Source').split(' (chunk')[0].strip()}] (Chunk {ch.get('chunk_index', '?')}) (similarity: {round(ch.get('similarity', 0), 2)})\n{ch.get('chunk_text', '')}"
                 for ch in retrieved_chunks[:10]
             ])
-            top_sim = max(float(ch.get("similarity") or 0) for ch in retrieved_chunks)
+            top_sim = top_chunk_similarity(retrieved_chunks)
             ctx += (
                 "\n\n=== MATERIAL ALIGNMENT (retrieved course materials are available) ===\n"
                 "Set material_alignment='supports' when the student's claims are consistent with these materials. "
@@ -2597,8 +2597,6 @@ async def run_grade(state: GradingState) -> dict:
                 f"(top similarity was {round(top_sim, 2)}; treat ≥0.45 as clearly on-topic).\n"
             )
         else:
-            if retrieval_status == "ok":
-                retrieval_status = "no_corpus"
             ctx = _RETRIEVAL_UNAVAILABLE_CTX.get(
                 retrieval_status, _RETRIEVAL_UNAVAILABLE_CTX["no_corpus"]
             )
