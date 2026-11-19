@@ -297,6 +297,7 @@ const App: React.FC = () => {
 
           {/* Teacher Routes */}
           <Route path="/teacher/select-course" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><TeacherCourseSelection onLogout={commonProps.onLogout} /></ProtectedRoute>} />
+          <Route path="/teacher/courses" element={<Navigate to="/teacher/select-course" replace />} />
           <Route path="/teacher/dashboard" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><TeacherDashboard {...commonProps} currentPath="teacher-dashboard" /></ProtectedRoute>} />
           <Route path="/teacher/assignments" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><CreateAssignment {...commonProps} /></ProtectedRoute>} />
           <Route path="/teacher/analytics" element={<ProtectedRoute allowedRole="teacher" user={user} isCheckingAuth={isCheckingAuth}><StudentsAnalytics {...commonProps} /></ProtectedRoute>} />

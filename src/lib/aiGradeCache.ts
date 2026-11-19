@@ -66,5 +66,7 @@ export function saveAiGrade(
 }
 
 export function formatAiGradeLabel(grade: GradingOutput): string {
-  return summarizeGrade(grade).label;
+  const s = summarizeGrade(grade);
+  if (s.provisionalPolicy && s.policyLabel) return `${s.policyLabel} · ${s.label}`;
+  return s.label;
 }

@@ -21,6 +21,19 @@ import {
   selectMatchingRubricRating,
   summarizeGrade,
 } from '../../lib/gradeDisplay';
+import { joinOrStartCourseIngest } from '../../lib/courseIngestCoordinator';
+import { fetchWithRetry } from '../../lib/fetchWithRetry';
+import {
+  MaterialsReadySummary,
+  provisionalMaterialsReason,
+  summarizeMaterialsReady,
+} from '../../lib/materialsReadySummary';
+import {
+  emptySubmissionHeadline,
+  hasGradeableSubmission,
+  isPlaceholderSubmissionBody,
+  submissionListLabel,
+} from '../../lib/submissionGradeability';
 import { gradingApiBase, llmAuthHeaders, requireLlmCredentials } from '../../lib/llmProviders';
 import { requireGradingSession } from '../../lib/gradingApi';
 import { activeCourseId, authErrorMessage, gradingAuthHeaders } from '../../lib/gradingApi';
@@ -643,10 +656,17 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   const [loadingStudents, setLoadingStudents] = useState<Set<string>>(new Set());
   const [ingestingStudents, setIngestingStudents] = useState<Set<string>>(new Set());
   const [ingestStatus, setIngestStatus] = useState<{ type: 'success' | 'error' | 'warning' | 'loading', msg: string } | null>(null);
+  const [materialsReady, setMaterialsReady] = useState<MaterialsReadySummary | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [ingestedAssignments, setIngestedAssignments] = useState<Set<string>>(new Set());
   const ingestionPromisesRef = useRef<Record<string, Promise<void>>>({});
+  const materialsAbortRef = useRef<AbortController | null>(null);
   const [highlightText, setHighlightText] = useState<string | null>(null);
+  const [autoIngestNonce, setAutoIngestNonce] = useState(0);
+
+  const stopMaterialsIndexing = () => {
+    materialsAbortRef.current?.abort();
+  };
 
   // References for animations
   const leftPanelRef = useRef<HTMLDivElement>(null);
@@ -804,7 +824,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
             id: String(s.user_id),
             name: s.user?.name || s.user?.short_name || 'Unknown Student',
             initials: (s.user?.name || s.user?.short_name || 'U S').substring(0, 2).toUpperCase(),
-            date: s.submitted_at ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(s.submitted_at)) : 'Missing input',
+            date: s.submitted_at ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(s.submitted_at)) : '—',
             status: s.score !== null ? 'Graded' : (s.submitted_at ? 'Ungraded' : 'Missing'),
             gradeText: s.score !== null ? `${s.score} pts` : 'Ungraded',
             avatarColor: 'bg-blue-700',
@@ -1015,7 +1035,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     }
   };
 
-  const ingestCourseFile = async (assignmentId: string, file: CanvasCourseFile) => {
+  const ingestCourseFile = async (assignmentId: string, file: CanvasCourseFile, signal?: AbortSignal) => {
     const payload = {
       assignment_id: assignmentId,
       course_id: selectedCourse,
@@ -1029,21 +1049,22 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
     const fileHeaders: any = { 'Content-Type': 'application/json', ...llmAuthHeaders(), ...(await gradingAuthHeaders()) };
 
-    const res = await fetch(`${gradingApiBase()}/api/ingest/canvas-url`, {
+    const res = await fetchWithRetry(`${gradingApiBase()}/api/ingest/canvas-url`, {
       method: 'POST',
       headers: fileHeaders,
       body: JSON.stringify(payload)
-    });
+    }, { signal });
     if (!res.ok) {
       throw new Error(await res.text());
     }
     return await res.json().catch(() => ({} as any));
   };
 
-  const fetchCourseFileStatus = async (): Promise<CourseFileStatusRow[]> => {
-    const res = await fetch(
+  const fetchCourseFileStatus = async (signal?: AbortSignal): Promise<CourseFileStatusRow[]> => {
+    const res = await fetchWithRetry(
       `${gradingApiBase()}/api/ingest/course-status?course_id=${encodeURIComponent(String(selectedCourse))}`,
-      { headers: { ...(await gradingAuthHeaders()) } }
+      { headers: { ...(await gradingAuthHeaders()) } },
+      { signal },
     );
     if (!res.ok) {
       const errText = await res.text();
@@ -1058,41 +1079,93 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
   // Indexes course files that are missing, failed, or changed in Canvas since last ingest.
   const handleRefreshMaterials = async () => {
     if (!selectedCourse || !selectedAssignment || isRefreshingMaterials) return;
+    materialsAbortRef.current?.abort();
+    const ac = new AbortController();
+    materialsAbortRef.current = ac;
+    const signal = ac.signal;
     setIsRefreshingMaterials(true);
     try {
       await requireGradingSession();
       requireLlmCredentials();
       setIngestStatus({ type: 'loading', msg: 'Checking which course materials need indexing...' });
-      const [files, statusRows] = await Promise.all([
-        canvasAPI.getCourseFiles(selectedCourse),
-        fetchCourseFileStatus(),
-      ]);
-      const docFiles = (Array.isArray(files) ? files as CanvasCourseFile[] : []);
+
+      let docFiles: CanvasCourseFile[] = [];
+      let statusRows: CourseFileStatusRow[] = [];
+      try {
+        const files = await canvasAPI.getCourseFiles(selectedCourse);
+        docFiles = Array.isArray(files) ? (files as CanvasCourseFile[]) : [];
+      } catch (err: any) {
+        if (signal.aborted) {
+          setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+          return;
+        }
+        setIngestStatus({
+          type: 'warning',
+          msg: `Could not list Canvas files: ${err?.message || 'Failed to fetch'}. Tap Refresh Materials to retry.`,
+        });
+        setMaterialsReady(summarizeMaterialsReady(null, null, { statusUnavailable: true }));
+        return;
+      }
+      try {
+        statusRows = await fetchCourseFileStatus(signal);
+      } catch (err: any) {
+        if (signal.aborted || err?.name === 'AbortError') {
+          setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+          return;
+        }
+        setMaterialsReady(summarizeMaterialsReady(docFiles, null, { statusUnavailable: true }));
+        setIngestStatus({
+          type: 'warning',
+          msg: `Index status unavailable: ${err?.message || 'Failed to fetch'}. Retry indexing when the server is reachable.`,
+        });
+        return;
+      }
+
+      setMaterialsReady(summarizeMaterialsReady(docFiles, statusRows));
       const pending = selectFilesNeedingIngest(docFiles, statusRows);
 
       let failed = 0;
-      for (const [i, file] of pending.entries()) {
-        setIngestStatus({ type: 'loading', msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}` });
-        try {
-          const result = await ingestCourseFile(selectedAssignment, file);
-          if (!result?.cached && !result?.skipped) {
-            await new Promise(r => setTimeout(r, 400));
+      await joinOrStartCourseIngest(selectedCourse, async () => {
+        for (const [i, file] of pending.entries()) {
+          if (signal.aborted) break;
+          setIngestStatus({ type: 'loading', msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}` });
+          try {
+            const result = await ingestCourseFile(selectedAssignment, file, signal);
+            if (!result?.cached && !result?.skipped) {
+              await new Promise(r => setTimeout(r, 400));
+            }
+          } catch (e: any) {
+            if (e?.name === 'AbortError' || signal.aborted) break;
+            failed += 1;
+            console.error(`Refresh ingest failed: ${file.display_name}`, e);
           }
-        } catch (e) {
-          failed += 1;
-          console.error(`Refresh ingest failed: ${file.display_name}`, e);
         }
+      });
+
+      if (signal.aborted) {
+        const refreshed = await fetchCourseFileStatus().catch(() => statusRows);
+        setMaterialsReady(summarizeMaterialsReady(docFiles, refreshed));
+        setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+        return;
       }
 
-      const total = selectFilesNeedingIngest(docFiles, []).length;
-      const ready = total - selectFilesNeedingIngest(docFiles, await fetchCourseFileStatus()).length;
+      const refreshed = await fetchCourseFileStatus(signal).catch(() => statusRows);
+      const summary = summarizeMaterialsReady(docFiles, refreshed);
+      setMaterialsReady(summary);
+      const total = summary.totalReadable;
+      const ready = summary.indexed;
       setIngestStatus(failed > 0
         ? { type: 'warning', msg: `${ready} of ${total} course files indexed — ${failed} failed this refresh. Grading may miss some context.` }
         : { type: 'success', msg: `${ready} of ${total} course files indexed${pending.length === 0 ? ' (already up to date)' : ''}.` });
     } catch (err: any) {
+      if (err?.name === 'AbortError' || signal.aborted) {
+        setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+        return;
+      }
       console.error('Refresh materials failed:', err);
-      setIngestStatus({ type: 'error', msg: `Refresh materials failed: ${err.message}` });
+      setIngestStatus({ type: 'warning', msg: `Refresh materials failed: ${err.message}. Tap Refresh Materials to retry.` });
     } finally {
+      if (materialsAbortRef.current === ac) materialsAbortRef.current = null;
       setIsRefreshingMaterials(false);
     }
   };
@@ -1107,16 +1180,29 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
       return;
     }
 
+    materialsAbortRef.current?.abort();
+    const ac = new AbortController();
+    materialsAbortRef.current = ac;
+    const signal = ac.signal;
     let cancelled = false;
     const assignmentId = selectedAssignment;
+    const courseId = String(selectedCourse);
     let running: Promise<void>;
+
+    const isAbort = (err?: any) =>
+      cancelled || signal.aborted || err?.name === 'AbortError' || /aborted|aborterror/i.test(String(err?.message || ''));
+    /** User hit Stop (abort) while this effect is still the active one — not a course-switch cleanup. */
+    const userStopped = () => signal.aborted && !cancelled;
 
     const runAutoIngest = async () => {
       setIngestStatus({ type: 'loading', msg: 'Checking class materials...' });
       try {
         await requireGradingSession();
-        if (cancelled) return;
-        const health = await fetch(`${gradingApiBase()}/api/health`).then((r) => r.json()).catch(() => null);
+        if (isAbort()) return;
+        const health = await fetchWithRetry(`${gradingApiBase()}/api/health`, undefined, { signal })
+          .then((r) => r.json())
+          .catch(() => null);
+        if (isAbort()) return;
         if (health?.authz && health.authz.ready === false) {
           throw new Error(health.authz.message || authErrorMessage({ error: 'AUTHZ_SETUP_REQUIRED' }));
         }
@@ -1124,20 +1210,54 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         requireLlmCredentials();
 
         await postAssignmentIngest(assignmentId);
-        if (cancelled) return;
+        if (isAbort()) return;
 
-        const [files, statusRows] = await Promise.all([
-          canvasAPI.getCourseFiles(selectedCourse),
-          fetchCourseFileStatus(),
-        ]);
-        if (cancelled) return;
-        const allFiles = Array.isArray(files) ? files as CanvasCourseFile[] : [];
+        let allFiles: CanvasCourseFile[] = [];
+        let statusRows: CourseFileStatusRow[] | null = null;
+
+        try {
+          const files = await canvasAPI.getCourseFiles(courseId);
+          allFiles = Array.isArray(files) ? (files as CanvasCourseFile[]) : [];
+        } catch (err: any) {
+          if (isAbort(err)) {
+            if (userStopped()) {
+              setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+            }
+            return;
+          }
+          setMaterialsReady(summarizeMaterialsReady(null, null, { statusUnavailable: true }));
+          setIngestStatus({
+            type: 'warning',
+            msg: `Could not list Canvas files: ${err?.message || 'Failed to fetch'}. Tap Refresh Materials to retry.`,
+          });
+          return;
+        }
+
+        try {
+          statusRows = await fetchCourseFileStatus(signal);
+        } catch (err: any) {
+          if (isAbort(err)) {
+            if (userStopped()) {
+              setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+            }
+            return;
+          }
+          setMaterialsReady(summarizeMaterialsReady(allFiles, null, { statusUnavailable: true }));
+          setIngestStatus({
+            type: 'warning',
+            msg: `Index status unavailable: ${err?.message || 'Failed to fetch'}. Course files were not auto-queued.`,
+          });
+          return;
+        }
+        if (isAbort()) return;
+
         const pending = selectFilesNeedingIngest(allFiles, statusRows);
         const totalReadable = selectFilesNeedingIngest(allFiles, []).length;
         const alreadyReady = Math.max(0, totalReadable - pending.length);
+        setMaterialsReady(summarizeMaterialsReady(allFiles, statusRows));
 
         if (pending.length === 0) {
-          if (!cancelled) {
+          if (!isAbort()) {
             setIngestedAssignments(prev => new Set(prev).add(assignmentId));
             setIngestStatus({
               type: 'success',
@@ -1159,38 +1279,47 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           5
         );
 
-        const ingestFile = (file: CanvasCourseFile) => ingestCourseFile(assignmentId, file);
         const failedNames: string[] = [];
-
         let succeeded = 0;
         let failed = 0;
         const allPhases = [...phaseA, ...phaseB];
-        for (const [i, file] of allPhases.entries()) {
-          if (cancelled) break;
-          setIngestStatus({
-            type: 'loading',
-            msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}`,
-          });
-          try {
-            const result = await ingestFile(file);
-            succeeded += 1;
-            // A cache hit does no embedding work, so there is no quota to pace.
-            if (!result?.cached && !result?.skipped) {
-              await new Promise(r => setTimeout(r, i < phaseA.length ? 800 : 400));
-            }
-          } catch (e) {
-            failed += 1;
-            failedNames.push(file.display_name || String(file.id));
-            console.error(`Failed to ingest course file: ${file.display_name}`, e);
-          }
-        }
 
-        if (cancelled) {
-          // Leave remaining rows pending for the next visit; never claim full success.
+        await joinOrStartCourseIngest(courseId, async () => {
+          for (const [i, file] of allPhases.entries()) {
+            if (isAbort()) break;
+            setIngestStatus({
+              type: 'loading',
+              msg: `Indexing materials ${i + 1} of ${pending.length}: ${file.display_name}`,
+            });
+            try {
+              const result = await ingestCourseFile(assignmentId, file, signal);
+              succeeded += 1;
+              if (!result?.cached && !result?.skipped) {
+                await new Promise(r => setTimeout(r, i < phaseA.length ? 800 : 400));
+              }
+            } catch (e: any) {
+              if (isAbort(e)) break;
+              failed += 1;
+              failedNames.push(file.display_name || String(file.id));
+              console.error(`Failed to ingest course file: ${file.display_name}`, e);
+            }
+          }
+        });
+
+        if (isAbort()) {
+          if (userStopped()) {
+            const refreshed = await fetchCourseFileStatus().catch(() => statusRows!);
+            setMaterialsReady(summarizeMaterialsReady(allFiles, refreshed));
+            setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+          }
           return;
         }
 
-        const readyNow = alreadyReady + succeeded;
+        const refreshed = await fetchCourseFileStatus(signal).catch(() => statusRows!);
+        const summary = summarizeMaterialsReady(allFiles, refreshed);
+        setMaterialsReady(summary);
+
+        const readyNow = summary.indexed;
         const failedSuffix = failed > 0
           ? ` — ${failed} failed${failedNames.length ? ` (${failedNames.slice(0, 3).join(', ')}${failedNames.length > 3 ? ', …' : ''})` : ''}. Grading may miss some context.`
           : '';
@@ -1203,10 +1332,20 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         }
         setTimeout(() => setIngestStatus(null), 5000);
       } catch (err: any) {
-        if (cancelled) return;
+        if (isAbort(err)) {
+          if (userStopped()) {
+            setIngestStatus({ type: 'warning', msg: 'Indexing stopped — already-indexed files stay saved.' });
+          }
+          return;
+        }
         console.error(`Auto-ingestion failed:`, err);
-        setIngestStatus({ type: 'error', msg: `Auto-ingestion failed: ${err.message}` });
+        setMaterialsReady((prev) => prev ?? summarizeMaterialsReady(null, null, { statusUnavailable: true }));
+        setIngestStatus({
+          type: 'warning',
+          msg: `Materials indexing interrupted: ${err?.message || 'Failed to fetch'}. Tap Refresh Materials to retry.`,
+        });
       } finally {
+        if (materialsAbortRef.current === ac) materialsAbortRef.current = null;
         if (ingestionPromisesRef.current[assignmentId] === running) {
           delete ingestionPromisesRef.current[assignmentId];
         }
@@ -1217,11 +1356,13 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
     ingestionPromisesRef.current[assignmentId] = running;
     return () => {
       cancelled = true;
+      ac.abort();
+      if (materialsAbortRef.current === ac) materialsAbortRef.current = null;
       if (ingestionPromisesRef.current[assignmentId] === running) {
         delete ingestionPromisesRef.current[assignmentId];
       }
     };
-  }, [selectedAssignment, selectedCourse, assignments, discussions]);
+  }, [selectedAssignment, selectedCourse, assignments, discussions, autoIngestNonce]);
 
   const handleFetchAiGrade = async (studentId: string, isRetry = false) => {
     const student = studentsData.find(s => s.id === studentId);
@@ -1266,10 +1407,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         const launchOnly = Boolean(bareSubmissionUrl);
         // Prefer extracted/pasted Harmonize/link text; fall back to body (may be URL for server resolve).
         const submissionTextForGrade = overrideText || String(rawBody || '');
-        const placeholderBody =
-          !submissionTextForGrade ||
-          /^submission type:/i.test(submissionTextForGrade.trim()) ||
-          /^no submission content/i.test(submissionTextForGrade.trim());
+        const placeholderBody = isPlaceholderSubmissionBody(submissionTextForGrade);
 
         if (launchOnly && !overrideText && !(student.attachments && student.attachments.length > 0)) {
           console.warn(
@@ -1580,7 +1718,18 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           </div>
           <div className="bg-[#1E293B] border border-zinc-700 text-xs text-zinc-300 rounded px-3 py-2 flex items-center justify-between">
             <span className="font-bold truncate text-[10px] tracking-widest">{activeCourse?.name || 'Loading Course...'}</span>
-            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                materialsReady?.kind === 'ready'
+                  ? 'bg-emerald-500'
+                  : materialsReady?.kind === 'indexing'
+                    ? 'bg-blue-500 animate-pulse'
+                    : materialsReady?.kind === 'partial'
+                      ? 'bg-amber-500'
+                      : 'bg-zinc-500'
+              }`}
+              title={materialsReady ? `Materials · ${materialsReady.label}` : 'Materials status unknown'}
+            />
           </div>
         </div>
 
@@ -1658,7 +1807,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         {/* Bottom Stats */}
         <div className="p-4 border-t border-[#1E293B] shrink-0 text-center">
           <div className="text-sm font-medium text-zinc-300">
-            <span className={`font-bold ${totalUngraded > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{totalUngraded}</span> ungraded for this assignment
+            <span className={`font-bold ${totalUngraded > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{totalUngraded}</span> Canvas-unscored for this assignment
           </div>
         </div>
       </div>
@@ -1736,8 +1885,41 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 </div>
               </div>
 
+              {materialsReady && (
+                <div className={`mt-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-bold border
+                  ${materialsReady.kind === 'ready'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20'
+                    : materialsReady.kind === 'indexing'
+                      ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-300 dark:border-blue-500/20'
+                      : materialsReady.kind === 'partial'
+                        ? 'bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20'
+                        : 'bg-zinc-100 text-zinc-600 border-zinc-200 dark:bg-white/5 dark:text-zinc-300 dark:border-white/10'}`}
+                >
+                  Materials · {materialsReady.label}
+                  {(materialsReady.kind === 'unavailable' || materialsReady.kind === 'indexing' || materialsReady.kind === 'partial') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedAssignment) {
+                          setIngestedAssignments((prev) => {
+                            const next = new Set(prev);
+                            next.delete(selectedAssignment);
+                            return next;
+                          });
+                        }
+                        setAutoIngestNonce((n) => n + 1);
+                        void handleRefreshMaterials();
+                      }}
+                      className="underline font-black"
+                    >
+                      Retry
+                    </button>
+                  )}
+                </div>
+              )}
+
               {ingestStatus && (
-                <div className={`mt-4 p-3 rounded-lg text-sm font-bold flex items-center shadow-sm
+                <div className={`mt-3 p-3 rounded-lg text-sm font-bold flex items-center shadow-sm
                   ${ingestStatus.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20' :
                     ingestStatus.type === 'loading' ? 'bg-blue-50 text-blue-700 border border-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:border-blue-500/20 animate-pulse' :
                     ingestStatus.type === 'warning' ? 'bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20' :
@@ -1749,7 +1931,35 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                   {ingestStatus.type === 'success' && <Icons.IconCheck className="w-5 h-5 mr-2" />}
                   {ingestStatus.type === 'warning' && <Icons.IconAlertCircle className="w-5 h-5 mr-2" />}
                   {ingestStatus.type === 'error' && <Icons.IconX className="w-5 h-5 mr-2" />}
-                  {ingestStatus.msg}
+                  <span className="flex-1">{ingestStatus.msg}</span>
+                  {ingestStatus.type === 'loading' && (
+                    <button
+                      type="button"
+                      onClick={stopMaterialsIndexing}
+                      className="ml-3 shrink-0 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest underline hover:opacity-100 opacity-80"
+                    >
+                      Stop
+                    </button>
+                  )}
+                  {(ingestStatus.type === 'warning' || ingestStatus.type === 'error') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedAssignment) {
+                          setIngestedAssignments((prev) => {
+                            const next = new Set(prev);
+                            next.delete(selectedAssignment);
+                            return next;
+                          });
+                        }
+                        setAutoIngestNonce((n) => n + 1);
+                        void handleRefreshMaterials();
+                      }}
+                      className="ml-3 underline shrink-0"
+                    >
+                      Retry indexing
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1809,10 +2019,21 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                 </div>
               ) : (
                 <>
-                  {visibleStudents.map(student => (
+                  {visibleStudents.map(student => {
+                    const canGrade = hasGradeableSubmission(student);
+                    const listHint = submissionListLabel(student);
+                    return (
                     <div
                       key={student.id}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => setSelectedStudent(student.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setSelectedStudent(student.id);
+                        }
+                      }}
                       className={`w-full text-left p-4 rounded-xl border flex items-center justify-between transition-all group cursor-pointer
                           ${selectedStudent === student.id ? 'bg-white dark:bg-[#0F172A] border-purple-500 shadow-md transform -translate-y-0.5' : 'bg-white dark:bg-[#0B1120] border-zinc-200 dark:border-white/5 hover:shadow-md hover:-translate-y-0.5'}`}
                     >
@@ -1823,18 +2044,32 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         <div className="min-w-0">
                           <div className="font-bold text-sm text-zinc-900 dark:text-white truncate">{student.name}</div>
                           <div className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center space-x-2 mt-0.5">
-                            <span>{student.date}</span>
-                            <span className="hidden sm:inline w-1 h-1 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
-                            <span className="hidden sm:inline italic truncate">"{student.body ? String(student.body).replace(/(<([^>]+)>)/gi, "").substring(0, 60) + (String(student.body).length > 60 ? '...' : '') : 'No preview'}"</span>
+                            {student.date && student.date !== '—' && (
+                              <>
+                                <span>{student.date}</span>
+                                <span className="hidden sm:inline w-1 h-1 rounded-full bg-zinc-300 dark:bg-zinc-700"></span>
+                              </>
+                            )}
+                            <span className="hidden sm:inline italic truncate">
+                              {canGrade && student.body && !isPlaceholderSubmissionBody(student.body)
+                                ? `"${String(student.body).replace(/(<([^>]+)>)/gi, "").substring(0, 60) + (String(student.body).length > 60 ? '...' : '')}"`
+                                : listHint}
+                            </span>
                           </div>
                         </div>
                       </div>
                       <div className="shrink-0 flex items-center space-x-4">
                         {/* Per-Submission Grade / Regrade Trigger */}
                         <div className="flex flex-col items-end">
-                          {student.status !== 'Missing' && (
+                          {canGrade && (
                             <button
-                              onClick={(e) => { e.stopPropagation(); handleFetchAiGrade(student.id); }}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const sid = student.id;
+                                setSelectedStudent(sid);
+                                void handleFetchAiGrade(sid);
+                              }}
                               disabled={loadingStudents.has(student.id)}
                               className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 ${
                                 aiGradingData[student.id]
@@ -1869,7 +2104,8 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                         </span>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                   {visibleStudents.length === 0 && (
                     <div className="text-center p-10 text-zinc-500 font-medium">No students match the current filters.</div>
                   )}
@@ -2273,7 +2509,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                 />
                               );
                             })()
-                          ) : student.body ? (
+                          ) : student.body && !isPlaceholderSubmissionBody(student.body) ? (
                             (() => {
                               const rawBody = typeof student.body === 'string' ? student.body : JSON.stringify(student.body);
                               const externalUrl =
@@ -2346,8 +2582,12 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                           ) : (
                             <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 bg-white dark:bg-[#0F172A] p-12">
                               <Icons.IconFile className="w-16 h-16 mb-4 text-zinc-300 dark:text-zinc-700" />
-                              <h4 className="text-lg font-bold text-zinc-900 dark:text-white">No submission content</h4>
-                              <p className="text-sm">The student hasn't provided any text or file attachment.</p>
+                              <h4 className="text-lg font-bold text-zinc-900 dark:text-white">{emptySubmissionHeadline(student)}</h4>
+                              <p className="text-sm">
+                                {hasGradeableSubmission(student)
+                                  ? 'A file or link is on record, but the in-app preview could not load.'
+                                  : 'This student has not submitted text or a file in Canvas.'}
+                              </p>
                             </div>
                           )}
                         </div>
@@ -2432,6 +2672,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                  rubricContext={currentAuthItem?.rubric || []}
                                  onEvidenceAnchorClick={(text) => setHighlightText(text)}
                                  onEvidenceUnitClick={(unit) => setHighlightText(unit.text)}
+                                 materialsSummary={materialsReady}
                               />
                             </div>
                           ) : (
@@ -2441,14 +2682,16 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                   <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl shadow-sm">
                                     <div className="text-red-600 dark:text-red-400 text-xs font-bold mb-1 flex items-center"><Icons.IconX className="w-4 h-4 mr-1"/> GRADING FAILED</div>
                                     <div className="text-red-500 dark:text-red-300 text-xs whitespace-pre-wrap">{rowErrors[selectedStudent!]}</div>
-                                    <button
-                                      onClick={() => handleFetchAiGrade(selectedStudent!)}
-                                      className="mt-3 w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
-                                    >
-                                      Retry grade
-                                    </button>
+                                    {hasGradeableSubmission(student) && (
+                                      <button
+                                        onClick={() => handleFetchAiGrade(selectedStudent!)}
+                                        className="mt-3 w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                                      >
+                                        Retry grade
+                                      </button>
+                                    )}
                                   </div>
-                                ) : (
+                                ) : hasGradeableSubmission(student) ? (
                                   <div className="flex flex-col">
                                     <div className="text-xs font-bold text-zinc-500 dark:text-zinc-400 mb-4 text-center">Click below to assess this submission</div>
                                     <button 
@@ -2458,6 +2701,13 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
                                       <Icons.IconSparkles className="w-4 h-4 mr-2" />
                                       GRADE WITH AI ✨
                                     </button>
+                                  </div>
+                                ) : (
+                                  <div className="p-4 bg-zinc-50 dark:bg-white/5 border border-zinc-200 dark:border-white/10 rounded-xl text-center">
+                                    <div className="text-xs font-bold text-zinc-600 dark:text-zinc-300">No Canvas submission to grade</div>
+                                    {submissionListLabel(student) !== 'No Canvas submission' && (
+                                      <div className="text-[11px] text-zinc-500 mt-1">{submissionListLabel(student)}</div>
+                                    )}
                                   </div>
                                 )}
                                 

@@ -359,6 +359,14 @@ def _authorize(scope: str):
     if not _CANVAS_ID.match(course_id):
         raise AuthError("COURSE_REQUIRED", 400, "A numeric course_id is required.")
     require_course_role(client, principal, course_id)
+    # Course-file ingest stores chunks under assignment_id "course:{course_id}".
+    # Accept that sentinel on course-scoped routes only — never on assignment scope.
+    if (
+        scope == "course"
+        and assignment_id
+        and assignment_id == f"course:{course_id}"
+    ):
+        return client
     if scope == "assignment" or assignment_id:
         if not _CANVAS_ID.match(assignment_id):
             raise AuthError("ASSIGNMENT_REQUIRED", 400, "A numeric assignment_id is required.")

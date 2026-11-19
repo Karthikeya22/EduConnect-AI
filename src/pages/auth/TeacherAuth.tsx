@@ -260,7 +260,7 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
                 )}
               </div>
               <div className="relative">
-                <input id="auth-password" required type={showPassword ? "text" : "password"} autoComplete={isLogin ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" className="w-full h-14 px-6 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1.25rem] focus:border-[var(--brand-primary)] focus:outline-none transition-all font-bold text-sm shadow-[var(--shadow-sm)] pr-12" />
+                <input id="auth-password" required type={showPassword ? "text" : "password"} autoComplete={isLogin ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className="w-full h-14 px-6 bg-[var(--bg-nested)] border-2 border-[var(--border-primary)] rounded-[1.25rem] focus:border-[var(--brand-primary)] focus:outline-none transition-all font-bold text-sm shadow-[var(--shadow-sm)] pr-12" />
                 <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} onClick={() => setShowPassword(!showPassword)} className="absolute right-5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] rounded">
                   {showPassword ? <Icons.IconCheck className="w-4 h-4 opacity-50" /> : <Icons.IconTarget className="w-4 h-4 opacity-50" />}
                 </button>
@@ -281,7 +281,7 @@ const TeacherAuth: React.FC<TeacherAuthProps> = ({ onBack, onSuccess }) => {
               <>
                 <div className="space-y-2">
                   <label htmlFor="auth-confirm-password" className="text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-1">Verify Faculty Key</label>
-                  <input id="auth-confirm-password" required type="password" autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" className={`w-full h-14 px-6 bg-[var(--bg-nested)] border-2 rounded-[1.25rem] focus:outline-none transition-all font-bold text-sm ${confirmPassword && confirmPassword !== password ? 'border-[var(--color-danger)]' : 'border-[var(--border-primary)] focus:border-[var(--brand-primary)]'}`} />
+                  <input id="auth-confirm-password" required type="password" autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Confirm password" className={`w-full h-14 px-6 bg-[var(--bg-nested)] border-2 rounded-[1.25rem] focus:outline-none transition-all font-bold text-sm ${confirmPassword && confirmPassword !== password ? 'border-[var(--color-danger)]' : 'border-[var(--border-primary)] focus:border-[var(--brand-primary)]'}`} />
                 </div>
                 <label htmlFor="auth-agree" className="flex items-center space-x-3 cursor-pointer group">
                   <div className="relative">

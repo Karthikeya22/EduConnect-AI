@@ -338,6 +338,52 @@ def test_placement_cap_skipped_when_section_map_unreliable():
     assert "misplaced" not in (v.get("justification") or "").lower()
 
 
+def test_instructor_requires_named_section_detector():
+    from grading_server.app import _instructor_requires_named_section
+
+    assert _instructor_requires_named_section(
+        "Methods", "Students must place the procedure under the Methods heading.", ""
+    )
+    assert _instructor_requires_named_section(
+        "Analysis", "Findings are required in a labeled Results section.", ""
+    )
+    # Soft content pointers / title-only hints are NOT placement gates — credit anywhere in the doc.
+    assert not _instructor_requires_named_section(
+        "Analysis", "Discuss findings in the Results section.", ""
+    )
+    assert not _instructor_requires_named_section("Introduction", "Open with context and purpose.", "")
+    assert not _instructor_requires_named_section("Data Visualization", "Charts and graphs.", "")
+
+
+def test_partial_score_rewrites_glowing_withheld_copy():
+    """Partial score must not keep 'no points withheld / met all requirements' prose."""
+    v = _apply_verdict_score_guards(
+        {
+            "score": 1,
+            "status": "partial",
+            "criterion_name": "Introduction",
+            "evidence_anchor": "not found",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "credit_awarded_for": "The introduction clearly identifies the problem.",
+            "points_withheld_because": (
+                "No points were withheld as the introduction met all requirements "
+                "and provided substantial context."
+            ),
+            "justification": "Fully meets the criterion.",
+            "submission_text": "Student health matters for academic success.",
+        },
+        2,
+    )
+    withheld = (v.get("points_withheld_because") or "").lower()
+    assert v["score"] <= 1
+    assert "no points were withheld" not in withheld
+    assert "met all requirements" not in withheld
+    assert withheld  # still explains the partial
+
+
 def test_concept_coverage_with_evidence_uses_gentler_floor():
     """LLM-omitted covered_concepts should not near-zero a grounded criterion."""
     v = _apply_verdict_score_guards(

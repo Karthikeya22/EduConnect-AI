@@ -12,12 +12,15 @@ import {
   isScore,
   summarizeGrade,
 } from '../../lib/gradeDisplay';
+import { provisionalMaterialsReason } from '../../lib/materialsReadySummary';
+import type { MaterialsReadySummary } from '../../lib/materialsReadySummary';
 
 interface GradingResultProps {
   result: GradingOutput;
   rubricContext?: any[];
   onEvidenceAnchorClick?: (anchor: string) => void;
   onEvidenceUnitClick?: (unit: SourceUnit) => void;
+  materialsSummary?: MaterialsReadySummary | null;
 }
 
 const CLAIM_TYPE_LABELS: Record<string, string> = {
@@ -345,6 +348,7 @@ export const GradingResult: React.FC<GradingResultProps> = ({
   rubricContext = [],
   onEvidenceAnchorClick,
   onEvidenceUnitClick,
+  materialsSummary = null,
 }) => {
   const [openCriterion, setOpenCriterion] = useState<string | null>(null);
   const summary = summarizeGrade(result);
@@ -354,6 +358,12 @@ export const GradingResult: React.FC<GradingResultProps> = ({
   const sourceUnits: SourceUnit[] = result.evidence?.source_units || [];
   const provisionalPolicy = summary.provisionalPolicy;
   const formativeOnly = summary.kind === 'incomplete' && summary.formativeOnly;
+  const provisionalWhy = provisionalMaterialsReason({
+    policyProvisional: provisionalPolicy,
+    materialsStatus: result.materials_status,
+    ragDegraded: result.rag_degraded,
+    materialsSummary,
+  });
 
   const copyToClipboard = () => {
     const headline = complete
@@ -440,6 +450,11 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
                 <div className="text-[9px] text-zinc-500 dark:text-zinc-400 font-medium" data-testid="grade-summary-label">
                   {summary.label}
                 </div>
+                {provisionalWhy && (
+                  <div className="text-[10px] text-amber-700 dark:text-amber-300 font-medium mt-1 max-w-[220px] leading-snug" data-testid="provisional-reason">
+                    {provisionalWhy}
+                  </div>
+                )}
             </div>
           </div>
           <div className="flex flex-col gap-1.5 origin-right">
@@ -633,7 +648,7 @@ ${result.misconception_hint ? `Misconception: ${result.misconception_hint}` : ''
                     </div>
                   )}
 
-                  {(v.criterion_claim || (researchMode !== 'baseline' && result.evidence)) && (
+                  {(v.criterion_claim || result.evidence) && (
                     <EvidenceLimitationsPanel
                       verdict={v}
                       claim={v.criterion_claim}

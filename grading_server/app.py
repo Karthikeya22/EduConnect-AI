@@ -1192,6 +1192,30 @@ def _criterion_section_hint(title: str, desc: str) -> str | None:
     return None
 
 
+# Explicit placement only — casual "discuss X in the introduction" is content guidance, not a section gate.
+_SECTION_REQUIRE_RE = re.compile(
+    r"(?:"
+    r"(?:must|should|required|require|needs?\s+to)\b.{0,80}\b"
+    r"(?:(?:be\s+)?(?:placed|located|included|appear|written|put)\b.{0,40})?"
+    r"(?:under|within|inside|in)\b.{0,40}\b(?:the\s+)?(?:labeled\s+)?"
+    r"(?:section|heading|titled)\b"
+    r"|(?:must|should|required|require|needs?\s+to)\b.{0,60}\b(?:labeled\s+)?(?:section|heading)\b"
+    r"|\blabeled\s+section\b"
+    r"|\bthis\s+section\s+(?:must|should|requires?)\b"
+    r"|\b(?:place|put|include)\b.{0,40}\b(?:under|in)\b.{0,30}\b(?:the\s+)?(?:section|heading)\b"
+    r")",
+    re.I,
+)
+
+
+def _instructor_requires_named_section(
+    title: str, desc: str, assignment_context: str = ""
+) -> bool:
+    """True only when instructor text explicitly requires labeled-section placement."""
+    blob = f"{title}\n{desc}\n{assignment_context or ''}"
+    return bool(_SECTION_REQUIRE_RE.search(blob))
+
+
 def _resolve_section_for_criterion(sections: list[dict], hint: str | None) -> dict | None:
     if not hint or not sections:
         return None
@@ -1297,6 +1321,10 @@ def _text_claims_full_or_glowing(text: str) -> bool:
         "well-organized and meets",
         "all requirements",
         "complete and accurate",
+        "no points were withheld",
+        "no points withheld",
+        "nothing withheld",
+        "met all requirements",
     )
     return any(c in t for c in cues)
 
@@ -1399,13 +1427,18 @@ def _reconcile_verdict_explanation(
     if _is_process_only_explanation(credit) and score < max_score:
         credit = ""
 
-    was_glowing = _text_claims_full_or_glowing(credit) or _text_claims_full_or_glowing(just)
+    was_glowing = (
+        _text_claims_full_or_glowing(credit)
+        or _text_claims_full_or_glowing(just)
+        or _text_claims_full_or_glowing(withheld)
+    )
     inconsistent = score < max_score and was_glowing
 
     if inconsistent:
         # Glowing full-credit prose is not a usable deduction reason after a partial score.
         credit = ""
         just = ""
+        withheld = ""
         if covered:
             credit = (
                 f"Partial credit ({score:g}/{max_score:g}) for covering: "
@@ -1420,13 +1453,13 @@ def _reconcile_verdict_explanation(
     if score >= max_score:
         withheld = ""
     else:
-        if gaps and (_is_process_only_explanation(withheld) or not withheld):
+        if gaps and (_is_process_only_explanation(withheld) or not withheld or _text_claims_full_or_glowing(withheld)):
             withheld = (
                 f"Not full credit ({score:g}/{max_score:g}): missing or underdeveloped — "
                 + ", ".join(gaps)
                 + "."
             )
-        elif not withheld or _is_process_only_explanation(withheld):
+        elif not withheld or _is_process_only_explanation(withheld) or _text_claims_full_or_glowing(withheld):
             # Content reason required — never deduct with only “no quote linked”.
             usable_just = (
                 just
@@ -1442,7 +1475,6 @@ def _reconcile_verdict_explanation(
                     f"Awarded {score:g}/{max_score:g}. The response does not demonstrate "
                     f"{criterion} with enough depth or specificity for full marks."
                 )
-
         if not credit:
             if covered:
                 credit = (
@@ -2124,6 +2156,8 @@ async def _multihop_retrieve(
         if cid not in seen:
             seen.add(cid)
             unique_chunks.append(c)
+    if not unique_chunks:
+        return [], "no_corpus"
     if max(float(c.get("similarity") or 0) for c in unique_chunks) < RAG_USABLE_SIMILARITY:
         return [], "no_useful_matches"
     return unique_chunks, "ok"
@@ -2140,6 +2174,7 @@ async def _gp(
     assignment_context: str = "",
     section_guide: str = "",
     expected_section_title: str | None = None,
+    enforce_placement: bool = False,
     submission_genre: str = "general",
     genre_signals: dict | None = None,
     section_map_reliable: bool = True,
@@ -2222,8 +2257,9 @@ async def _gp(
         f"- Mention-only / keyword presence without substance: score ≤ {max(0, math.ceil(max_score * 0.40))}.\n"
         f"- Thin / incomplete / partially misplaced / poorly formatted for genre: score ≤ {max(0, math.ceil(max_score * 0.70))}.\n"
         f"- Full credit ONLY if the criterion is substantially complete for the points, "
-        f"correctly placed when a section is expected, follows assignment instructions, "
-        f"meets genre-appropriate method standards, and has a criterion-relevant student quote.\n"
+        f"follows assignment instructions, meets genre-appropriate method standards, "
+        f"and has a criterion-relevant student quote (content may appear anywhere in the submission "
+        f"unless the rubric/assignment explicitly requires a named section).\n"
         f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
         f"=== FACULTY EXPLANATION (explain the score — do NOT change scoring standards) ===\n"
         f"- First decide score/status using the scoring philosophy and bands above. Then explain that decision.\n"
@@ -2231,7 +2267,9 @@ async def _gp(
         f"- points_withheld_because: when score < {max_score}, briefly why full marks were not given "
         f"(must match the score; do not praise as complete/meets-requirements if you scored partial).\n"
         f"- justification: one coherent faculty paragraph consistent with the numeric score.\n"
-        f"- Never invent missing content. Never write full-credit praise for a partial/missing score.\n\n"
+        f"- Never invent missing content. Never write full-credit praise for a partial/missing score.\n"
+        f"- Tone: neutral professional faculty language only. No empathy scripts, emotional inference, "
+        f"praise fluff, encouragement slogans, or first-person feelings.\n\n"
     )
 
     genre_block = _genre_grading_guide(
@@ -2286,8 +2324,9 @@ async def _gp(
             f"- Citations/references/formatting: when the rubric or assignment requires them, grade as a human reviewer "
             f"would for that genre (see GENRE standards).\n"
             f"- CONCEPT GRAPH: required_concepts from the RUBRIC; covered_concepts only from student text.\n"
-            f"- placement_ok: false if the rubric/assignment expects this in a named section but supporting content "
-            f"is only found elsewhere (misplaced content earns at most partial credit).\n\n"
+            f"- placement_ok: false ONLY if the rubric/assignment explicitly requires a named section and supporting "
+            f"content is absent from that section (misplaced then earns at most partial). Otherwise credit relevant "
+            f"content anywhere in the submission and set placement_ok=true.\n\n"
         )
     else:
         scoring_philosophy = (
@@ -2306,7 +2345,9 @@ async def _gp(
             f"- For research methods/results/analysis criteria, demand the correct scholarly method for the claim type.\n"
             f"- missing_keywords: rubric concepts the student missed (not slide-only topics).\n"
             f"- CONCEPT GRAPH: required_concepts from RUBRIC; covered_concepts from student text only.\n"
-            f"- placement_ok: false when content satisfying this criterion appears only in the wrong section.\n\n"
+            f"- placement_ok: false ONLY when the instructor explicitly requires a named section and the content "
+            f"satisfying this criterion is absent from it. Criterion-relevant content elsewhere still counts when "
+            f"placement is not explicitly required.\n\n"
         )
 
     assign_block = ""
@@ -2368,10 +2409,11 @@ async def _gp(
         if not _evidence_anchor_in_submission(evidence_anchor, txt):
             evidence_anchor = "not found"
 
-    # If a section was expected and the anchor only lives outside it, force placement fail
+    # Force placement fail only when the instructor explicitly requires a named section.
     placement_ok = bool(r.get("placement_ok", True))
     if (
-        section_map_reliable
+        enforce_placement
+        and section_map_reliable
         and expected_section_title
         and evidence_anchor.lower() not in ("", "not found", "n/a", "none")
     ):
@@ -2390,6 +2432,8 @@ async def _gp(
                         placement_ok = False
             except Exception:
                 pass
+    elif not enforce_placement:
+        placement_ok = True
 
     credit_awarded = str(r.get("credit_awarded_for") or "").strip()
     withheld = str(r.get("points_withheld_because") or "").strip()
@@ -2526,8 +2570,9 @@ async def run_grade(state: GradingState) -> dict:
             deep=bool(state.get("deep_retrieve")),
         )
         # 2. Multi-Hop Retrieve (skipped when provenance forces degrade-and-grade)
+        # Use no_corpus — never "ok" with [] (max() on empty chunks crashed every criterion).
         if state.get("rag_degraded"):
-            retrieved_chunks, retrieval_status = [], "ok"
+            retrieved_chunks, retrieval_status = [], "no_corpus"
         else:
             retrieved_chunks, retrieval_status = await _multihop_retrieve(
                 sub_queries,
@@ -2538,7 +2583,7 @@ async def run_grade(state: GradingState) -> dict:
             )
 
         # Build context from semantically retrieved course material
-        if retrieval_status == "ok":
+        if retrieval_status == "ok" and retrieved_chunks:
             ctx = "\n---\n".join([
                 f"[Source: {ch.get('source_title', 'Unknown Source').split(' (chunk')[0].strip()}] (Chunk {ch.get('chunk_index', '?')}) (similarity: {round(ch.get('similarity', 0), 2)})\n{ch.get('chunk_text', '')}"
                 for ch in retrieved_chunks[:10]
@@ -2552,10 +2597,17 @@ async def run_grade(state: GradingState) -> dict:
                 f"(top similarity was {round(top_sim, 2)}; treat ≥0.45 as clearly on-topic).\n"
             )
         else:
-            ctx = _RETRIEVAL_UNAVAILABLE_CTX[retrieval_status]
+            if retrieval_status == "ok":
+                retrieval_status = "no_corpus"
+            ctx = _RETRIEVAL_UNAVAILABLE_CTX.get(
+                retrieval_status, _RETRIEVAL_UNAVAILABLE_CTX["no_corpus"]
+            )
 
         hint = _criterion_section_hint(criterion_title, criterion_desc)
         matched = _resolve_section_for_criterion(sections, hint) if section_map_reliable else None
+        enforce_placement = _instructor_requires_named_section(
+            criterion_title, criterion_desc, assignment_context or ""
+        )
         section_guide = ""
         expected_title = None
         if not section_map_reliable:
@@ -2570,13 +2622,23 @@ async def run_grade(state: GradingState) -> dict:
             if matched and len((matched.get("body") or "")) >= 120:
                 expected_title = matched["title"]
                 body_preview = matched["body"][:12000]
-                section_guide = (
-                    f"=== PLACEMENT GUIDANCE ===\n"
-                    f"This criterion maps to section hint '{hint}'. A matching heading was found: '{matched['title']}'.\n"
-                    f"Prefer evidence from that section. If the only supporting content is outside it, set placement_ok=false "
-                    f"and award at most partial credit.\n"
-                    f"=== EXPECTED SECTION BODY ({matched['title']}) ===\n{body_preview}\n"
-                )
+                if enforce_placement:
+                    section_guide = (
+                        f"=== PLACEMENT GUIDANCE ===\n"
+                        f"The instructor explicitly requires section placement (hint '{hint}'). "
+                        f"Matching heading found: '{matched['title']}'.\n"
+                        f"Prefer evidence from that section. If supporting content is only outside it, "
+                        f"set placement_ok=false and award at most partial credit.\n"
+                        f"=== EXPECTED SECTION BODY ({matched['title']}) ===\n{body_preview}\n"
+                    )
+                else:
+                    section_guide = (
+                        f"=== PLACEMENT GUIDANCE ===\n"
+                        f"Related heading '{matched['title']}' found (hint '{hint}'). Use as a hint only.\n"
+                        f"Grade the WHOLE submission — credit criterion-relevant content wherever it appears. "
+                        f"Set placement_ok=true (do not invent a section-placement penalty).\n"
+                        f"=== RELATED SECTION BODY ({matched['title']}) — optional focus ===\n{body_preview}\n"
+                    )
             else:
                 section_guide = (
                     f"=== PLACEMENT GUIDANCE ===\n"
@@ -2598,7 +2660,8 @@ async def run_grade(state: GradingState) -> dict:
             provider=provider,
             assignment_context=assignment_context,
             section_guide=section_guide,
-            expected_section_title=expected_title,
+            expected_section_title=expected_title if enforce_placement else None,
+            enforce_placement=enforce_placement,
             submission_genre=genre,
             genre_signals=signals,
             section_map_reliable=section_map_reliable,

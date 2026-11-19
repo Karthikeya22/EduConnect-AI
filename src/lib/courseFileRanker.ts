@@ -79,7 +79,11 @@ export function materialIndexState(
   if (!isDocCourseFile(file)) return 'skipped';
   if (!row) return 'not_indexed';
   if (row.status === 'failed') return 'failed';
-  if (row.status === 'pending') return 'pending';
+  // Reingest queued: keep prior chunks visible as "needs refresh", not a zeroed index.
+  if (row.status === 'pending') {
+    const chunks = Number(row.stored_chunks ?? row.chunk_count ?? 0);
+    return chunks > 0 ? 'stale' : 'pending';
+  }
   if (row.status === 'ready') {
     if (row.verified === false || (typeof row.stored_chunks === 'number' && row.stored_chunks <= 0)) {
       return 'broken';

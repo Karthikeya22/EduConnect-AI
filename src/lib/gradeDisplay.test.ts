@@ -99,8 +99,17 @@ const provisional = summarizeGrade({
 assert(
   provisional.kind === 'complete' &&
     provisional.provisionalPolicy &&
-    provisional.label.includes('Provisional — inferred assessment policy'),
-  `provisional label survives summary: ${provisional.label}`,
+    provisional.policyLabel === 'Provisional — inferred assessment policy' &&
+    !provisional.label.includes('Provisional'),
+  `provisional keeps score label + policy flag: ${provisional.label}`,
+);
+assert(
+  formatAiGradeLabel({
+    ...zero,
+    policy_provisional: true,
+    policy_label: 'Provisional — inferred assessment policy',
+  } as any).includes('Provisional — inferred assessment policy'),
+  'list chip still prefixes provisional',
 );
 const formative = summarizeGrade({
   result_schema_version: 2,

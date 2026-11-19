@@ -267,6 +267,40 @@ def test_discussion_topic_counts_as_assignment():
     assert reached
 
 
+def canvas_url_authz(tok, rows, assignment_id, course="11"):
+    """Hit course-scoped ingest just far enough to exercise assignment_id authz."""
+    client = FakeUserClient(rows)
+    with patch.object(authz, "user_scoped_client", lambda t: client):
+        return app_mod.app.test_client().post(
+            "/api/ingest/canvas-url",
+            json={
+                "course_id": course,
+                "assignment_id": assignment_id,
+                "url": "https://example.com/f.pdf",
+                "filename": "f.pdf",
+                "canvas_file_id": "99",
+            },
+            headers={"Authorization": f"Bearer {tok}", "X-Canvas-Token": "ct"},
+        )
+
+
+def test_course_material_sentinel_passes_course_scope_authz():
+    r = canvas_url_authz(token(), [member()], assignment_id="course:11")
+    assert r.get_json().get("error") != "ASSIGNMENT_REQUIRED"
+    assert r.status_code != 400 or r.get_json().get("error") != "ASSIGNMENT_REQUIRED"
+
+
+def test_course_sync_prefix_still_rejected():
+    r = canvas_url_authz(token(), [member()], assignment_id="course-sync:11")
+    assert code(r) == (400, "ASSIGNMENT_REQUIRED")
+
+
+def test_course_material_sentinel_rejected_on_assignment_scope():
+    r, reached = grade_call(token(), [member()], canvas_status={}, assignment="course:11")
+    assert code(r) == (400, "ASSIGNMENT_REQUIRED")
+    assert not reached
+
+
 def _request_path(rule: str) -> str:
     """Fill converters so the route matches. A literal ``<int:version>`` never reaches the guard."""
     import re

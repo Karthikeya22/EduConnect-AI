@@ -93,3 +93,45 @@ def test_run_grade_isolates_criterion_failure():
     assert by_id["good"]["score"] == 4
     assert by_id["bad"]["status"] == "not_assessable"
     assert by_id["bad"]["failure_kind"] == "processing_failed"
+
+
+def test_rag_degraded_does_not_crash_on_empty_chunk_max():
+    """Regression: rag_degraded used status=ok with [] → ValueError: max() empty."""
+
+    async def _run():
+        state = {
+            "assignment_id": "a1",
+            "course_id": "c1",
+            "submission_text": "Student submission with methods, results, and discussion sections.",
+            "rubric_criteria": [
+                {"criterion_id": "intro", "title": "Introduction", "description": "d", "max_score": 1},
+            ],
+            "exemplars": {},
+            "critiques": [],
+            "verdicts": [],
+            "rag_degraded": True,
+            "materials_status": "reingesting",
+        }
+
+        async def gp_ok(c, ctx, *a, **k):
+            assert "No course material is indexed" in ctx or "MATERIAL ALIGNMENT" not in ctx or "retrieved course materials" not in ctx
+            return {
+                "criterion_id": "intro",
+                "criterion_name": "Introduction",
+                "score": 1,
+                "max_score": 1,
+                "status": "full",
+            }
+
+        retrieve = AsyncMock(side_effect=AssertionError("retrieve must be skipped when rag_degraded"))
+        with patch.object(app_mod, "_llm_creds", return_value=("openai", "k")):
+            with patch.object(app_mod, "_decompose_criterion", new=AsyncMock(return_value=["q"])):
+                with patch.object(app_mod, "_multihop_retrieve", new=retrieve):
+                    with patch.object(app_mod, "_gp", side_effect=gp_ok):
+                        return await app_mod.run_grade(state)
+
+    out = asyncio.run(_run())
+    v = out["verdicts"][0]
+    assert v["status"] != "not_assessable"
+    assert v.get("failure_kind") != "processing_failed"
+    assert v["score"] == 1

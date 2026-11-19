@@ -78,7 +78,8 @@ export function summarizeGrade(g: Partial<GradingOutput> | null | undefined): Gr
       total,
       max,
       ring: max ? Math.min(1, Math.max(0, total / max)) : 0,
-      label: provisionalPolicy ? `Provisional — inferred assessment policy · ${base}` : base,
+      // Detail UI already shows PROVISIONAL header + reason; list chips re-prefix via formatAiGradeLabel.
+      label: base,
       provisionalPolicy,
       policyLabel,
     };
@@ -102,9 +103,7 @@ export function summarizeGrade(g: Partial<GradingOutput> | null | undefined): Gr
       ? policyLabel || 'Formative only — insufficient assignment policy'
       : processingFailed
         ? 'Not assessed: processing failed'
-        : provisionalPolicy
-          ? `Provisional — inferred assessment policy · Incomplete draft: ${earned} of ${assessedMax} assessable pts`
-          : `Incomplete draft: ${earned} of ${assessedMax} assessable pts`;
+        : `Incomplete draft: ${earned} of ${assessedMax} assessable pts`;
   return {
     kind: 'incomplete',
     legacy,

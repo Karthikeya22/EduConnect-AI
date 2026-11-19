@@ -80,16 +80,47 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
         const todoArray = Array.isArray(data.todo) ? data.todo : [];
         const recentArray = Array.isArray(data.recentSubmissions) ? data.recentSubmissions : [];
 
-        let totalTodo = todoArray.map((t: any) => ({ ...t, courseName: activeCourse?.name || 'Canvas Course' }));
         let totalRecent = recentArray.map((s: any) => ({ ...s, courseName: activeCourse?.name || 'Canvas Course' }));
 
         totalRecent.sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
         const topRecent = totalRecent.slice(0, 10);
 
+        // Hub semantics: submitted, unscored. Prefer Canvas needs_grading_count on assignments.
+        let pendingGrades = 0;
+        let ungradedAssignments = 0;
+        let ungradedDiscussions = 0;
+        try {
+          const [assigns, discussions] = await Promise.all([
+            canvasAPI.getAssignments(courseId).catch(() => []),
+            canvasAPI.getDiscussionTopics(courseId).catch(() => []),
+          ]);
+          const assignList = Array.isArray(assigns) ? assigns : [];
+          const discList = Array.isArray(discussions) ? discussions : [];
+          for (const a of assignList) {
+            const n = Number((a as any)?.needs_grading_count ?? 0);
+            if (n > 0) {
+              pendingGrades += n;
+              ungradedAssignments += 1;
+            }
+          }
+          for (const d of discList) {
+            const n = Number((d as any)?.assignment?.needs_grading_count ?? (d as any)?.needs_grading_count ?? 0);
+            if (n > 0) {
+              pendingGrades += n;
+              ungradedDiscussions += 1;
+            }
+          }
+        } catch {
+          // Fall back to Canvas to-do feed if assignment counts are unavailable.
+          pendingGrades = todoArray.length;
+          ungradedAssignments = todoArray.filter((t: any) => t.assignment?.submission_types?.includes('online_upload')).length;
+          ungradedDiscussions = todoArray.filter((t: any) => t.assignment?.submission_types?.includes('discussion_topic')).length;
+        }
+
         setCanvasStats({
-          pendingGrades: totalTodo.length,
-          ungradedAssignments: totalTodo.filter((t: any) => t.assignment?.submission_types?.includes('online_upload')).length,
-          ungradedDiscussions: totalTodo.filter((t: any) => t.assignment?.submission_types?.includes('discussion_topic')).length,
+          pendingGrades,
+          ungradedAssignments,
+          ungradedDiscussions,
           recentSubmissions: topRecent.map((s: any) => ({
             name: s.user?.short_name || 'Student',
             item: s.assignment?.name || 'Assignment',
@@ -330,10 +361,10 @@ const TeacherDashboard: React.FC<TeacherDashboardProps> = (props) => {
                         <div className="flex items-end space-x-2 mb-2">
                           <span className="text-7xl font-black tracking-tighter text-rose-600 dark:text-rose-500 leading-none">{canvasStats.pendingGrades}</span>
                         </div>
-                        <p className="text-lg font-bold text-zinc-900 dark:text-white mb-1">Submissions waiting for evaluation</p>
+                        <p className="text-lg font-bold text-zinc-900 dark:text-white mb-1">Submitted, still unscored</p>
                         <div className="flex space-x-4">
-                          <div className="text-xs font-bold text-zinc-600 dark:text-zinc-400"><span className="text-zinc-900 dark:text-white">{canvasStats.ungradedAssignments}</span> assignments</div>
-                          <div className="text-xs font-bold text-zinc-600 dark:text-zinc-400"><span className="text-zinc-900 dark:text-white">{canvasStats.ungradedDiscussions}</span> discussions</div>
+                          <div className="text-xs font-bold text-zinc-600 dark:text-zinc-400"><span className="text-zinc-900 dark:text-white">{canvasStats.ungradedAssignments}</span> assignments with work waiting</div>
+                          <div className="text-xs font-bold text-zinc-600 dark:text-zinc-400"><span className="text-zinc-900 dark:text-white">{canvasStats.ungradedDiscussions}</span> discussions with work waiting</div>
                         </div>
                       </div>
                       <div className="shrink-0 w-full md:w-auto">

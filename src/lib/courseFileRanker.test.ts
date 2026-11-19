@@ -48,4 +48,10 @@ if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'ready', upda
 if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'failed', last_error: '404' }) !== 'failed') {
   throw new Error('expected failed state');
 }
+if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'pending', stored_chunks: 4, chunk_count: 4 }) !== 'stale') {
+  throw new Error('expected pending-with-chunks to stay visible as needs refresh');
+}
+if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'pending', stored_chunks: 0 }) !== 'pending') {
+  throw new Error('expected pending-without-chunks to stay pending');
+}
 console.log('courseFileRanker.test.ts PASS');
