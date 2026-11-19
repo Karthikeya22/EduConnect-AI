@@ -195,15 +195,12 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (isIngesting || courseIngestBusy) {
-        e.preventDefault();
-        return;
-      }
+      // Indexing continues via courseIngestCoordinator after close.
       onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isIngesting, courseIngestBusy, onClose]);
+  }, [onClose]);
 
   const toggleFile = (id: string | number, ingestible: boolean) => {
     if (!ingestible) return;
@@ -417,9 +414,12 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={!ingestBlocked ? onClose : undefined} />
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative bg-white dark:bg-[#0F172A] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col border border-zinc-200 dark:border-white/10 animate-in fade-in zoom-in-95 duration-200">
+      <div
+        className="relative bg-white dark:bg-[#0F172A] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col border border-zinc-200 dark:border-white/10 animate-in fade-in zoom-in-95 duration-200"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="p-6 border-b border-zinc-200 dark:border-white/10 flex items-center justify-between shrink-0">
           <div>
             <h2 className="text-xl font-bold text-zinc-900 dark:text-white flex items-center">
@@ -429,10 +429,10 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
             <div className="text-xs text-zinc-500 mt-1">Select Canvas files or upload local files to provide context for AI grading.</div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            disabled={ingestBlocked}
-            title={ingestBlocked ? 'Ingestion in progress' : 'Close'}
-            className="p-2 bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded-full transition-colors disabled:opacity-50"
+            title={ingestBlocked ? 'Close — indexing continues in the background' : 'Close'}
+            className="p-2 bg-zinc-100 dark:bg-white/5 hover:bg-zinc-200 dark:hover:bg-white/10 rounded-full transition-colors"
           >
             <Icons.IconX className="w-4 h-4 text-zinc-500" />
           </button>
@@ -458,7 +458,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
           )}
           {(courseIngestBusy || isIngesting) && (
             <div className="p-3 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 rounded-xl text-blue-800 dark:text-blue-300 text-sm font-medium">
-              Indexing in progress for this course…
+              Indexing in progress for this course… You can close this window; it keeps running in the background.
             </div>
           )}
           {verifyNote && (
@@ -484,12 +484,30 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
             </h3>
 
             {!loading && files.length > 0 && statusAvailable && (
-              <div className="flex flex-wrap gap-2 text-[10px] font-semibold">
+              <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold">
                 <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('indexed')}`}>{summary.indexed} indexed</span>
                 <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('pending')}`}>{summary.pending} pending</span>
                 <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('not_indexed')}`}>{summary.not_indexed} not indexed</span>
                 <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('failed')}`}>{summary.failed + summary.broken} failed/broken</span>
                 <span className={`px-2 py-0.5 rounded-full ${statusBadgeClass('stale')}`}>{summary.stale} needs refresh</span>
+                <span className="ml-auto flex gap-2 normal-case tracking-normal">
+                  <button
+                    type="button"
+                    className="underline text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                    onClick={() =>
+                      setSelectedFiles(new Set(files.filter((f) => isIngestibleFile(f)).map((f) => f.id)))
+                    }
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    className="underline text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                    onClick={() => setSelectedFiles(new Set())}
+                  >
+                    Clear
+                  </button>
+                </span>
               </div>
             )}
 
@@ -590,7 +608,8 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
             <button
               type="button"
               onClick={handleVerify}
-              disabled={isIngesting || verifying || loading}
+              disabled={verifying || loading}
+              title={isIngesting || courseIngestBusy ? 'Safe to verify while indexing runs' : 'Verify index'}
               className="px-4 py-2.5 bg-zinc-100 hover:bg-zinc-200 dark:bg-white/5 dark:hover:bg-white/10 disabled:opacity-50 text-zinc-800 dark:text-zinc-200 text-sm font-semibold rounded-xl transition-all flex items-center"
             >
               {verifying ? (
@@ -606,37 +625,45 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
               )}
             </button>
 
-            <button
-              onClick={files.length === 0 && indexedOnly.length > 0 && selectedFiles.size === 0 && localFiles.length === 0
-                ? () => { onIngestSuccess(); onClose(); }
-                : handleIngest}
-              disabled={
-                ingestBlocked
-                || (selectedFiles.size === 0 && localFiles.length === 0 && indexedOnly.length === 0)
-                || (!statusAvailable && (selectedFiles.size > 0 || localFiles.length > 0))
-              }
-              title={!statusAvailable ? 'Load index status before ingesting' : courseIngestBusy ? 'Indexing in progress' : undefined}
-              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
-            >
-              {isIngesting || courseIngestBusy ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
-                  {courseIngestBusy && !ingestProgress
-                    ? 'Indexing in progress…'
-                    : `Ingesting (${ingestProgress?.current}/${ingestProgress?.total})...`}
-                </>
-              ) : files.length === 0 && indexedOnly.length > 0 && localFiles.length === 0 ? (
-                <>
-                  <Icons.IconSparkles className="w-4 h-4 mr-2" />
-                  Grade with these materials
-                </>
-              ) : (
-                <>
-                  <Icons.IconSparkles className="w-4 h-4 mr-2" />
-                  Ingest Selected Files
-                </>
-              )}
-            </button>
+            {isIngesting || courseIngestBusy ? (
+              <button
+                type="button"
+                onClick={onClose}
+                title="Indexing continues in the background"
+                className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
+              >
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
+                {ingestProgress
+                  ? `Close (${ingestProgress.current}/${ingestProgress.total})`
+                  : 'Close — keep indexing'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={files.length === 0 && indexedOnly.length > 0 && selectedFiles.size === 0 && localFiles.length === 0
+                  ? () => { onIngestSuccess(); onClose(); }
+                  : handleIngest}
+                disabled={
+                  !statusAvailable
+                  || (selectedFiles.size === 0 && localFiles.length === 0 && indexedOnly.length === 0)
+                  || (!statusAvailable && (selectedFiles.size > 0 || localFiles.length > 0))
+                }
+                title={!statusAvailable ? 'Load index status before ingesting' : undefined}
+                className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all active:scale-95 flex items-center"
+              >
+                {files.length === 0 && indexedOnly.length > 0 && localFiles.length === 0 ? (
+                  <>
+                    <Icons.IconSparkles className="w-4 h-4 mr-2" />
+                    Grade with these materials
+                  </>
+                ) : (
+                  <>
+                    <Icons.IconSparkles className="w-4 h-4 mr-2" />
+                    Ingest Selected Files
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>
