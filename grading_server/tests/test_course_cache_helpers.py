@@ -197,6 +197,27 @@ def test_cached_course_file_hit_skips_download_when_fresh():
     assert hit["filename"] == "m9_reading.pdf"
 
 
+def test_cached_hit_skips_pending_with_chunks_and_heals_ready():
+    meta = {
+        "scope_key": "course:c1:file:f1",
+        "space_id": space_for_provider("openai").space_id,
+        "index_version": INDEX_VERSION,
+        "lms_host": ingest_service.trusted_lms_host(),
+    }
+    existing = {
+        "course_id": "c1", "canvas_file_id": "f1", "updated_at": "t1", "status": "pending",
+        "chunk_count": 4, "filename": "m9_reading.pdf",
+    }
+    with patch.object(ingest_service, "lookup_course_file", new=AsyncMock(return_value=existing)), \
+            patch.object(ingest_service, "get_embedding_meta", new=AsyncMock(return_value=meta)), \
+            patch.object(ingest_service, "_heal_registry_ready", new=AsyncMock()) as heal:
+        hit = asyncio.new_event_loop().run_until_complete(
+            ingest_service.cached_course_file_hit("c1", "f1", "t1", provider="openai")
+        )
+    assert hit["cached"] is True
+    heal.assert_awaited_once()
+
+
 def test_strip_nul_and_activate_strips_chunk_text():
     assert ingest_service._strip_nul("a\x00b") == "ab"
     assert ingest_service._registry_error_code(RuntimeError("code': '22P05'")) == "NUL_IN_TEXT"

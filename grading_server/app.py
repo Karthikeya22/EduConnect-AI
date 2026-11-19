@@ -3631,8 +3631,10 @@ async def grade_submission():
                 )
             )
         if space_status in ("reingest_required", "unknown_provenance"):
-            rag_degraded = True
             materials_status = "reingesting"
+            # Keep RAG when some chunks still match this space; only blank retrieve if none usable.
+            usable = int(space_eval.get("usable_count") or 0)
+            rag_degraded = usable <= 0
             course_for_reingest = str(data.get("course_id") or request.form.get("course_id") or "")
             try:
                 await mark_course_files_pending_reingest(
@@ -3643,7 +3645,8 @@ async def grade_submission():
             except Exception as mark_err:
                 print(f"[GRADE] mark pending reingest failed: {mark_err}", flush=True)
             print(
-                f"[GRADE] degrade-and-grade materials_status=reingesting reason={space_status}",
+                f"[GRADE] materials_status=reingesting reason={space_status} "
+                f"usable_count={usable} rag_degraded={rag_degraded}",
                 flush=True,
             )
 

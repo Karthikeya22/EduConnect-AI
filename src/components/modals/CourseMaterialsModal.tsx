@@ -10,6 +10,7 @@ import {
   materialIndexLabel,
   materialIndexState,
   MaterialIndexState,
+  selectFilesNeedingIngest,
   sourceUpdatedAt,
 } from '../../lib/courseFileRanker';
 import {
@@ -127,7 +128,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     setStatusRows(rows);
     setStatusAvailable(true);
     setStatusWarning(null);
-    return data;
+    return { data, rows };
   };
 
   const refreshLists = async (opts?: { preserveSelection?: boolean }) => {
@@ -145,8 +146,10 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
       }
 
       let statusOk = false;
+      let rows: CourseFileStatusRow[] = [];
       try {
-        await loadStatus('status');
+        const loaded = await loadStatus('status');
+        rows = loaded.rows;
         statusOk = true;
       } catch (err: any) {
         setStatusAvailable(false);
@@ -165,8 +168,9 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
         setFiles(sorted);
         if (!opts?.preserveSelection) {
           if (statusOk) {
-            const ingestible = sorted.filter((f) => isIngestibleFile(f));
-            setSelectedFiles(new Set(ingestible.map((f) => f.id)));
+            // Only queue files that still need work — never re-select all from scratch.
+            const needing = selectFilesNeedingIngest(sorted, rows);
+            setSelectedFiles(new Set(needing.map((f) => f.id)));
           } else {
             setSelectedFiles(new Set());
           }
@@ -228,9 +232,8 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
     setError(null);
     setVerifyNote(null);
     try {
-      const data = await loadStatus('verify');
+      const { data, rows } = await loadStatus('verify');
       const s = data?.summary || {};
-      const rows: CourseFileStatusRow[] = Array.isArray(data?.files) ? data.files : [];
       const byId = new Map(rows.map((row) => [String(row.canvas_file_id), row]));
       const canvasNotIndexed = files.filter((f) => {
         if (!isIngestibleFile(f)) return false;
@@ -341,7 +344,7 @@ export function CourseMaterialsModal({ courseId, assignmentId, onClose, onIngest
 
       await refreshLists({ preserveSelection: true });
       try {
-        const verified = await loadStatus('verify');
+        const { data: verified } = await loadStatus('verify');
         const s = verified?.summary || {};
         setVerifyNote(
           `After ingest: ${s.indexed || 0} indexed, ${s.broken || 0} broken, ${s.failed || 0} failed.`

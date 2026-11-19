@@ -54,4 +54,16 @@ if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'pending', st
 if (materialIndexState(indexedFile, { canvas_file_id: '1', status: 'pending', stored_chunks: 0 }) !== 'pending') {
   throw new Error('expected pending-without-chunks to stay pending');
 }
+{
+  const retained = selectFilesNeedingIngest(
+    [{ id: 1, display_name: 'a.pdf', updated_at: '2026-01-01T00:00:00Z' }],
+    [{ canvas_file_id: '1', status: 'pending', updated_at: '2026-01-01T00:00:00Z', stored_chunks: 4, chunk_count: 4 }],
+  );
+  if (retained.length !== 0) throw new Error('pending-with-chunks must not be re-queued');
+  const failed = selectFilesNeedingIngest(
+    [{ id: 2, display_name: 'b.pdf', updated_at: '2026-01-01T00:00:00Z' }],
+    [{ canvas_file_id: '2', status: 'failed', updated_at: '2026-01-01T00:00:00Z' }],
+  );
+  if (failed.map((f) => String(f.id)).join() !== '2') throw new Error('failed must still need ingest');
+}
 console.log('courseFileRanker.test.ts PASS');

@@ -223,6 +223,7 @@ async def evaluate_embedding_space(
                 "status": "migration_required",
                 "message": "Provenance columns are missing; apply the embedding provenance migration.",
                 "mismatched": [],
+                "usable_count": 0,
             }
         raise
     if has_legacy_chunks or any(not m.get("space_id") for m in metas):
@@ -230,25 +231,38 @@ async def evaluate_embedding_space(
             "status": "unknown_provenance",
             "message": "Stored course materials have no recorded embedding space. Re-ingest them with the current provider.",
             "mismatched": [m.get("scope_key") for m in metas if m.get("scope_key")],
+            "usable_count": 0,
         }
     mismatched = [
         m["scope_key"]
         for m in metas
         if m["space_id"] != space.space_id or m.get("index_version") != INDEX_VERSION
     ]
+    usable_count = sum(
+        1
+        for m in metas
+        if m.get("space_id") == space.space_id and m.get("index_version") == INDEX_VERSION
+    )
     if mismatched:
         return {
             "status": "reingest_required",
             "message": (
                 f"Materials in {', '.join(sorted(mismatched))} were embedded in a different space or index version. "
-                "Reindexing in the background; this grade uses rubric + submission only."
+                "Reindexing in the background; retained matching materials stay available for this grade."
+                if usable_count
+                else (
+                    f"Materials in {', '.join(sorted(mismatched))} were embedded in a different space or index version. "
+                    "Reindexing in the background; this grade uses rubric + submission only."
+                )
             ),
             "mismatched": mismatched,
+            "usable_count": usable_count,
         }
     return {
         "status": "active" if metas else "no_corpus",
         "message": "",
         "mismatched": [],
+        "usable_count": usable_count if metas else 0,
     }
 
 
@@ -368,11 +382,15 @@ def course_cache_is_fresh(
     updated_at: str,
     space: EmbeddingSpace,
 ) -> bool:
-    """Skip re-embedding only when the stored file is provably the same source in the same space."""
+    """Skip re-embedding when chunks exist for the same Canvas revision in the same space.
+
+    Status may be pending (crash / reingest mark) — chunks still count as retained.
+    """
     if not registry_row or not meta:
         return False
+    chunks = int(registry_row.get("chunk_count") or registry_row.get("stored_chunks") or 0)
     return (
-        registry_row.get("status") == "ready"
+        chunks > 0
         and (registry_row.get("updated_at") or "") == updated_at
         and str(registry_row.get("course_id")) == str(course_id)
         and str(registry_row.get("canvas_file_id")) == str(canvas_file_id)
@@ -382,6 +400,27 @@ def course_cache_is_fresh(
         and bool(trusted_lms_host())
         and meta.get("lms_host") == trusted_lms_host()
     )
+
+
+async def _heal_registry_ready(existing: dict) -> None:
+    """Flip pending→ready when we skip because chunks are still good."""
+    if not existing or existing.get("status") == "ready":
+        return
+    row = {
+        "course_id": str(existing.get("course_id") or ""),
+        "canvas_file_id": str(existing.get("canvas_file_id") or ""),
+        "filename": existing.get("filename") or "",
+        "updated_at": existing.get("updated_at") or "",
+        "status": "ready",
+        "chunk_count": int(existing.get("chunk_count") or 0),
+        "last_error": "",
+    }
+    if not row["course_id"] or not row["canvas_file_id"]:
+        return
+    try:
+        await _upsert_registry(row)
+    except Exception as e:
+        print(f"[course_cache] heal ready skipped: {e}")
 
 
 def assignment_content_hash(text: str | None, source_name: str) -> str:
@@ -590,7 +629,7 @@ async def cached_course_file_hit(
 ) -> dict | None:
     """Return a skip payload when this Canvas file is already embedded. No download."""
     existing = await lookup_course_file(course_id, canvas_file_id)
-    if not existing or existing.get("status") != "ready":
+    if not existing:
         return None
     scope_key = course_file_scope_key(course_id, canvas_file_id)
     meta = await get_embedding_meta(scope_key)
@@ -603,6 +642,7 @@ async def cached_course_file_hit(
         space=space,
     ):
         return None
+    await _heal_registry_ready(existing)
     return {
         "status": "success",
         "skipped": True,
@@ -663,12 +703,13 @@ async def ingest_course_file(
     updated_at = updated_at or ""
     scope_key = course_file_scope_key(course_id, canvas_file_id)
     existing = await lookup_course_file(course_id, canvas_file_id)
-    if existing and existing.get("status") == "ready":
+    if existing:
         meta = await get_embedding_meta(scope_key)
         if course_cache_is_fresh(
             existing, meta,
             course_id=course_id, canvas_file_id=canvas_file_id, updated_at=updated_at, space=space,
         ):
+            await _heal_registry_ready(existing)
             return {
                 "status": "success",
                 "skipped": True,

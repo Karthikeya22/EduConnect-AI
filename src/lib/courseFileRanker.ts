@@ -113,7 +113,7 @@ export function materialIndexLabel(state: MaterialIndexState): string {
   }
 }
 
-// Doc files absent/failed/pending/stale, or ready-but-broken (zero verified chunks).
+// Doc files absent/failed/stale/broken. Pending-with-chunks + matching stamp is retained — skip.
 export function selectFilesNeedingIngest(
   files: CanvasCourseFile[],
   statusRows: CourseFileStatusRow[]
@@ -122,13 +122,20 @@ export function selectFilesNeedingIngest(
   return files.filter(isDocCourseFile).filter((f) => {
     const row = byId.get(String(f.id));
     if (!row) return true;
-    if (row.status !== 'ready') return true;
-    if ((row.updated_at || '') !== sourceUpdatedAt(f)) return true;
-    // ready + verified false / zero stored chunks is a broken index — reingest
-    if (row.verified === false) return true;
-    if (typeof row.stored_chunks === 'number' && row.stored_chunks <= 0) return true;
-    if (typeof row.chunk_count === 'number' && row.chunk_count <= 0) return true;
-    return false;
+    const chunks = Number(row.stored_chunks ?? row.chunk_count ?? 0);
+    const stampOk = (row.updated_at || '') === sourceUpdatedAt(f);
+    // Retained after crash/reingest mark: do not re-queue from scratch.
+    if ((row.status === 'pending' || row.status === 'ready') && chunks > 0 && stampOk) {
+      if (row.status === 'ready' && row.verified === false) return true;
+      return false;
+    }
+    if (row.status === 'ready') {
+      if (!stampOk) return true;
+      if (row.verified === false) return true;
+      if (chunks <= 0) return true;
+      return false;
+    }
+    return true;
   });
 }
 
