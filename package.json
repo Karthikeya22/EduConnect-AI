@@ -10,7 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test:critical": "python -m grading_server.tests.test_platform_invariants && npx vite-node src/lib/courseFileRanker.test.ts && npx vite-node src/lib/materialsReadySummary.test.ts"
+    "test:critical": "python -m grading_server.tests.test_platform_invariants && npx vite-node src/lib/courseFileRanker.test.ts && npx vite-node src/lib/materialsReadySummary.test.ts && npx vite-node src/lib/gradeRequestQueue.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.40.0",

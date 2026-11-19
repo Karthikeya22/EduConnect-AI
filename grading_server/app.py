@@ -2082,6 +2082,29 @@ _EMBED_CONCURRENCY = threading.Semaphore(2)
 # timeout starved the default to_thread pool and left /api/grade hung for minutes.
 _GRADE_LLM_CONCURRENCY = 3
 _GRADE_LLM_SEM = threading.Semaphore(_GRADE_LLM_CONCURRENCY)
+# Cap concurrent /api/grade requests. Continuous grading of large DOCX/PDF
+# submissions stacked in threaded Flask and OOM'd the 2GB Render instance.
+_GRADE_MAX_CONCURRENT = max(1, int(os.getenv("GRADE_MAX_CONCURRENT", "1")))
+_GRADE_INFLIGHT = threading.Semaphore(_GRADE_MAX_CONCURRENT)
+
+
+def _with_grade_slot(fn):
+    """One heavy grade at a time (override with GRADE_MAX_CONCURRENT)."""
+    async def wrapper(*args, **kwargs):
+        if not _GRADE_INFLIGHT.acquire(blocking=True, timeout=180):
+            return jsonify({
+                "error": "GRADE_BUSY",
+                "message": (
+                    "Another grade is still running on this server. "
+                    "Wait a moment and retry — this limit prevents memory crashes."
+                ),
+            }), 503
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _GRADE_INFLIGHT.release()
+    wrapper.__name__ = getattr(fn, "__name__", "grade_submission")
+    return wrapper
 
 _RETRIEVAL_UNAVAILABLE_CTX = {
     "infrastructure_error": (
@@ -3272,6 +3295,7 @@ def get_graph():
 
 @app.route("/api/grade", methods=["POST"])
 @require_access("assignment")
+@_with_grade_slot
 async def grade_submission():
     s = time.time()
     try:

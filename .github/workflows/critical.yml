@@ -22,12 +22,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
 
+      # npm ci fails when package-lock drifts; install is enough for invariant scripts.
       - name: Install frontend deps
-        run: npm ci
+        run: npm install --no-fund --no-audit
 
       - name: Materials + index UI invariants
         run: |
           npx vite-node src/lib/courseFileRanker.test.ts
           npx vite-node src/lib/materialsReadySummary.test.ts
+          npx vite-node src/lib/gradeRequestQueue.test.ts

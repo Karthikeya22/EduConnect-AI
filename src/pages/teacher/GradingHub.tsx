@@ -22,6 +22,7 @@ import {
   summarizeGrade,
 } from '../../lib/gradeDisplay';
 import { joinOrStartCourseIngest } from '../../lib/courseIngestCoordinator';
+import { enqueueGradeRequest } from '../../lib/gradeRequestQueue';
 import { fetchWithRetry } from '../../lib/fetchWithRetry';
 import {
   MaterialsReadySummary,
@@ -1370,7 +1371,9 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
 
     setLoadingStudents(prev => new Set(prev).add(studentId));
     setRowErrors(prev => { const n = { ...prev }; delete n[studentId]; return n; });
-    
+
+    // One grade at a time — parallel grades OOM Render and cause Failed to fetch.
+    return enqueueGradeRequest(async () => {
     try {
       await requireGradingSession();
       // Offline mock hub courses (101/102) grade without a Canvas token when the
@@ -1464,14 +1467,20 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           });
         }
 
-        const res = await fetch(`${gradingApiBase()}/api/grade`, {
-          method: 'POST',
-          headers,
-          body
-        });
+        const res = await fetchWithRetry(
+          `${gradingApiBase()}/api/grade`,
+          { method: 'POST', headers, body },
+          { retries: 3, baseDelayMs: 2000 },
+        );
 
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
+          if (data.error === 'GRADE_BUSY' || res.status === 503) {
+             throw new Error(
+               data.message
+                 || 'Grading server is busy or restarting. Wait a few seconds and retry.',
+             );
+          }
           const authMsg = authErrorMessage(data);
           if (authMsg) {
              throw new Error(authMsg);
@@ -1639,6 +1648,7 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         return next;
       });
     }
+    });
   };
 
   const totalUngraded = studentsData.filter(s => s.status === 'Ungraded').length;
