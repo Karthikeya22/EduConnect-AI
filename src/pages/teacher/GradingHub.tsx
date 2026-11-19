@@ -1018,13 +1018,29 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
         course_id: selectedCourse,
         canvas_base_url: localStorage.getItem('canvas_base_url') || '',
         course_material_text: materialText,
-        rubric_criteria: rubric.map((r: any) => ({
-          criterion_id: r.id || r.description,
-          title: r.description,
-          description: r.long_description || r.description,
-          max_score: r.points,
-          dimension: 'content' // default
-        })),
+        rubric_criteria: rubric.map((r: any) => {
+          const ratings = Array.isArray(r.ratings) ? r.ratings : [];
+          const ratingLines = ratings
+            .map((rt: any) => {
+              const pts = rt?.points;
+              const name = rt?.description || '';
+              const detail = rt?.long_description || '';
+              return [pts != null ? `${pts} pts` : '', name, detail].filter(Boolean).join(' — ');
+            })
+            .filter(Boolean);
+          return {
+            criterion_id: r.id || r.description,
+            title: r.description,
+            description: [r.long_description || r.description || '', ...ratingLines].filter(Boolean).join('\n'),
+            max_score: r.points,
+            dimension: 'content',
+            ratings: ratings.map((rt: any) => ({
+              points: rt?.points,
+              description: rt?.description || '',
+              long_description: rt?.long_description || '',
+            })),
+          };
+        }),
         exemplars: []
       })
     });
@@ -1427,9 +1443,19 @@ export default function GradingHub({ onBack, onNavigateTo, currentPath, onLogout
           rawPoints == null || rawPoints === ''
             ? null
             : Number(rawPoints);
+        const liveRubric = (assignMeta as any)?.rubric || [];
         const assignmentPayload = {
           assignment_name: (assignMeta as any)?.name || (assignMeta as any)?.title || '',
           assignment_description: (assignMeta as any)?.description || (assignMeta as any)?.message || '',
+          rubric_ratings: liveRubric.map((r: any) => ({
+            criterion_id: r.id || r.description,
+            title: r.description,
+            ratings: (Array.isArray(r.ratings) ? r.ratings : []).map((rt: any) => ({
+              points: rt?.points,
+              description: rt?.description || '',
+              long_description: rt?.long_description || '',
+            })),
+          })),
           // Required for no-rubric inferred / points-anchored scored policies.
           ...(Number.isFinite(parsedPoints) && parsedPoints > 0
             ? { points_possible: parsedPoints }

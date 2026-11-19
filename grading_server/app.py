@@ -132,6 +132,7 @@ class GradingState(TypedDict):
     chunk_embeddings: list[list[float]]
     submission_concepts: list[str]
     rubric_criteria: list[dict]
+    rubric_ratings: list[dict]
     relevant_chunks: list[dict]
     exemplars: dict  # criterion_id -> list of exemplar dicts
     verdicts: list[dict]
@@ -501,7 +502,7 @@ _EVIDENCE_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "were", "was", "are", "is",
     "into", "onto", "about", "their", "there", "have", "has", "had", "been", "being",
     "which", "while", "where", "when", "what", "also", "than", "then", "them", "they",
-    "using", "used", "use", "via", "per", "within", "across", "among", "such", "based",
+    "via", "per", "within", "across", "among", "such", "based",
 }
 
 
@@ -509,7 +510,7 @@ def _content_tokens(text: str) -> list[str]:
     return [
         _light_stem(t)
         for t in re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(t) > 3 and t not in _EVIDENCE_STOPWORDS
+        if t not in _EVIDENCE_STOPWORDS and (len(t) > 3 or t == "ai")
     ]
 
 
@@ -1279,6 +1280,94 @@ def _normalize_rubric(criteria: list | None) -> list[dict]:
     return out
 
 
+def _rating_point_list(raw) -> list[float]:
+    points: list[float] = []
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return [_as_points(raw)]
+    for item in raw or []:
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            points.append(_as_points(item))
+        elif isinstance(item, dict):
+            p = item.get("points", item.get("max_score"))
+            if p is not None and p != "":
+                points.append(_as_points(p, 0.0))
+    out: list[float] = []
+    seen: set[float] = set()
+    for p in points:
+        key = round(p, 4)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _snap_to_rating_points(score: float, points: list[float]) -> float:
+    if not points:
+        return score
+    for p in points:
+        if abs(score - p) <= 1e-6:
+            return p
+    return min(points, key=lambda p: (abs(p - score), -p))
+
+
+def _rubric_rating_block(ratings) -> str:
+    rows: list[str] = []
+    for item in ratings or []:
+        if not isinstance(item, dict):
+            continue
+        pts = item.get("points", item.get("max_score"))
+        if pts is None or pts == "":
+            continue
+        name = str(item.get("description") or "").strip()
+        detail = str(item.get("long_description") or "").strip()
+        line = f"- {_as_points(pts, 0.0):g} pts"
+        if name:
+            line += f" — {name}"
+        if detail and detail.lower() != name.lower():
+            line += f": {detail}"
+        rows.append(line)
+    legal = _rating_point_list(ratings)
+    if not rows or not legal:
+        return ""
+    listed = ", ".join(f"{p:g}" for p in legal)
+    return (
+        "=== RUBRIC RATINGS (the only legal scores) ===\n"
+        + "\n".join(rows)
+        + f"\n- score MUST be exactly one of: {listed}.\n"
+        "- If the student work is present, a missing verbatim quote does not move the score off those values. "
+        "Set evidence_anchor to 'not found' and say the quote was not linked.\n\n"
+    )
+
+
+def _attach_live_ratings(rubric: list[dict], live) -> list[dict]:
+    if not live:
+        return rubric
+    by_id: dict[str, list] = {}
+    by_title: dict[str, list] = {}
+    for row in live:
+        if not isinstance(row, dict):
+            continue
+        ratings = row.get("ratings")
+        if not ratings:
+            continue
+        cid = str(row.get("criterion_id") or row.get("id") or "").strip()
+        title = str(row.get("title") or row.get("description") or "").strip().lower()
+        if cid:
+            by_id[cid] = ratings
+        if title:
+            by_title[title] = ratings
+    for c in rubric:
+        if c.get("ratings"):
+            continue
+        cid = str(c.get("criterion_id") or "")
+        title = str(c.get("title") or "").strip().lower()
+        ratings = by_id.get(cid) or by_title.get(title)
+        if ratings:
+            c["ratings"] = ratings
+    return rubric
+
+
 def _faculty_friendly_guard_note(note: str) -> str:
     """Translate internal guard jargon into lecturer-facing language."""
     n = (note or "").strip()
@@ -1472,10 +1561,18 @@ def _reconcile_verdict_explanation(
                 withheld = f"Awarded {score:g}/{max_score:g}. {just}"
                 just = ""
             else:
-                withheld = (
-                    f"Awarded {score:g}/{max_score:g}. The response does not demonstrate "
-                    f"{criterion} with enough depth or specificity for full marks."
-                )
+                submission_present = bool(str(v.get("submission_text") or "").strip())
+                if anchor_missing and submission_present:
+                    withheld = (
+                        f"Awarded {score:g}/{max_score:g}. No verifiable quote from the student "
+                        f"submission was linked to {criterion}. The score does not drop below the "
+                        "rubric rating for the work that is present."
+                    )
+                else:
+                    withheld = (
+                        f"Awarded {score:g}/{max_score:g}. The response does not demonstrate "
+                        f"{criterion} with enough depth or specificity for full marks."
+                    )
         if not credit:
             if covered:
                 credit = (
@@ -1560,15 +1657,18 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     claims_full = _justification_claims_full_credit(just_text)
     teacher_notes: list[str] = []  # only real scoring explanations shown to teachers
 
-    # Missing verifiable quote: cap instructor criteria at ≤25% (no restore later).
+    # Missing quote with no submission text: cap at ≤25%. A present submission keeps its score.
+    submission_present = bool(submission_text.strip())
     if anchor_missing and not integrity_crit:
-        cap = max(0, math.ceil(max_score * 0.25))
-        if score > cap:
-            score = cap
-            teacher_notes.append("Score capped: no verifiable student evidence_anchor.")
+        if not submission_present:
+            cap = max(0, math.ceil(max_score * 0.25))
+            if score > cap:
+                score = cap
+                teacher_notes.append("Score capped: no verifiable student evidence_anchor.")
         if status == "full":
-            status = "partial"
             v["ungrounded_full"] = True
+            if not submission_present:
+                status = "partial"
     elif anchor_missing and integrity_crit:
         # Integrity without a quote: keep a soft advisory score but never restore to full below.
         cap = max(0, math.ceil(max_score * 0.25))
@@ -1637,9 +1737,16 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
     if isinstance(required, list) and len(required) > 0 and not integrity_crit and has_evidence:
         haystack = _local_evidence_haystack(anchor, submission_text)
         covered = _infer_covered_concepts(required, covered, haystack)
-    covered = _reconcile_covered_concepts(
-        covered, v.get("missing_keywords") or [], has_evidence=has_evidence
-    )
+    if anchor_missing and submission_present:
+        text_l = submission_text.lower()
+        covered = [c for c in covered if str(c).strip() and str(c).strip().lower() in text_l]
+        covered = _reconcile_covered_concepts(
+            covered, v.get("missing_keywords") or [], has_evidence=True
+        )
+    else:
+        covered = _reconcile_covered_concepts(
+            covered, v.get("missing_keywords") or [], has_evidence=has_evidence
+        )
     # Demonstrated list must match what concept scoring counts — drop LLM fluff
     # that is not a required rubric concept (was confusing teachers).
     covered = _covered_matching_required(covered, required if isinstance(required, list) else [])
@@ -1749,6 +1856,15 @@ def _apply_verdict_score_guards(v: dict, max_score) -> dict:
             elif max_score > 0 and not anchor_missing:
                 score = max_score  # preserve the only available credit point when evidenced
 
+    snapped = _snap_to_rating_points(score, _rating_point_list(v.get("rating_points")))
+    if snapped != score:
+        score = snapped
+        if max_score and score + 1e-9 >= max_score:
+            status = "full"
+        elif score <= 0:
+            status = "missing"
+        else:
+            status = "partial"
     v["score"] = score
     v["status"] = status
     v["evidence_anchor"] = "not found" if anchor_missing else anchor
@@ -1935,7 +2051,10 @@ async def run_retrieve(state: GradingState) -> dict:
                 resolution.lookup.validation_errors,
             )
 
-        rubric = _normalize_rubric(list(resolution.rubric_criteria))
+        rubric = _attach_live_ratings(
+            _normalize_rubric(list(resolution.rubric_criteria)),
+            state.get("rubric_ratings"),
+        )
         policy = resolution.policy.model_dump() if resolution.policy else None
         lookup_status = resolution.lookup.status
 
@@ -2275,16 +2394,28 @@ async def _gp(
             "with criterion-relevant depth, correct placement when sections apply, and a strong evidence_anchor.\n\n"
         )
 
+    rating_block = _rubric_rating_block(c.get("ratings"))
+    if rating_block:
+        score_rules = (
+            rating_block
+            + f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; "
+            f"partial ⇒ a lower rating on the list above.\n"
+            f"- Full credit only when the work meets the top rating, including its course-tie rule when one is written there.\n\n"
+        )
+    else:
+        score_rules = (
+            f"=== PARTIAL CREDIT BANDS (max={max_score}) ===\n"
+            f"- Mention-only / keyword presence without substance: score ≤ {max(0, math.ceil(max_score * 0.40))}.\n"
+            f"- Thin / incomplete / partially misplaced / poorly formatted for genre: score ≤ {max(0, math.ceil(max_score * 0.70))}.\n"
+            f"- Full credit ONLY if the criterion is substantially complete for the points, "
+            f"follows assignment instructions, meets genre-appropriate method standards, "
+            f"and has a criterion-relevant student quote (content may appear anywhere in the submission "
+            f"unless the rubric/assignment explicitly requires a named section).\n"
+            f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
+        )
     credit_bands = (
-        f"=== PARTIAL CREDIT BANDS (max={max_score}) ===\n"
-        f"- Mention-only / keyword presence without substance: score ≤ {max(0, math.ceil(max_score * 0.40))}.\n"
-        f"- Thin / incomplete / partially misplaced / poorly formatted for genre: score ≤ {max(0, math.ceil(max_score * 0.70))}.\n"
-        f"- Full credit ONLY if the criterion is substantially complete for the points, "
-        f"follows assignment instructions, meets genre-appropriate method standards, "
-        f"and has a criterion-relevant student quote (content may appear anywhere in the submission "
-        f"unless the rubric/assignment explicitly requires a named section).\n"
-        f"- status must match score: full ⇒ score=={max_score}; missing ⇒ 0; partial ⇒ between.\n\n"
-        f"=== FACULTY EXPLANATION (explain the score — do NOT change scoring standards) ===\n"
+        score_rules
+        + f"=== FACULTY EXPLANATION (explain the score — do NOT change scoring standards) ===\n"
         f"- First decide score/status using the scoring philosophy and bands above. Then explain that decision.\n"
         f"- credit_awarded_for: brief note on what earned the points you awarded (must match the score).\n"
         f"- points_withheld_because: when score < {max_score}, briefly why full marks were not given "
@@ -2339,7 +2470,8 @@ async def _gp(
             f"- PRIMARY EVIDENCE: Grade from the STUDENT SUBMISSION. evidence_anchor MUST be a verbatim quote "
             f"from the student text that actually demonstrates this structural requirement.\n"
             f"- VISUALS/TABLES: [FIGURE / VISUAL ...] and [TABLE ...] blocks are real student content — credit them.\n"
-            f"- If no valid student quote exists, set evidence_anchor to 'not found' (this will reduce score).\n"
+            f"- If no valid student quote exists, set evidence_anchor to 'not found'. "
+            f"Do not lower the score solely because the quote is missing; score from the rubric ratings.\n"
             f"- Course materials: soft accuracy check for terminology when present. Do NOT invent slide-only requirements "
             f"absent from the rubric. If the student clearly CONTRADICTS retrieved materials, set material_alignment='contradicts'. "
             f"If materials are silent/thin, use material_alignment='neutral' and grade from rubric + assignment context.\n"
@@ -2359,7 +2491,8 @@ async def _gp(
             f"verbatim student quote that is clearly relevant to this criterion.\n"
             f"- Paraphrase is fine when it shows real understanding; keyword stuffing is not full credit.\n"
             f"- VISUALS/TABLES: [FIGURE / VISUAL ...] / [TABLE ...] markers are real evidence when present.\n"
-            f"- If no valid student quote exists, set evidence_anchor to 'not found'.\n"
+            f"- If no valid student quote exists, set evidence_anchor to 'not found'. "
+            f"Do not lower the score solely because the quote is missing; score from the rubric ratings.\n"
             f"- Course materials: soft accuracy check. Penalize clear contradictions (material_alignment='contradicts'). "
             f"Do NOT zero a criterion because slides omit the topic or use a different example domain. "
             f"Prefer the rubric over unrelated retrieved chunks. Silent materials ⇒ material_alignment='neutral'.\n"
@@ -2496,6 +2629,7 @@ async def _gp(
         "placement_issue": not placement_ok,
         "section_map_reliable": section_map_reliable,
         "submission_text": txt,
+        "rating_points": _rating_point_list(c.get("ratings")),
         "ungrounded_full": False,
     }
     # Proposal plans often name a valid alternate method vs slides — do not treat as contradict.
@@ -3670,6 +3804,7 @@ async def grade_submission():
             "assignment_context": assignment_context,
             "assignment_name": assign_name,
             "assignment_description": assign_desc[:8000],
+            "rubric_ratings": data.get("rubric_ratings") if isinstance(data.get("rubric_ratings"), list) else [],
             "points_possible": points_possible,
             "approved_template_id": approved_template_id,
             "explicit_outcomes": explicit_outcomes,

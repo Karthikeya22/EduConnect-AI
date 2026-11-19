@@ -18,6 +18,82 @@ from grading_server.app import (
 )
 
 
+def test_present_submission_keeps_rubric_score_when_quote_missing():
+    """A file that is on the page is not a 25% student failure when the quote matcher misses."""
+    submission = (
+        "This semester I was surprised by how useful artificial intelligence is. "
+        "Using AI to generate research questions, create graphs, and analyze data "
+        "showed me it can support research. We used this in the methods assignment."
+    )
+    v = _apply_verdict_score_guards(
+        {
+            "score": 1.5,
+            "status": "partial",
+            "evidence_anchor": "not found",
+            "criterion_name": "Question 1",
+            "required_concepts": [],
+            "covered_concepts": ["research questions"],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Answered the surprise question and tied it to the methods assignment.",
+            "credit_awarded_for": "",
+            "points_withheld_because": "",
+            "submission_text": submission,
+            "rating_points": [3, 1.5, 0],
+        },
+        3,
+    )
+    assert v["score"] == 1.5
+    withheld = str(v.get("points_withheld_because") or "").lower()
+    assert withheld
+    assert "depth or specificity" not in withheld
+    assert "methods assignment" in withheld
+    assert any("research" in c.lower() for c in v["covered_concepts"])
+
+
+def test_missing_quote_on_present_work_does_not_invent_depth_reason():
+    v = _apply_verdict_score_guards(
+        {
+            "score": 1.5,
+            "status": "partial",
+            "evidence_anchor": "not found",
+            "criterion_name": "Question 1",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "",
+            "points_withheld_because": "",
+            "submission_text": "Using AI to generate research questions, create graphs, and analyze data.",
+            "rating_points": [3, 1.5, 0],
+        },
+        3,
+    )
+    withheld = str(v.get("points_withheld_because") or "").lower()
+    assert "quote" in withheld
+    assert "depth or specificity" not in withheld
+
+
+def test_off_band_score_snaps_to_nearest_rating():
+    v = _apply_verdict_score_guards(
+        {
+            "score": 1,
+            "status": "partial",
+            "evidence_anchor": "not found",
+            "criterion_name": "Question 1",
+            "required_concepts": [],
+            "covered_concepts": [],
+            "material_alignment": "neutral",
+            "placement_ok": True,
+            "justification": "Partial answer.",
+            "submission_text": "Using AI to generate research questions, create graphs, and analyze data.",
+            "rating_points": [3, 1.5, 0],
+        },
+        3,
+    )
+    assert v["score"] == 1.5
+
+
 def test_missing_anchor_caps_at_25_percent():
     v = _apply_verdict_score_guards(
         {

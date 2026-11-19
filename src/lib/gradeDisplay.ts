@@ -260,14 +260,15 @@ export function buildDeductionExplanation(
     ...new Set([...(v.missing_keywords || []).map((c) => String(c).trim()), ...missingFromRequired]),
   ].filter(Boolean);
 
-  if (withheld && isProcessOnly(withheld)) {
+  // A missing-quote sentence is the reason. Replace it only when a real content gap exists.
+  if (withheld && isProcessOnly(withheld) && gaps.length) {
     withheld = null;
   }
-  if (credit && belowMax && isProcessOnly(credit)) {
+  if (credit && belowMax && isProcessOnly(credit) && gaps.length) {
     credit = null;
   }
 
-  if (belowMax && (!withheld || isProcessOnly(withheld))) {
+  if (belowMax && (!withheld || (isProcessOnly(withheld) && gaps.length))) {
     if (gaps.length) {
       withheld = `Not full credit: missing or underdeveloped — ${gaps.slice(0, 6).join(', ')}.`;
     } else if (justification && !isProcessOnly(justification)) {

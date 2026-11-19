@@ -234,11 +234,13 @@ const processOnly = buildDeductionExplanation({
   missing_keywords: [],
 });
 assert(
-  processOnly.pointsWithheldBecause?.toLowerCase().includes('depth') ||
-    processOnly.pointsWithheldBecause?.toLowerCase().includes('specificity'),
-  'process-only withheld replaced with content reason',
+  processOnly.pointsWithheldBecause?.toLowerCase().includes('verifiable quote'),
+  'missing-quote reason is kept when there is no content gap',
 );
-assert(!processOnly.pointsWithheldBecause?.toLowerCase().includes('verifiable quote'), 'no quote-jargon withheld');
+assert(
+  !processOnly.pointsWithheldBecause?.toLowerCase().includes('depth'),
+  'missing quote is not rewritten as a depth failure',
+);
 assert(!processOnly.justification, 'no duplicate body for process-only drafts');
 
 const deductionHtml = renderToStaticMarkup(
